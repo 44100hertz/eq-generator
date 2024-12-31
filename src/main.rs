@@ -8,19 +8,19 @@ fn main() {
     let measurements = [
         "spectrum1.txt",
         "spectrum2.txt",
-    ].iter().map(|file| Graph::from_audacity_spectogram(file).resample(eq_points())).collect();
+        "spectrum3.txt",
+        "spectrum4.txt",
+    ].iter().map(|file| Graph::from_audacity_spectogram(file).resample(eq_points())).collect::<Vec<_>>();
     let target = Graph::from_audacity_spectogram("target.txt").resample(eq_points());
     let rms = rms(measurements);
-    let comp_raw = Graph {
+    let comp = Graph {
         points: eq_points().into_iter().map(|freq| {
             Point {
                 x: freq,
-                y: target.point(freq) - rms.point(freq),
+                y: target.point(freq) / rms.point(freq),
             }
         }).collect()
     };
-    let comp_max = comp_raw.max();
-    let comp = comp_raw.map(|x: f64| x - comp_max);
     let mut outfile = File::create("autoeq.csv").unwrap();
     outfile.write_all(comp.to_jamesdsp_eq().as_bytes()).unwrap();
 }
@@ -31,19 +31,19 @@ fn rms(graphs: Vec<Graph>) -> Graph {
     Graph {
         points: (0..graphs[0].points.len()).map(|i| {
             let sum_squares = graphs.iter().fold(0.0, |acc, graph| {
-                acc + db_to_linear(graph.points[i].y)
+                acc + graph.points[i].y
             });
             let rms_sum = (sum_squares / graphs.len() as f64).sqrt();
             Point {
                 x: graphs[0].points[i].x,
-                y: linear_to_db(rms_sum),
+                y: rms_sum,
             }
         }).collect()
     }
 }
 
-fn db_to_linear(db: f64) -> f64 { 10.0_f64.powf(db / 10.0) }
-fn linear_to_db(linear: f64) -> f64 { linear.log10() * 10.0 }
+fn db_to_linear(db: f64) -> f64 { 10.0_f64.powf((db + 60.0) / 10.0) }
+fn ratio_to_db(ratio: f64) -> f64 { ratio.log10() * 10.0 }
 
 fn eq_points() -> Vec<f64> {
     // how many points per octave?
@@ -65,7 +65,7 @@ fn eq_points() -> Vec<f64> {
             ],
         };
         let dbs = equal_loudness.point(freq);
-        400.0 / dbs
+        500.0 / dbs
     }
     let mut freq = BOTTOM_F;
     let mut out = vec![];
@@ -77,7 +77,6 @@ fn eq_points() -> Vec<f64> {
     out
 }
 
-// an array of points, frequency to db
 struct Graph {
     points: Vec<Point>,
 }
@@ -94,7 +93,7 @@ impl Graph {
                 let mut fields = line.split("\t");
                 Point {
                     x: fields.next().unwrap().parse().unwrap(),
-                    y: fields.next().unwrap().parse().unwrap(),
+                    y: db_to_linear(fields.next().unwrap().parse().unwrap()),
                 }
             }).collect()
         }
@@ -102,8 +101,10 @@ impl Graph {
 
     fn to_jamesdsp_eq(&self) -> String {
         let mut out = String::new();
-        for point in self.points.iter() {
-            out.push_str(format!("{:.3}\t{:.3}\n", point.x, point.y).as_str())
+        let dbs = self.map(ratio_to_db);
+        let max = dbs.max();
+        for point in dbs.points {
+            out.push_str(format!("{:.3}\t{:.3}\n", point.x, point.y - max).as_str())
         }
         out
     }
@@ -149,11 +150,11 @@ impl Graph {
                 let mut sum = 0_f64;
                 for i in 0..20 {
                     let x = x1 + (x2 - x1) * i as f64 / 20.0;
-                    sum += db_to_linear(self.point(x)).powf(2.0);
+                    sum += self.point(x).powf(2.0);
                 }
                 Point {
                     x: *point,
-                    y: linear_to_db((sum / 20.0).sqrt()),
+                    y: (sum / 20.0).sqrt(),
                 }
             }).collect()
         }
