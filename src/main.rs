@@ -31,7 +31,7 @@ fn rms(graphs: Vec<Graph>) -> Graph {
     Graph {
         points: (0..graphs[0].points.len()).map(|i| {
             let sum_squares = graphs.iter().fold(0.0, |acc, graph| {
-                acc + graph.points[i].y
+                acc + graph.points[i].y.powf(2.0)
             });
             let rms_sum = (sum_squares / graphs.len() as f64).sqrt();
             Point {
