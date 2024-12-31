@@ -42,8 +42,8 @@ fn rms(graphs: Vec<Graph>) -> Graph {
     }
 }
 
-fn db_to_linear(db: f64) -> f64 { 10.0_f64.powf((db + 60.0) / 10.0) }
-fn ratio_to_db(ratio: f64) -> f64 { ratio.log10() * 10.0 }
+fn db_to_linear(db: f64) -> f64 { 10.0_f64.powf((db + 60.0) / 20.0) }
+fn ratio_to_db(ratio: f64) -> f64 { ratio.log10() * 20.0 }
 
 fn eq_points() -> Vec<f64> {
     // how many points per octave?
