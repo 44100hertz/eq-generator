@@ -3,6 +3,7 @@ use std::io::{Write};
 
 const BOTTOM_F: f64 = 50.0;
 const TOP_F: f64 = 14000.0;
+const RESOLUTION: f64 = 800.0;
 
 fn main() {
     let measurements = [
@@ -65,7 +66,7 @@ fn eq_points() -> Vec<f64> {
             ],
         };
         let dbs = equal_loudness.point(freq);
-        500.0 / dbs
+        RESOLUTION / dbs
     }
     let mut freq = BOTTOM_F;
     let mut out = vec![];
