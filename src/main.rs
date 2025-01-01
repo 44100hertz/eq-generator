@@ -1,9 +1,9 @@
 use std::fs::{self, File};
-use std::io::{Write};
+use std::io::Write;
 
-const BOTTOM_F: f64 = 50.0;
-const TOP_F: f64 = 14000.0;
-const RESOLUTION: f64 = 800.0;
+const BOTTOM_F: f64 = 25.0;
+const TOP_F: f64 = 18000.0;
+const RESOLUTION: f64 = 600.0;
 
 fn main() {
     let measurements = [
@@ -11,40 +11,52 @@ fn main() {
         "spectrum2.txt",
         "spectrum3.txt",
         "spectrum4.txt",
-    ].iter().map(|file| Graph::from_audacity_spectogram(file).resample(eq_points())).collect::<Vec<_>>();
+    ]
+    .iter()
+    .map(|file| Graph::from_audacity_spectogram(file).resample(eq_points()))
+    .collect::<Vec<_>>();
     let target = Graph::from_audacity_spectogram("target.txt").resample(eq_points());
     let rms = rms(measurements);
     let comp = Graph {
-        points: eq_points().into_iter().map(|freq| {
-            Point {
+        points: eq_points()
+            .into_iter()
+            .map(|freq| Point {
                 x: freq,
                 y: target.point(freq) / rms.point(freq),
-            }
-        }).collect()
+            })
+            .collect(),
     };
     let mut outfile = File::create("autoeq.csv").unwrap();
-    outfile.write_all(comp.to_jamesdsp_eq().as_bytes()).unwrap();
+    outfile
+        .write_all(comp.to_jamesdsp_eq_android().as_bytes())
+        .unwrap();
 }
 
 // Assumes that graphs all have the same indices...
 // And that all y values are negative, no less than 120
 fn rms(graphs: Vec<Graph>) -> Graph {
     Graph {
-        points: (0..graphs[0].points.len()).map(|i| {
-            let sum_squares = graphs.iter().fold(0.0, |acc, graph| {
-                acc + graph.points[i].y.powf(2.0)
-            });
-            let rms_sum = (sum_squares / graphs.len() as f64).sqrt();
-            Point {
-                x: graphs[0].points[i].x,
-                y: rms_sum,
-            }
-        }).collect()
+        points: (0..graphs[0].points.len())
+            .map(|i| {
+                let sum_squares = graphs
+                    .iter()
+                    .fold(0.0, |acc, graph| acc + graph.points[i].y.powf(2.0));
+                let rms_sum = (sum_squares / graphs.len() as f64).sqrt();
+                Point {
+                    x: graphs[0].points[i].x,
+                    y: rms_sum,
+                }
+            })
+            .collect(),
     }
 }
 
-fn db_to_linear(db: f64) -> f64 { 10.0_f64.powf((db + 60.0) / 20.0) }
-fn ratio_to_db(ratio: f64) -> f64 { ratio.log10() * 20.0 }
+fn db_to_linear(db: f64) -> f64 {
+    10.0_f64.powf((db + 60.0) / 20.0)
+}
+fn ratio_to_db(ratio: f64) -> f64 {
+    ratio.log10() * 20.0
+}
 
 fn eq_points() -> Vec<f64> {
     // how many points per octave?
@@ -52,17 +64,17 @@ fn eq_points() -> Vec<f64> {
         // based on a rough tracing of equal loudness countour
         let equal_loudness = Graph {
             points: vec![
-                Point{x: 20.0, y: 109.0},
-                Point{x: 80.0, y: 82.0},
-                Point{x: 400.0, y: 62.0},
-                Point{x: 1000.0, y: 60.0},
-                Point{x: 1500.0, y: 64.0},
-                Point{x: 2500.0, y: 57.0},
-                Point{x: 4000.0, y: 57.0},
-                Point{x: 8500.0, y: 73.0},
-                Point{x: 15000.0, y: 72.0},
-                Point{x: 19000.0, y: 68.0},
-                Point{x: 30000.0, y: 130.0},
+                Point { x: 20.0, y: 109.0 },
+                Point { x: 80.0, y: 82.0 },
+                Point { x: 400.0, y: 62.0 },
+                Point { x: 1000.0, y: 60.0 },
+                Point { x: 1500.0, y: 64.0 },
+                Point { x: 2500.0, y: 57.0 },
+                Point { x: 4000.0, y: 57.0 },
+                Point { x: 8500.0, y: 73.0 },
+                Point { x: 15000.0, y: 72.0, },
+                Point { x: 19000.0, y: 68.0, },
+                Point { x: 30000.0, y: 130.0, },
             ],
         };
         let dbs = equal_loudness.point(freq);
@@ -89,14 +101,16 @@ impl Graph {
         // skip over headers
         lines.next().expect("Empty file!");
         Graph {
-            points: lines.filter(|line| !line.is_empty())
-                        .map(|line| {
-                let mut fields = line.split("\t");
-                Point {
-                    x: fields.next().unwrap().parse().unwrap(),
-                    y: db_to_linear(fields.next().unwrap().parse().unwrap()),
-                }
-            }).collect()
+            points: lines
+                .filter(|line| !line.is_empty())
+                .map(|line| {
+                    let mut fields = line.split("\t");
+                    Point {
+                        x: fields.next().unwrap().parse().unwrap(),
+                        y: db_to_linear(fields.next().unwrap().parse().unwrap()),
+                    }
+                })
+                .collect(),
         }
     }
 
@@ -110,11 +124,26 @@ impl Graph {
         out
     }
 
+    fn to_jamesdsp_eq_android(&self) -> String {
+        let mut out = "GraphicEQ: ".to_string();
+        let dbs = self.map(ratio_to_db);
+        let max = dbs.max();
+        for point in dbs.points {
+            out.push_str(format!("{:.3} {:.3};", point.x, point.y - max).as_str())
+        }
+        out
+    }
+
     fn point(&self, x: f64) -> f64 {
-        if let Some(lower) = self.points.windows(2).enumerate().find(|(_, fs)| fs[0].x <= x && fs[1].x >= x) {
+        if let Some(lower) = self
+            .points
+            .windows(2)
+            .enumerate()
+            .find(|(_, fs)| fs[0].x <= x && fs[1].x >= x)
+        {
             let lower = lower.0;
             let p1 = self.points[lower];
-            let p2 = self.points[lower+1];
+            let p2 = self.points[lower + 1];
             // lerp
             let slope = (p2.y - p1.y) / (p2.x - p1.x);
             p1.y + (x - p1.x) * slope
@@ -127,12 +156,14 @@ impl Graph {
 
     fn map(&self, tform: impl Fn(f64) -> f64) -> Graph {
         Graph {
-            points: self.points.iter().map(|point| {
-                Point {
+            points: self
+                .points
+                .iter()
+                .map(|point| Point {
                     x: point.x,
                     y: tform(point.y),
-                }
-            }).collect()
+                })
+                .collect(),
         }
     }
 
@@ -141,28 +172,36 @@ impl Graph {
     // each mean is based on the points to the left and right of the target freq.
     fn resample(&self, target: Vec<f64>) -> Graph {
         Graph {
-            points: target.iter().enumerate().map(|(i, point)| {
-                let left = if i > 0 { target[i-1] } else { *point };
-                let right = target.get(i+1).unwrap_or(point);
+            points: target
+                .iter()
+                .enumerate()
+                .map(|(i, point)| {
+                    let left = if i > 0 { target[i - 1] } else { *point };
+                    let right = target.get(i + 1).unwrap_or(point);
 
-                let x1 = (point + left) / 2.0;
-                let x2 = (point + right) / 2.0;
+                    let x1 = (point + left) / 2.0;
+                    let x2 = (point + right) / 2.0;
 
-                let mut sum = 0_f64;
-                for i in 0..20 {
-                    let x = x1 + (x2 - x1) * i as f64 / 20.0;
-                    sum += self.point(x).powf(2.0);
-                }
-                Point {
-                    x: *point,
-                    y: (sum / 20.0).sqrt(),
-                }
-            }).collect()
+                    let mut sum = 0_f64;
+                    for i in 0..20 {
+                        let x = x1 + (x2 - x1) * i as f64 / 20.0;
+                        sum += self.point(x).powf(2.0);
+                    }
+                    Point {
+                        x: *point,
+                        y: (sum / 20.0).sqrt(),
+                    }
+                })
+                .collect(),
         }
     }
 
     fn max(&self) -> f64 {
-        self.points.iter().map(|point| point.y).reduce(|a,b| a.max(b)).unwrap()
+        self.points
+            .iter()
+            .map(|point| point.y)
+            .reduce(|a, b| a.max(b))
+            .unwrap()
     }
 }
 
