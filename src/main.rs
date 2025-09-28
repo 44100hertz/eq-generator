@@ -1,22 +1,26 @@
 use std::fs::{self, File};
 use std::io::Write;
 
-const BOTTOM_F: f64 = 25.0;
-const TOP_F: f64 = 18000.0;
-const RESOLUTION: f64 = 600.0;
+const BOTTOM_F: f64 = 20.0;
+const TOP_F: f64 = 14000.0;
+const RESOLUTION: f64 = 2000.0;
 
 fn main() {
     let measurements = [
-        "spectrum1.txt",
-        "spectrum2.txt",
-        "spectrum3.txt",
-        "spectrum4.txt",
+        "technics/1-3.txt",
+        "technics/2-3.txt",
     ]
     .iter()
-    .map(|file| Graph::from_audacity_spectogram(file).resample(eq_points()))
+    .map(|file| Graph::from_audacity_spectogram(file).resample(eq_points(), AverageMode::Rms))
     .collect::<Vec<_>>();
-    let target = Graph::from_audacity_spectogram("target.txt").resample(eq_points());
+
+    let floor = Graph::from_audacity_spectogram("technics/noisefloor.txt").resample(eq_points(), AverageMode::Mean);
+    let target = Graph::from_audacity_spectogram("technics/target.txt").resample(eq_points(), AverageMode::Mean)
+        // .rolloff(2000.0, -1.0)
+        .sum(&floor);
+
     let rms = rms(measurements);
+
     let comp = Graph {
         points: eq_points()
             .into_iter()
@@ -26,10 +30,21 @@ fn main() {
             })
             .collect(),
     };
-    let mut outfile = File::create("autoeq.csv").unwrap();
+
+    let mut outfile = File::create("autoeq_desktop.csv").unwrap();
     outfile
-        .write_all(comp.to_jamesdsp_eq_android().as_bytes())
+        .write_all(comp.to_jamesdsp_eq(9.0).as_bytes())
         .unwrap();
+
+    let mut outfile_mobile = File::create("autoeq_mobile.csv").unwrap();
+    outfile_mobile
+        .write_all(comp.to_jamesdsp_eq_android(0.0).as_bytes())
+        .unwrap();
+}
+
+enum AverageMode {
+    Mean,
+    Rms,
 }
 
 // Assumes that graphs all have the same indices...
@@ -51,6 +66,9 @@ fn rms(graphs: Vec<Graph>) -> Graph {
     }
 }
 
+fn db_to_ratio(db: f64) -> f64 {
+    10.0_f64.powf(db / 20.0)
+}
 fn db_to_linear(db: f64) -> f64 {
     10.0_f64.powf((db + 60.0) / 20.0)
 }
@@ -114,24 +132,58 @@ impl Graph {
         }
     }
 
-    fn to_jamesdsp_eq(&self) -> String {
+    fn to_jamesdsp_eq(&self, boost: f64) -> String {
         let mut out = String::new();
         let dbs = self.map(ratio_to_db);
         let max = dbs.max();
         for point in dbs.points {
-            out.push_str(format!("{:.3}\t{:.3}\n", point.x, point.y - max).as_str())
+            out.push_str(format!("{:.3}\t{:.3}\n", point.x, (point.y - max + boost).min(0.0)).as_str())
         }
         out
     }
 
-    fn to_jamesdsp_eq_android(&self) -> String {
+    fn to_jamesdsp_eq_android(&self, boost: f64) -> String {
         let mut out = "GraphicEQ: ".to_string();
         let dbs = self.map(ratio_to_db);
         let max = dbs.max();
         for point in dbs.points {
-            out.push_str(format!("{:.3} {:.3};", point.x, point.y - max).as_str())
+            out.push_str(format!("{:.3} {:.3};", point.x, (point.y - max + boost).min(0.0)).as_str())
         }
         out
+    }
+
+    fn sum(&self, floor: &Graph) -> Self {
+        Graph {
+            points: self
+            .points
+            .iter()
+            .zip(floor.points.iter())
+            .map(|(point, fpoint)| {
+                Point {
+                    x: point.x,
+                    y: point.y + fpoint.y,
+                }
+            })
+            .collect()
+        }
+    }
+
+    fn rolloff(&self, freq: f64, rolloff_per_octave: f64) -> Self {
+        let atten = db_to_ratio(rolloff_per_octave);
+        dbg!(atten);
+        Graph {
+            points: self
+            .points
+            .iter()
+            .map(|point| {
+                let octave = (point.x / freq).max(1.0).log2();
+                Point {
+                    x: point.x,
+                    y: point.y * atten.powf(octave),
+                }
+            })
+            .collect()
+        }
     }
 
     fn point(&self, x: f64) -> f64 {
@@ -170,7 +222,7 @@ impl Graph {
     // take a graph with many x points, and make it have the same x points as another
     // by using 20 simple rms sums for each one.
     // each mean is based on the points to the left and right of the target freq.
-    fn resample(&self, target: Vec<f64>) -> Graph {
+    fn resample(&self, target: Vec<f64>, averaging: AverageMode) -> Graph {
         Graph {
             points: target
                 .iter()
@@ -185,11 +237,17 @@ impl Graph {
                     let mut sum = 0_f64;
                     for i in 0..20 {
                         let x = x1 + (x2 - x1) * i as f64 / 20.0;
-                        sum += self.point(x).powf(2.0);
+                        sum += match averaging {
+                            AverageMode::Rms => self.point(x).powf(2.0),
+                            AverageMode::Mean => self.point(x).abs(),
+                        }
                     }
                     Point {
                         x: *point,
-                        y: (sum / 20.0).sqrt(),
+                        y: match averaging {
+                            AverageMode::Rms => (sum / 20.0).sqrt(),
+                            AverageMode::Mean => sum / 20.0,
+                        }
                     }
                 })
                 .collect(),
