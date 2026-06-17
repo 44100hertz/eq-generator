@@ -3,21 +3,54 @@ use std::io::Write;
 
 const BOTTOM_F: f64 = 20.0;
 const TOP_F: f64 = 14000.0;
-const RESOLUTION: f64 = 2000.0;
+const RESOLUTION: f64 = 800.0;
 
 fn main() {
     let measurements = [
-        "technics/1-3.txt",
-        "technics/2-3.txt",
+        // "ALDI/1.txt",
+        // "ALDI/2.txt",
+        "kenrad/L2.txt",
+        "kenrad/R2.txt",
+        // "corolla/2.txt",
+        // "corolla/3.txt",
+        // "corolla/4.txt",
+        // "corolla/5.txt",
     ]
     .iter()
     .map(|file| Graph::from_audacity_spectogram(file).resample(eq_points(), AverageMode::Rms))
     .collect::<Vec<_>>();
 
-    let floor = Graph::from_audacity_spectogram("technics/noisefloor.txt").resample(eq_points(), AverageMode::Mean);
-    let target = Graph::from_audacity_spectogram("technics/target.txt").resample(eq_points(), AverageMode::Mean)
-        // .rolloff(2000.0, -1.0)
-        .sum(&floor);
+    let floor = Graph::from_audacity_spectogram("jamo/noise.txt")
+       .resample(eq_points(), AverageMode::Mean);
+    let target = Graph::from_audacity_spectogram("kenrad/target-brown.txt")
+        .resample(eq_points(), AverageMode::Rms)
+        // .rolloff(200.0, -9.0, RolloffMode::Low)
+        // .rolloff(5000.0, -6.0, RolloffMode::High)
+        // .rolloff(1000.0, 5.0, RolloffMode::High);
+
+        // Half-harmon + anti-subbass + crispy peak
+        .rolloff(4000.0, -6.0, RolloffMode::High)
+        .rolloff(1000.0, 2.5, RolloffMode::High)
+        .rolloff(300.0, 1.0, RolloffMode::High)
+        .rolloff(100.0, -12.0, RolloffMode::Low)
+        .rolloff(180.0, 3.0, RolloffMode::Low)
+        .crispyPeak(0.8)
+        // Harmon curve + Anti-subbass
+//         .rolloff(4000.0, -9.0, RolloffMode::High)
+//         .rolloff(1000.0, 5.0, RolloffMode::High)
+         //.rolloff(140.0, 5.0, RolloffMode::Low)
+         //.rolloff(100.0, -12.0, RolloffMode::Low)
+         //.rolloff(180.0, -2.0, RolloffMode::Low)
+         .sum(&floor);
+        // 
+//        .rolloff(4000.0, -9.0, RolloffMode::High)
+//        .rolloff(1000.0, 5.0, RolloffMode::High)
+//        .rolloff(140.0, 5.0, RolloffMode::Low)
+//        .rolloff(100.0, -12.0, RolloffMode::Low);
+        // .rolloff(200.0, 0.5, RolloffMode::High);
+        
+        // .rolloff(200.0, -3.0, RolloffMode::Low);
+        // .sum(&floor);
 
     let rms = rms(measurements);
 
@@ -33,7 +66,7 @@ fn main() {
 
     let mut outfile = File::create("autoeq_desktop.csv").unwrap();
     outfile
-        .write_all(comp.to_jamesdsp_eq(9.0).as_bytes())
+        .write_all(comp.to_jamesdsp_eq(0.0).as_bytes())
         .unwrap();
 
     let mut outfile_mobile = File::create("autoeq_mobile.csv").unwrap();
@@ -45,6 +78,11 @@ fn main() {
 enum AverageMode {
     Mean,
     Rms,
+}
+
+enum RolloffMode {
+    High,
+    Low,
 }
 
 // Assumes that graphs all have the same indices...
@@ -65,6 +103,29 @@ fn rms(graphs: Vec<Graph>) -> Graph {
             .collect(),
     }
 }
+
+// fn deviation(graphs: Vec<Graph>) -> Graph {
+//     Graph {
+//         points: (0..graphs[0].points.len())
+//             .map(|i| {
+//                 let mean = graphs
+//                     .iter()
+//                     .fold(0.0, |acc, graph| acc + graph.points[i].y);
+
+//                 let deviation = graphs
+//                     .iter()
+//                     .fold(0.0, |acc, graph| acc + (mean - graph.points[i].y).powf(2.0) / graphs.len() as f64)
+//                     .sqrt();
+
+//                 let rms_sum = (sum_squares / graphs.len() as f64).sqrt();
+//                 Point {
+//                     x: graphs[0].points[i].x,
+//                     y: rms_sum,
+//                 }
+//             })
+//             .collect(),
+//     }
+// }
 
 fn db_to_ratio(db: f64) -> f64 {
     10.0_f64.powf(db / 20.0)
@@ -111,6 +172,8 @@ fn eq_points() -> Vec<f64> {
 struct Graph {
     points: Vec<Point>,
 }
+
+const PI: f64 = std::f64::consts::PI;
 
 impl Graph {
     fn from_audacity_spectogram(path: &str) -> Self {
@@ -168,21 +231,37 @@ impl Graph {
         }
     }
 
-    fn rolloff(&self, freq: f64, rolloff_per_octave: f64) -> Self {
+    fn rolloff(&self, freq: f64, rolloff_per_octave: f64, mode: RolloffMode) -> Self {
         let atten = db_to_ratio(rolloff_per_octave);
-        dbg!(atten);
         Graph {
             points: self
             .points
             .iter()
             .map(|point| {
-                let octave = (point.x / freq).max(1.0).log2();
+                let ratio = match mode {
+                    RolloffMode::High => point.x / freq,
+                    RolloffMode::Low => freq / point.x,
+                };
+                let octave = ratio.max(1.0).log2();
                 Point {
                     x: point.x,
                     y: point.y * atten.powf(octave),
                 }
             })
             .collect()
+        }
+    }
+
+    fn crispyPeak(&self, amp: f64) -> Self {
+        Graph {
+            points: self.points.iter().map(|point| {
+                let fkhz = point.x / 1000.0;
+                let sinc = |p: f64| { if p < -PI || p > PI  { 0.0 } else { p.sin() / p } };
+                Point {
+                    x: point.x,
+                    y: point.y + sinc(fkhz * 2.0 - 22.0) * amp,
+                }
+            }).collect()
         }
     }
 
