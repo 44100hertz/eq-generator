@@ -27,6 +27,11 @@ struct Args {
     #[arg(short = 't', long = "target", required = true)]
     target: PathBuf,
 
+    /// Background noise WAV file for spectral subtraction (same length/sample-rate).
+    /// Recorded with no signal playing — ambient noise only.
+    #[arg(short = 'n', long = "noise")]
+    noise: Option<PathBuf>,
+
     /// Output prefix (generates <prefix>_desktop.csv and <prefix>_mobile.csv)
     #[arg(short = 'o', long = "output", default_value = "autoeq")]
     output: String,
@@ -151,18 +156,44 @@ fn main() {
     let measurement_full = Graph {
         points: pooled.iter().map(|s| Point { x: s.freq, y: s.mean }).collect(),
     };
-    let cv_full = Graph {
+    let mut cv_full = Graph {
         points: pooled.iter().map(|s| Point { x: s.freq, y: s.cv }).collect(),
     };
 
-    // ── 5. Generate adaptive EQ points                                    ──
+    // ── 5. Noise: spectral subtraction + combine CV into point gen      ──
+    let noise_full_res: Option<Graph> = args.noise.as_ref().map(|noise_path| {
+        let noise_wav = read_wav(noise_path);
+        assert_eq!(noise_wav.sample_rate, sample_rate);
+        let noise_stats = welch_stats(&noise_wav.samples, sample_rate);
+
+        // Combine noise CV into measurement CV — unstable background
+        // degrades correction confidence at those frequencies.
+        for i in 0..cv_full.points.len().min(noise_stats.len()) {
+            cv_full.points[i].y = cv_full.points[i].y.max(noise_stats[i].cv);
+        }
+
+        Graph {
+            points: noise_stats.iter().map(|s| Point { x: s.freq, y: s.mean }).collect(),
+        }
+    });
+
+    // ── 6. Generate adaptive EQ points (CV now includes noise CV)       ──
     let eq_pts = eq_points_adaptive(&cv_full, args.target_cv);
     eprintln!("{} EQ points (adaptive)", eq_pts.len());
 
-    // ── 6. Resample to adaptive EQ points                                 ──
-    let measurement_mean = measurement_full.resample(eq_pts.clone());
+    // ── 7. Resample measurement + spectral subtraction                   ──
+    let mut measurement_mean = measurement_full.resample(eq_pts.clone());
 
-    // ── 7. Target: Welch → full‑res Graph → resample → shape          ──
+    if let Some(ref noise_full) = noise_full_res {
+        let noise_mean = noise_full.resample(eq_pts.clone());
+        for i in 0..measurement_mean.points.len() {
+            let m = measurement_mean.points[i].y;
+            let n = noise_mean.points[i].y;
+            measurement_mean.points[i].y = (m - n).max(m * 0.01);
+        }
+    }
+
+    // ── 8. Target: Welch → full‑res Graph → resample → shape          ──
     let target_stats = welch_stats(&target_wav.samples, sample_rate);
     let target_full = Graph {
         points: target_stats.iter().map(|s| Point { x: s.freq, y: s.mean }).collect(),
@@ -191,7 +222,7 @@ fn main() {
         target = target.crispy_peak(db);
     }
 
-    // ── 8. Correction = target / measurement_mean                        ──
+    // ── 9. Correction = target / measurement_mean                        ──
     let comp = Graph {
         points: eq_pts
             .iter()
@@ -202,7 +233,7 @@ fn main() {
             .collect(),
     };
 
-    // ── 9. Write outputs                                                  ──
+    // ── 10. Write outputs                                                 ──
     let desktop_path = format!("{}_desktop.csv", args.output);
     let mut outfile = File::create(&desktop_path).unwrap();
     outfile
@@ -381,8 +412,6 @@ fn welch_stats(samples: &[f64], sample_rate: u32) -> Vec<BinStats> {
         })
         .collect()
 }
-
-// ── Interpolation for unreliable EQ points ───────────────────────────────────
 
 // ── EQ point generation ──────────────────────────────────────────────────────
 
