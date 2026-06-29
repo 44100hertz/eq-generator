@@ -1,0 +1,70 @@
+desc: Harmonic Bass Enhancer
+author: Two-band sub-bass harmonic generator
+
+cutoff:60<20,200,1>Cutoff (Hz)
+h2_amp:0.5<0,1.5,0.01>2nd Harmonic
+h3_amp:0.5<0,1.5,0.01>3rd Harmonic
+
+@init
+cutoff = 60;
+h2_amp = 1.01;
+h3_amp = 1.01;
+
+lpL_t3  = 0;
+lpL_t2  = 9;
+lpR_t3  = 18;
+lpR_t2  = 27;
+hpL     = 36;
+hpR     = 45;
+hpHarmL = 54;
+hpHarmR = 63;
+
+function makeLP(freq)(
+  _omega = tan($pi * freq / srate);
+  _c = 1 + 1.4142135623730951 * _omega + _omega * _omega;
+  this.b0 = _omega * _omega / _c;
+  this.b1 = 2 * _omega * _omega / _c;
+  this.b2 = _omega * _omega / _c;
+  this.a1 = 2 * (_omega * _omega - 1) / _c;
+  this.a2 = (1 - 1.4142135623730951 * _omega + _omega * _omega) / _c;
+);
+
+function makeHP(freq)(
+  _omega = tan($pi * freq / srate);
+  _c = 1 + 1.4142135623730951 * _omega + _omega * _omega;
+  this.b0 = 1 / _c;
+  this.b1 = -2 / _c;
+  this.b2 = 1 / _c;
+  this.a1 = 2 * (_omega * _omega - 1) / _c;
+  this.a2 = (1 - 1.4142135623730951 * _omega + _omega * _omega) / _c;
+);
+
+function tick(x)(
+  _y = this.b0 * x + this.b1 * this.x1 + this.b2 * this.x2 - this.a1 * this.y1 - this.a2 * this.y2;
+  this.x2 = this.x1;
+  this.x1 = x;
+  this.y2 = this.y1;
+  this.y1 = _y;
+  _y;
+);
+
+lpL_t3.makeLP(cutoff / 2.0);
+lpL_t2.makeLP(cutoff);
+lpR_t3.makeLP(cutoff / 2.0);
+lpR_t2.makeLP(cutoff);
+hpL.makeHP(cutoff);
+hpR.makeHP(cutoff);
+hpHarmL.makeHP(cutoff);
+hpHarmR.makeHP(cutoff);
+
+@sample
+_l_t3 = lpL_t3.tick(spl0);
+_l_t2 = lpL_t2.tick(spl0);
+_r_t3 = lpR_t3.tick(spl1);
+_r_t2 = lpR_t2.tick(spl1);
+
+_harmL = h2_amp * (2.0 * _l_t2 * _l_t2 - 1.0) + h3_amp * (4.0 * _l_t3 * _l_t3 * _l_t3 - 3.0 * _l_t3);
+_harmR = h2_amp * (2.0 * _r_t2 * _r_t2 - 1.0) + h3_amp * (4.0 * _r_t3 * _r_t3 * _r_t3 - 3.0 * _r_t3);
+
+spl0 = hpL.tick(spl0) + hpHarmL.tick(_harmL);
+spl1 = hpR.tick(spl1) + hpHarmR.tick(_harmR);

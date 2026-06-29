@@ -44,10 +44,6 @@ struct Args {
     #[arg(long = "low-rolloff", value_name = "FREQ,DB_OCTAVE", allow_hyphen_values = true)]
     low_rolloff: Vec<String>,
 
-    /// Crispy peak amplitude (e.g. 0.8)
-    #[arg(long = "crispy-peak")]
-    crispy_peak: Option<f64>,
-
     /// Boost in dB to apply to the final EQ [default: 0.0]
     #[arg(short = 'b', long = "boost", default_value = "0.0")]
     boost: f64,
@@ -59,23 +55,20 @@ struct Args {
     #[arg(long = "target-cv", default_value = "0.12")]
     target_cv: f64,
 
-    /// Harman target curve intensity (0 = flat, 1 = full Harman 2018 over-ear).
-    /// Applied above 122 Hz only; bass shelf is controlled separately.
-    /// [default: 0.0]
-    #[arg(long = "harman-intensity", default_value = "0.0")]
-    harman_intensity: f64,
-
-    /// Bass shelf level in dB below 122 Hz.  Positive = boost, negative = cut.
-    /// Independent from Harman intensity.  [default: 0.0]
-    #[arg(long = "bass-level", default_value = "0.0", allow_hyphen_values = true)]
-    bass_level: f64,
+    /// Cutoff frequency for the harmonic bass enhancer's target compensation.
+    /// Below cutoff the target is rebuilt as a mirror of the above‑cutoff
+    /// response, scaled so the Chebyshev harmonics (h₂·x², h₃·x³) reproduce
+    /// the desired level at 2f / 3f.  Sub‑fc/3 is set to −40 dB (silent).
+    /// Above cutoff the target is left untouched.
+    #[arg(long = "bass-enhancer-cutoff")]
+    bass_enhancer_cutoff: Option<f64>,
 }
 
 fn main() {
     let args = Args::parse();
 
     // ── 1. Read & validate all WAV files ──────────────────────────────────
-    let mut wavs: Vec<WavData> = args
+    let wavs: Vec<WavData> = args
         .measurements
         .iter()
         .map(|p| read_wav(p))
@@ -83,7 +76,6 @@ fn main() {
     let target_wav = read_wav(&args.target);
 
     let sample_rate = wavs[0].sample_rate;
-    let len = wavs[0].samples.len();
     for w in &wavs[1..] {
         assert_eq!(
             w.sample_rate, sample_rate,
@@ -95,22 +87,7 @@ fn main() {
         "Target WAV sample rate must match measurement WAVs"
     );
 
-    // Trim all to shortest length if they differ slightly
-    let min_len = wavs.iter()
-        .map(|w| w.samples.len())
-        .chain(std::iter::once(target_wav.samples.len()))
-        .min()
-        .unwrap();
-    for w in &mut wavs {
-        w.samples.truncate(min_len);
-    }
-    let target_wav = WavData {
-        samples: target_wav.samples[..min_len].to_vec(),
-        sample_rate: target_wav.sample_rate,
-    };
-    if min_len != len {
-        eprintln!("Trimmed all WAVs to {} samples (shortest file)", min_len);
-    }
+
 
     // ── 2. Welch FFT each measurement WAV → per-bin mean + variance     ──
     let all_stats: Vec<Vec<BinStats>> = wavs
@@ -200,14 +177,6 @@ fn main() {
     };
     let mut target = target_full.resample(eq_pts.clone());
 
-    // Apply Harman 2018 over‑ear curve (above 122 Hz only)
-    if args.harman_intensity > 0.0 {
-        target = target.apply_harman(args.harman_intensity);
-    }
-    // Bass shelf below 122 Hz (independent from Harman)
-    if args.bass_level.abs() > 0.01 {
-        target = target.bass_shelf(122.0, args.bass_level);
-    }
     // Manual rolloffs
     for spec in &args.high_rolloff {
         let (freq, db) = parse_rolloff(spec);
@@ -217,13 +186,8 @@ fn main() {
         let (freq, db) = parse_rolloff(spec);
         target = target.rolloff(freq, db, RolloffMode::Low);
     }
-    // Crispy peak (dB‑domain, adds a sinc‑shaped boost at ~11 kHz)
-    if let Some(db) = args.crispy_peak {
-        target = target.crispy_peak(db);
-    }
-
     // ── 9. Correction = target / measurement_mean                        ──
-    let comp = Graph {
+    let mut comp = Graph {
         points: eq_pts
             .iter()
             .map(|&freq| Point {
@@ -232,6 +196,11 @@ fn main() {
             })
             .collect(),
     };
+
+    // Bass enhancer psychoacoustic compensation
+    if let Some(cutoff) = args.bass_enhancer_cutoff {
+        comp = comp.bass_enhancer_preprocess(cutoff);
+    }
 
     // ── 10. Write outputs                                                 ──
     let desktop_path = format!("{}_desktop.csv", args.output);
@@ -484,64 +453,12 @@ fn eq_points_adaptive(cv_graph: &Graph, target_cv: f64) -> Vec<f64> {
     out
 }
 
-// ── Harman target curve ──────────────────────────────────────────────────────
-
-/// Harman 2018 over‑ear target, dB relative to 0 at 122 Hz.
-/// Data: jaakkopasanen/AutoEq Harman over-ear 2018.csv.
-/// Below 122 Hz is flat — bass shelf is applied separately via `--bass-level`.
-fn harman_curve() -> Graph {
-    Graph {
-        points: vec![
-            Point { x: 20.0, y: 0.00 },
-            Point { x: 122.0, y: 0.00 },
-            Point { x: 122.3, y: 0.02 },
-            Point { x: 142.0, y: -0.69 },
-            Point { x: 164.9, y: -1.27 },
-            Point { x: 191.4, y: -1.82 },
-            Point { x: 222.2, y: -2.09 },
-            Point { x: 258.0, y: -1.97 },
-            Point { x: 299.5, y: -1.67 },
-            Point { x: 347.8, y: -1.34 },
-            Point { x: 403.7, y: -1.12 },
-            Point { x: 468.7, y: -0.94 },
-            Point { x: 544.2, y: -0.69 },
-            Point { x: 631.8, y: -0.45 },
-            Point { x: 733.4, y: -0.26 },
-            Point { x: 851.5, y: -0.15 },
-            Point { x: 988.6, y: -0.02 },
-            Point { x: 1147.7, y: 0.40 },
-            Point { x: 1332.5, y: 1.24 },
-            Point { x: 1546.9, y: 2.37 },
-            Point { x: 1795.9, y: 3.92 },
-            Point { x: 2085.0, y: 5.71 },
-            Point { x: 2420.7, y: 7.16 },
-            Point { x: 2810.3, y: 8.09 },
-            Point { x: 3262.7, y: 8.54 },
-            Point { x: 3787.9, y: 8.40 },
-            Point { x: 4397.6, y: 7.58 },
-            Point { x: 5105.5, y: 6.28 },
-            Point { x: 5927.3, y: 5.21 },
-            Point { x: 6881.4, y: 3.96 },
-            Point { x: 7989.1, y: 2.44 },
-            Point { x: 9275.1, y: 0.55 },
-            Point { x: 10768.1, y: -2.00 },
-            Point { x: 12501.4, y: -5.02 },
-            Point { x: 14513.7, y: -7.50 },
-            Point { x: 16850.0, y: -10.65 },
-            Point { x: 19562.3, y: -20.79 },
-            Point { x: 20000.0, y: -23.00 },
-        ],
-    }
-}
-
 // ── Graph ────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 struct Graph {
     points: Vec<Point>,
 }
-
-const PI: f64 = std::f64::consts::PI;
 
 impl Graph {
     fn to_jamesdsp_eq(&self, boost: f64) -> String {
@@ -589,81 +506,54 @@ impl Graph {
         }
     }
 
-    /// Crispy peak: adds a sinc‑shaped boost at ~11 kHz.
-    /// Amplitude is now in dB (e.g. 0.8 = +0.8 dB at the peak).
-    fn crispy_peak(&self, db: f64) -> Self {
-        // Convert to dB, add the peak, convert back
-        let dbs = self.map(ratio_to_db);
-        Graph {
-            points: dbs
-                .points
-                .iter()
-                .map(|point| {
-                    let fkhz = point.x / 1000.0;
-                    let sinc = |p: f64| {
-                        if p < -PI || p > PI {
-                            0.0
-                        } else {
-                            p.sin() / p
-                        }
-                    };
-                    let boost = sinc(fkhz * 2.0 - 22.0) * db;
-                    Point {
-                        x: point.x,
-                        y: db_to_ratio(point.y + boost),
-                    }
-                })
-                .collect(),
-        }
-    }
+    /// Preprocess a compensation curve for harmonic bass enhancer input.
+    ///
+    /// The enhancer high‑passes input at the cutoff to remove the original
+    /// bass, then bandpass‑filters what remains into two bands, waveshaping
+    /// each with Chebyshev polynomials to generate harmonics *above* cutoff.
+    /// The EQ's job below cutoff is therefore to provide the correct *input
+    /// level* for the waveshaper — nothing passes through directly.
+    ///
+    /// **Chebyshev identity** — T₂(sin)=−cos2ω (amplitude=x²) and
+    /// T₃(sin)=−sin3ω (amplitude=x³), so √comp / ∛comp give the exact
+    /// drive needed for the harmonic to hit the target level.  No extra
+    /// multiplier and no psychoacoustic attenuation — flat by construction.
+    ///
+    ///   T₂ [fc/2, fc] → 2f:  √comp(2f)
+    ///   T₃ [fc/3, fc/2] → 3f: ∛comp(3f)
+    ///
+    /// A crossfade across [fc/2, fc] blends from the pure T₂‑drive value
+    /// to comp(fc) — the direct compensation *at the cutoff* — so the
+    /// curve meets the untouched region with no step.  Using comp(fc)
+    /// (rather than comp(f) which blows up from speaker roll‑off) avoids
+    /// the mid‑bass hump.
+    fn bass_enhancer_preprocess(&self, fc: f64) -> Self {
+        let f_lo = fc / 3.0;
+        let f_mid = fc / 2.0;
+        let comp_fc = self.point(fc);
 
-    /// Apply the Harman 2018 over‑ear target curve (above 122 Hz only).
-    /// `intensity` blends between flat (0.0) and full Harman (1.0).
-    fn apply_harman(&self, intensity: f64) -> Self {
-        let harman = harman_curve();
         Graph {
             points: self
                 .points
                 .iter()
                 .map(|point| {
-                    let h_db = if point.x >= 122.0 {
-                        harman.point(point.x) * intensity
-                    } else {
+                    let f = point.x;
+                    let y = if f < f_lo {
+                        // Below fc/3: no Chebyshev band reaches — silence.
                         0.0
-                    };
-                    Point {
-                        x: point.x,
-                        y: point.y * db_to_ratio(h_db),
-                    }
-                })
-                .collect(),
-        }
-    }
-
-    /// Constant gain shelf below `freq` Hz.  Smooth transition over one
-    /// octave above `freq` (raised cosine blend).
-    fn bass_shelf(&self, freq: f64, db: f64) -> Self {
-        let f_hi = freq * 2.0; // one octave transition
-        let gain = db_to_ratio(db);
-        Graph {
-            points: self
-                .points
-                .iter()
-                .map(|point| {
-                    let factor = if point.x <= freq {
-                        gain
-                    } else if point.x >= f_hi {
-                        1.0
+                    } else if f < f_mid {
+                        // T₃ band [fc/3, fc/2]: drives 3rd harmonic at 3f.
+                        self.point(3.0 * f).cbrt()
+                    } else if f < fc {
+                        // T₂ band [fc/2, fc]: crossfade drive → comp(fc).
+                        let t     = (f - f_mid) / (fc - f_mid);
+                        let drive = self.point(2.0 * f).sqrt();
+                        drive * (1.0 - t) + comp_fc * t
                     } else {
-                        // raised cosine blend
-                        let t = (point.x - freq) / (f_hi - freq);
-                        let blend = 0.5 + 0.5 * (PI * t).cos();
-                        gain * blend + 1.0 * (1.0 - blend)
+                        // Above cutoff — untouched
+                        point.y
                     };
-                    Point {
-                        x: point.x,
-                        y: point.y * factor,
-                    }
+                    Point { x: f, y }
                 })
                 .collect(),
         }
