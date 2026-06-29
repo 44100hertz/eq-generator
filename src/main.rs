@@ -453,6 +453,20 @@ fn eq_points_adaptive(cv_graph: &Graph, target_cv: f64) -> Vec<f64> {
     out
 }
 
+// ── Butterworth filter response ──────────────────────────────────────────────
+
+/// 2nd-order Butterworth low‑pass magnitude response at frequency f with cutoff fc.
+fn butterworth_lp(f: f64, fc: f64) -> f64 {
+    let w = f / fc;
+    1.0 / (1.0 + w * w * w * w).sqrt()
+}
+
+/// 2nd-order Butterworth high‑pass magnitude response at frequency f with cutoff fc.
+fn butterworth_hp(f: f64, fc: f64) -> f64 {
+    let w = f / fc;
+    (w * w) / (1.0 + w * w * w * w).sqrt()
+}
+
 // ── Graph ────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -508,25 +522,23 @@ impl Graph {
 
     /// Preprocess a compensation curve for harmonic bass enhancer input.
     ///
-    /// The enhancer high‑passes input at the cutoff to remove the original
-    /// bass, then bandpass‑filters what remains into two bands, waveshaping
-    /// each with Chebyshev polynomials to generate harmonics *above* cutoff.
-    /// The EQ's job below cutoff is therefore to provide the correct *input
-    /// level* for the waveshaper — nothing passes through directly.
+    /// The enhancer high‑passes input at fc, low‑passes the bass into two
+    /// bands (T₃ LP at fc/2, T₂ LP at fc), and waveshapes each with
+    /// Chebyshev polynomials to generate harmonics *above* cutoff.  The
+    /// EQ's job below cutoff is to provide the correct *input level* for
+    /// the waveshaper — nothing passes through directly.
     ///
-    /// **Chebyshev identity** — T₂(sin)=−cos2ω (amplitude=x²) and
-    /// T₃(sin)=−sin3ω (amplitude=x³), so √comp / ∛comp give the exact
-    /// drive needed for the harmonic to hit the target level.  No extra
-    /// multiplier and no psychoacoustic attenuation — flat by construction.
+    /// Both the input LP and output HP (2nd‑order Butterworth) are
+    /// compensated so each harmonic lands exactly on the target level.
+    /// Drive includes 1/H_LP(f) and 1/ⁿ√H_HP(harmonic) to cancel the
+    /// filter response for each path.
     ///
-    ///   T₂ [fc/2, fc] → 2f:  √comp(2f)
-    ///   T₃ [fc/3, fc/2] → 3f: ∛comp(3f)
+    ///   T₃ [fc/3, fc/2] → 3f:  ∛(comp(3f)/H_HP(3f)) / H_LP_T3(f)
+    ///   T₂ [fc/2, fc]   → 2f:  √(comp(2f)/H_HP(2f)) / H_LP_T2(f)
     ///
-    /// A crossfade across [fc/2, fc] blends from the pure T₂‑drive value
+    /// A crossfade across [fc/2, fc] blends from the compensated T₂‑drive
     /// to comp(fc) — the direct compensation *at the cutoff* — so the
-    /// curve meets the untouched region with no step.  Using comp(fc)
-    /// (rather than comp(f) which blows up from speaker roll‑off) avoids
-    /// the mid‑bass hump.
+    /// curve meets the untouched region with no step.
     fn bass_enhancer_preprocess(&self, fc: f64) -> Self {
         let f_lo = fc / 3.0;
         let f_mid = fc / 2.0;
@@ -539,15 +551,20 @@ impl Graph {
                 .map(|point| {
                     let f = point.x;
                     let y = if f < f_lo {
-                        // Below fc/3: no Chebyshev band reaches — silence.
+                        // Below fc/3: no Chebyshev harmonic passes the output HP.
                         0.0
                     } else if f < f_mid {
                         // T₃ band [fc/3, fc/2]: drives 3rd harmonic at 3f.
-                        self.point(3.0 * f).cbrt()
+                        let hp = butterworth_hp(3.0 * f, fc);
+                        let lp = butterworth_lp(f, fc / 2.0);
+                        (self.point(3.0 * f) / hp).cbrt() / lp
                     } else if f < fc {
-                        // T₂ band [fc/2, fc]: crossfade drive → comp(fc).
-                        let t     = (f - f_mid) / (fc - f_mid);
-                        let drive = self.point(2.0 * f).sqrt();
+                        // T₂ band [fc/2, fc]: compensated drive, crossfaded
+                        // to comp(fc) for a seamless boundary at cutoff.
+                        let hp = butterworth_hp(2.0 * f, fc);
+                        let lp = butterworth_lp(f, fc);
+                        let drive = (self.point(2.0 * f) / hp).sqrt() / lp;
+                        let t = (f - f_mid) / (fc - f_mid);
                         drive * (1.0 - t) + comp_fc * t
                     } else {
                         // Above cutoff — untouched

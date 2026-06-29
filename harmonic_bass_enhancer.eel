@@ -7,8 +7,8 @@ h3_amp:0.5<0,1.5,0.01>3rd Harmonic
 
 @init
 cutoff = 60;
-h2_amp = 1.01;
-h3_amp = 1.01;
+h2_amp = 1.00;
+h3_amp = 1.00;
 
 lpL_t3  = 0;
 lpL_t2  = 9;
