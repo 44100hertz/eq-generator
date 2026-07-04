@@ -1,0 +1,107 @@
+desc: Harmonic Bass Enhancer (Linear)
+author: Two-band sub-bass harmonic generator with level-linearised response
+// FIXED: normalize BEFORE Chebyshev, not after.
+// Tₙ(cos θ) = cos(nθ) is exact only when the polynomial argument has
+// amplitude 1.  Dividing the LP signal by its envelope BEFORE T₂/T₃
+// (then scaling the result back by the envelope) eliminates the
+// fundamental leakage that the original "divide after" approach
+// amplified by 1/A².
+
+cutoff:60<20,200,1>Cutoff (Hz)
+h2_amp:1.0<0,8,0.01>2nd Harmonic (nominal)
+h3_amp:1.0<0,8,0.01>3rd Harmonic (nominal)
+env_release:200<50,1000,1>Envelope Release (ms)
+
+@init
+cutoff = 60;
+h2_amp = 1.0;
+h3_amp = 1.0;
+env_release = 200;
+
+lpL = 0;
+lpR = 9;
+hpL = 18;
+hpR = 27;
+hpHarmL = 36;
+hpHarmR = 45;
+
+// ── envelope followers (one per channel — shared by T₂ and T₃) ─────
+envL = 54;
+envR = 55;
+
+function makeLP(freq)(
+  _omega = tan($pi * freq / srate);
+  _c = 1 + 1.4142135623730951 * _omega + _omega * _omega;
+  this.b0 = _omega * _omega / _c;
+  this.b1 = 2 * _omega * _omega / _c;
+  this.b2 = _omega * _omega / _c;
+  this.a1 = 2 * (_omega * _omega - 1) / _c;
+  this.a2 = (1 - 1.4142135623730951 * _omega + _omega * _omega) / _c;
+);
+
+function makeHP(freq)(
+  _omega = tan($pi * freq / srate);
+  _c = 1 + 1.4142135623730951 * _omega + _omega * _omega;
+  this.b0 = 1 / _c;
+  this.b1 = -2 / _c;
+  this.b2 = 1 / _c;
+  this.a1 = 2 * (_omega * _omega - 1) / _c;
+  this.a2 = (1 - 1.4142135623730951 * _omega + _omega * _omega) / _c;
+);
+
+function tick(x)(
+  _y = this.b0 * x + this.b1 * this.x1 + this.b2 * this.x2 - this.a1 * this.y1 - this.a2 * this.y2;
+  this.x2 = this.x1;
+  this.x1 = x;
+  this.y2 = this.y1;
+  this.y1 = _y;
+  _y;
+);
+
+lpL.makeLP(cutoff);
+lpR.makeLP(cutoff);
+hpL.makeHP(cutoff);
+hpR.makeHP(cutoff);
+hpHarmL.makeHP(cutoff);
+hpHarmR.makeHP(cutoff);
+
+// ── envelope pre‑compute (runs once at init) ────────────────────────
+_r_ms = max(env_release, 10.0);
+env_decay_coeff = exp(-1.0 / (_r_ms * 0.001 * srate));
+_floor = 0.0001;  // −80 dB noise floor
+
+@sample
+_l = lpL.tick(spl0);
+_r = lpR.tick(spl1);
+
+// ── envelope followers (peak‑hold, one per channel) ─────────────────
+envL = max(envL * env_decay_coeff, abs(_l));
+envR = max(envR * env_decay_coeff, abs(_r));
+
+// ── normalize → Chebyshev → restore level ──────────────────────────
+// Dividing by the envelope normalizes the LP signal to amplitude ≈ 1,
+// so T₂ and T₃ produce pure cos(2ωt) and cos(3ωt) with NO leakage.
+// Multiplying the result by the envelope restores the correct amplitude
+// and gives inherently level-linear behaviour (output ∝ env ∝ A).
+
+_envL_s = max(envL, _floor);
+_envR_s = max(envR, _floor);
+
+_normL = _l / _envL_s;
+_normR = _r / _envR_s;
+
+// T₂(norm) = 2·norm² − 1  →  cos(2ωt)   for norm ≈ cos(ωt)
+// T₃(norm) = 4·norm³ − 3·norm  →  cos(3ωt)   for norm ≈ cos(ωt)
+_harmL = _envL_s * (
+    h2_amp * (2.0 * _normL * _normL - 1.0)
+  + h3_amp * (4.0 * _normL * _normL * _normL - 3.0 * _normL)
+);
+
+_harmR = _envR_s * (
+    h2_amp * (2.0 * _normR * _normR - 1.0)
+  + h3_amp * (4.0 * _normR * _normR * _normR - 3.0 * _normR)
+);
+
+// ── output ──────────────────────────────────────────────────────────
+spl0 = hpL.tick(spl0) + hpHarmL.tick(_harmL);
+spl1 = hpR.tick(spl1) + hpHarmR.tick(_harmR);

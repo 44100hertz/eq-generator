@@ -2,20 +2,18 @@ desc: Harmonic Bass Enhancer
 author: Two-band sub-bass harmonic generator
 
 cutoff:60<20,200,1>Cutoff (Hz)
-h2_amp:0.5<0,1.5,0.01>2nd Harmonic
-h3_amp:0.5<0,1.5,0.01>3rd Harmonic
+h2_amp:1.0<0,1.5,0.01>2nd Harmonic
+h3_amp:2.0<0,3.0,0.01>3rd Harmonic
 
 @init
-cutoff = 60;
+cutoff = 49;
 h2_amp = 1.00;
-h3_amp = 1.00;
+h3_amp = 2.00;
 
 lpL_t3  = 0;
 lpL_t2  = 9;
 lpR_t3  = 18;
 lpR_t2  = 27;
-hpL     = 36;
-hpR     = 45;
 hpHarmL = 54;
 hpHarmR = 63;
 
@@ -52,8 +50,6 @@ lpL_t3.makeLP(cutoff / 2.0);
 lpL_t2.makeLP(cutoff);
 lpR_t3.makeLP(cutoff / 2.0);
 lpR_t2.makeLP(cutoff);
-hpL.makeHP(cutoff);
-hpR.makeHP(cutoff);
 hpHarmL.makeHP(cutoff);
 hpHarmR.makeHP(cutoff);
 
@@ -66,5 +62,5 @@ _r_t2 = lpR_t2.tick(spl1);
 _harmL = h2_amp * (2.0 * _l_t2 * _l_t2 - 1.0) + h3_amp * (4.0 * _l_t3 * _l_t3 * _l_t3 - 3.0 * _l_t3);
 _harmR = h2_amp * (2.0 * _r_t2 * _r_t2 - 1.0) + h3_amp * (4.0 * _r_t3 * _r_t3 * _r_t3 - 3.0 * _r_t3);
 
-spl0 = hpL.tick(spl0) + hpHarmL.tick(_harmL);
-spl1 = hpR.tick(spl1) + hpHarmR.tick(_harmR);
+spl0 = hpHarmL.tick(spl0 + _harmL);
+spl1 = hpHarmR.tick(spl1 + _harmR);

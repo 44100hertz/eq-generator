@@ -1,0 +1,176 @@
+desc: Harmonic Bass Enhancer (Linear, Limited)
+author: Two-band sub-bass harmonic generator with level-linearised response and output peak limiter
+//
+// T₂ is fed by LP at cutoff, T₃ by LP at cutoff/2 (narrower band).
+// Normalize-before-Chebyshev eliminates fundamental leakage.
+// Output limiter prevents clipping from harmonic addition.
+
+cutoff:60<20,200,1>Cutoff (Hz)
+h2_amp:1.0<0,8,0.01>2nd Harmonic
+h3_amp:1.0<0,8,0.01>3rd Harmonic
+env_release:200<50,1000,1>Env Release (ms)
+lim_release:50<10,500,1>Limiter Release (ms)
+
+@init
+cutoff = 49;
+h2_amp = 0.50;
+h3_amp = 0.50;
+env_release = 200;
+lim_release = 50;
+
+// ── memory layout (each biquad = 9 slots: b0,b1,b2,a1,a2, x1,x2,y1,y2) ──
+
+// T₂ LP at cutoff
+lp_t2_L  = 0;
+lp_t2_R  = 9;
+
+// T₃ LP at cutoff/2
+lp_t3_L  = 18;
+lp_t3_R  = 27;
+
+// HP dry (original pass‑through)
+hp_L     = 36;
+hp_R     = 45;
+
+// HP harmonics
+hp_harm_L = 54;
+hp_harm_R = 63;
+
+// Envelope followers — one per path per channel
+env_t2_L = 72;
+env_t2_R = 73;
+env_t3_L = 74;
+env_t3_R = 75;
+
+// Output limiter envelope + gain
+lim_env  = 76;
+lim_gain = 77;
+
+// ── biquad helpers ───────────────────────────────────────────────────
+
+SQRT2 = 1.4142135623730951;
+
+function makeLP(freq)(
+  _omega = tan($pi * freq / srate);
+  _c = 1 + SQRT2 * _omega + _omega * _omega;
+  this.b0 = _omega * _omega / _c;
+  this.b1 = 2 * _omega * _omega / _c;
+  this.b2 = _omega * _omega / _c;
+  this.a1 = 2 * (_omega * _omega - 1) / _c;
+  this.a2 = (1 - SQRT2 * _omega + _omega * _omega) / _c;
+);
+
+function makeHP(freq)(
+  _omega = tan($pi * freq / srate);
+  _c = 1 + SQRT2 * _omega + _omega * _omega;
+  this.b0 = 1 / _c;
+  this.b1 = -2 / _c;
+  this.b2 = 1 / _c;
+  this.a1 = 2 * (_omega * _omega - 1) / _c;
+  this.a2 = (1 - SQRT2 * _omega + _omega * _omega) / _c;
+);
+
+function tick(x)(
+  _y = this.b0 * x + this.b1 * this.x1 + this.b2 * this.x2
+     - this.a1 * this.y1 - this.a2 * this.y2;
+  this.x2 = this.x1;
+  this.x1 = x;
+  this.y2 = this.y1;
+  this.y1 = _y;
+  _y;
+);
+
+// ── init filters ─────────────────────────────────────────────────────
+
+lp_t2_L.makeLP(cutoff);
+lp_t2_R.makeLP(cutoff);
+lp_t3_L.makeLP(cutoff / 2.0);
+lp_t3_R.makeLP(cutoff / 2.0);
+
+hp_L.makeHP(cutoff);
+hp_R.makeHP(cutoff);
+hp_harm_L.makeHP(cutoff);
+hp_harm_R.makeHP(cutoff);
+
+// ── envelope decay (pre‑compute) ─────────────────────────────────────
+
+_r_ms = max(env_release, 10.0);
+env_decay = exp(-1.0 / (_r_ms * 0.001 * srate));
+
+_lim_ms = max(lim_release, 10.0);
+lim_decay = exp(-1.0 / (_lim_ms * 0.001 * srate));
+
+_floor = 0.0001;
+
+// Initial limiter gain = 1.0 (no reduction)
+lim_gain = 1.0;
+
+// ── per‑sample ───────────────────────────────────────────────────────
+
+@sample
+
+// LP filters — separate bands for T₂ and T₃
+_l_t2 = lp_t2_L.tick(spl0);
+_r_t2 = lp_t2_R.tick(spl1);
+_l_t3 = lp_t3_L.tick(spl0);
+_r_t3 = lp_t3_R.tick(spl1);
+
+// ── envelope followers (peak‑hold, instant attack) ───────────────────
+
+env_t2_L = max(env_t2_L * env_decay, abs(_l_t2));
+env_t2_R = max(env_t2_R * env_decay, abs(_r_t2));
+env_t3_L = max(env_t3_L * env_decay, abs(_l_t3));
+env_t3_R = max(env_t3_R * env_decay, abs(_r_t3));
+
+// ── T₂: normalize → Chebyshev → scale ────────────────────────────────
+
+_e2L = max(env_t2_L, _floor);
+_e2R = max(env_t2_R, _floor);
+_norm2L = _l_t2 / _e2L;
+_norm2R = _r_t2 / _e2R;
+_t2L = _e2L * h2_amp * (2.0 * _norm2L * _norm2L - 1.0);
+_t2R = _e2R * h2_amp * (2.0 * _norm2R * _norm2R - 1.0);
+
+// ── T₃: normalize → Chebyshev → scale (narrower fc/2 LP) ─────────────
+
+_e3L = max(env_t3_L, _floor);
+_e3R = max(env_t3_R, _floor);
+_norm3L = _l_t3 / _e3L;
+_norm3R = _r_t3 / _e3R;
+_t3L = _e3L * h3_amp * (4.0 * _norm3L * _norm3L * _norm3L - 3.0 * _norm3L);
+_t3R = _e3R * h3_amp * (4.0 * _norm3R * _norm3R * _norm3R - 3.0 * _norm3R);
+
+// ── mix harmonics, HP filter ─────────────────────────────────────────
+
+_harmL = _t2L + _t3L;
+_harmR = _t2R + _t3R;
+
+_wetL = hp_L.tick(spl0);
+_wetR = hp_R.tick(spl1);
+_harmL_hp = hp_harm_L.tick(_harmL);
+_harmR_hp = hp_harm_R.tick(_harmR);
+
+// ── output peak limiter (harmonics only) ────────────────────────────
+//
+// Envelope rides the total output peak, but gain reduction applies
+// ONLY to the harmonic path. The dry signal passes through untouched.
+// Brick‑wall clamp on total output is a last‑resort safety net.
+
+// Drive limiter envelope from total output (pre‑reduction)
+_total_pre_L = _wetL + _harmL_hp;
+_total_pre_R = _wetR + _harmR_hp;
+_peak = max(abs(_total_pre_L), abs(_total_pre_R));
+lim_env = max(lim_env * lim_decay, _peak);
+_env_peak = max(lim_env, 1.0);
+lim_gain = 1.0 / _env_peak;
+
+// Apply gain reduction to harmonics only
+_totalL = _wetL + _harmL_hp * lim_gain;
+_totalR = _wetR + _harmR_hp * lim_gain;
+
+// Brick‑wall clamp: guarantee |sample| ≤ 1.0
+_totalL = min(max(_totalL, -1.0), 1.0);
+_totalR = min(max(_totalR, -1.0), 1.0);
+
+spl0 = _totalL;
+spl1 = _totalR;
