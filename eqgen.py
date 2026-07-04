@@ -13,7 +13,7 @@ Usage:
                      -o sanitycheck \
                      --bass-enhancer-cutoff 50.0
 
-    python eqgen.py -m m1.wav m2.wav -t target.wav -o autoeq --target-cv 0.10
+    python eqgen.py -m m1.wav m2.wav -t target.wav -o autoeq --max-noise 0.10
 """
 
 import argparse
@@ -152,7 +152,7 @@ def welch_stats(samples, sample_rate):
             "freq": f,
             "count": window_count,
             "mean": mean_val,
-            "cv": cv,
+            "noise": cv,
         })
     return results
 
@@ -328,39 +328,91 @@ class Graph:
 # EQ point generation
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def eq_points_adaptive(cv_graph, target_cv):
-    """Generate EQ points with density determined by per-frequency CV.
+def _erb_hz(freq):
+    """Equivalent Rectangular Bandwidth at freq (Hz)."""
+    return 24.7 * (4.37 * freq / 1000.0 + 1.0)
 
-    Base density follows equal-loudness contours. Spacing is scaled by
-    cv / target_cv — clean measurements get dense points, noisy ones sparse.
+
+def eq_points_adaptive(pooled, max_noise, min_erb_fraction=0.11, max_span_octaves=2.0):
+    """Generate EQ points greedily from pooled Welch FFT stats.
+
+    Single forward pass. Accumulates Welch bins into spans. A span is
+    finalized when (a) it is at least min_erb_fraction of an ERB wide,
+    and (b) its pooled time-domain noise drops below max_noise.
+
+    Guards:
+      min_erb_fraction  – minimum span width as fraction of ERB
+                           (prevents psychoacoustically redundant points)
+      max_span_octaves  – force-finalize if span exceeds this width
+
+    Clean regions → many narrow spans at ERB resolution.
+    Noisy regions → few wide spans at max_span_octaves resolution.
+
+    Higher max_noise → spans finalize sooner → more EQ points.
     """
-    # Equal-loudness contour data points
-    equal_loudness = Graph([
-        {"x": 20.0, "y": 109.0},
-        {"x": 80.0, "y": 82.0},
-        {"x": 400.0, "y": 62.0},
-        {"x": 1000.0, "y": 60.0},
-        {"x": 1500.0, "y": 64.0},
-        {"x": 2500.0, "y": 57.0},
-        {"x": 4000.0, "y": 57.0},
-        {"x": 8500.0, "y": 73.0},
-        {"x": 15000.0, "y": 72.0},
-        {"x": 19000.0, "y": 68.0},
-        {"x": 30000.0, "y": 130.0},
-    ])
+    bin_hz = float(pooled[1]["freq"] - pooled[0]["freq"]) if len(pooled) > 1 else 1.0
+    max_ratio = 2.0 ** max_span_octaves
 
-    def base_density(freq):
-        return BASE_RESOLUTION / equal_loudness.point(freq)
+    points = []
 
-    freq = BOTTOM_F
-    out = []
-    while freq < TOP_F:
-        out.append(freq)
-        base_step = freq / base_density(freq) * 2.0 / np.e
-        cv = max(cv_graph.point(freq), 0.001)
-        freq += base_step * (cv / target_cv)
-    out.append(TOP_F)
-    return np.array(out)
+    # Running sums for the current span
+    n   = 0.0   # Σ count_i
+    sx  = 0.0   # Σ count_i · mean_i
+    sx2 = 0.0   # Σ count_i · mean_i²
+    sv  = 0.0   # Σ count_i · (noise_i · mean_i)²
+
+    span_start = 0
+    bins_in_span = 0
+
+    def finalize(end_idx):
+        """Commit span [span_start, end_idx] as an EQ point, reset acc."""
+        nonlocal n, sx, sx2, sv, span_start, bins_in_span
+        start = span_start
+        f_lo = BOTTOM_F if start == 0 else pooled[start]["freq"] - bin_hz / 2.0
+        f_hi = TOP_F if end_idx >= len(pooled) - 1 else pooled[end_idx]["freq"] + bin_hz / 2.0
+        points.append((f_lo + f_hi) / 2.0)
+        span_start = end_idx + 1
+        n = sx = sx2 = sv = 0.0
+        bins_in_span = 0
+
+    for i, b in enumerate(pooled):
+        c = float(b["count"])
+        m = b["mean"]
+        var_i = (b["noise"] * m) ** 2
+
+        # ── max-span guard: if adding this bin would make the span
+        #    too wide, force-finalize the current span first ──
+        f_lo = BOTTOM_F if span_start == 0 else pooled[span_start]["freq"] - bin_hz / 2.0
+        f_hi = pooled[i]["freq"] + bin_hz / 2.0
+        if bins_in_span > 0 and f_hi / f_lo > max_ratio:
+            finalize(i - 1)
+            # fall through: start new span with this bin
+
+        # ── accept this bin into the span ──
+        n   += c
+        sx  += c * m
+        sx2 += c * m * m
+        sv  += c * var_i
+        bins_in_span += 1
+
+        # ── noise check: if span is wide enough AND clean enough,
+        #    finalize now (data is trustworthy at this resolution) ──
+        span_hz = f_hi - f_lo
+        center = (f_lo + f_hi) / 2.0
+        min_hz = _erb_hz(center) * min_erb_fraction
+        if span_hz >= min_hz:
+            wm = sx / n
+            if wm > 1e-20:
+                within_var = sv / n
+                noise = np.sqrt(within_var) / wm
+                if noise <= max_noise:
+                    finalize(i)
+
+    # ── finalize trailing span ──
+    if bins_in_span > 0:
+        finalize(len(pooled) - 1)
+
+    return np.array(points)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -417,8 +469,8 @@ Examples:
         help="Boost in dB to apply to the final EQ [default: 0.0]",
     )
     parser.add_argument(
-        "--target-cv", type=float, default=0.12,
-        help="Coefficient of variation target. Lower = denser EQ points. [default: 0.12]",
+        "--max-noise", type=float, default=0.65,
+        help="Maximum per-span noise (coeff. of variation). Higher tolerates more uncertainty → fewer EQ points. Lower insists on cleaner data → more EQ points. [default: 0.65]",
     )
     parser.add_argument(
         "--bass-enhancer-cutoff", type=float, default=None,
@@ -465,36 +517,35 @@ Examples:
     for i in range(bin_count):
         total_n = sum(s[i]["count"] for s in all_stats)
         total_sum = sum(s[i]["mean"] * s[i]["count"] for s in all_stats)
-        pooled_cv = sum(s[i]["cv"] * s[i]["count"] for s in all_stats) / total_n
+        pooled_noise = sum(s[i]["noise"] * s[i]["count"] for s in all_stats) / total_n
         pooled.append({
             "freq": all_stats[0][i]["freq"],
             "count": total_n,
             "mean": total_sum / total_n,
-            "cv": pooled_cv,
+            "noise": pooled_noise,
         })
 
     print(f"  {pooled[0]['count']} windows across {len(wavs)} measurement(s)", file=sys.stderr)
 
     # ── 4. Build full-resolution graphs ───────────────────────────────
     measurement_full = Graph(pooled)
-    cv_full = Graph([{"freq": p["freq"], "y": p["cv"]} for p in pooled])
 
-    # ── 5. Noise: spectral subtraction + combine CV ───────────────────
+    # ── 5. Noise: spectral subtraction + merge noise CV into pooled ───
     noise_full_res = None
     if args.noise:
         noise_samples, noise_rate = read_wav(args.noise)
         assert noise_rate == sample_rate
         noise_stats = welch_stats(noise_samples, sample_rate)
 
-        # Merge noise CV into measurement CV
-        for i in range(min(len(cv_full.points), len(noise_stats))):
-            cv_full.points[i]["y"] = max(cv_full.points[i]["y"], noise_stats[i]["cv"])
+        # Merge noise CV into pooled stats so pruning sees worst-case CV
+        for i in range(min(len(pooled), len(noise_stats))):
+            pooled[i]["noise"] = max(pooled[i]["noise"], noise_stats[i]["noise"])
 
         noise_full_res = Graph(noise_stats)
 
     # ── 6. Generate adaptive EQ points ────────────────────────────────
-    eq_pts = eq_points_adaptive(cv_full, args.target_cv)
-    print(f"  {len(eq_pts)} EQ points (adaptive, target-cv={args.target_cv})", file=sys.stderr)
+    eq_pts = eq_points_adaptive(pooled, args.max_noise)
+    print(f"  {len(eq_pts)} EQ points (max-noise={args.max_noise})", file=sys.stderr)
 
     # ── 7. Resample measurement + spectral subtraction ─────────────────
     measurement_mean = measurement_full.emit(eq_pts)
