@@ -24,14 +24,17 @@ SOURCES        = enhancer.c enhancer_api.c
 HEADERS        = enhancer.h enhancer_api.h biquad_q28.h envelope.h dc_blocker.h
 TARGET         = enhancer.so
 
-LADSPA_SOURCES = enhancer.c ladspa_wrapper.c
+LADSPA_SOURCES = enhancer.c ladspa/ladspa_wrapper.c
 LADSPA_HEADERS = enhancer.h biquad_q28.h envelope.h dc_blocker.h eq_coeffs.h
 LADSPA_TARGET  = eqgen_ladspa.so
 LADSPA_INSTALL_DIR = $(HOME)/.ladspa
 
-FILTER_SOURCES = enhancer.c eqgen_filter.c
+FILTER_SOURCES = enhancer.c ladspa/eqgen_filter.c
 FILTER_HEADERS = enhancer.h biquad_q28.h envelope.h dc_blocker.h eq_coeffs.h
 FILTER_TARGET  = eqgen_filter
+
+TEST_SOURCES   = test_enhancer.c
+TEST_TARGET    = test_enhancer
 
 .PHONY: all ladspa filter install-ladspa clean test
 
@@ -55,10 +58,10 @@ install-ladspa: $(LADSPA_TARGET)
 	cp $(LADSPA_TARGET) $(LADSPA_INSTALL_DIR)/
 
 clean:
-	rm -f $(TARGET) $(LADSPA_TARGET) $(FILTER_TARGET) test_enhancer
+	rm -f $(TARGET) $(LADSPA_TARGET) $(FILTER_TARGET) $(TEST_TARGET)
 
-test: test_enhancer
-	./test_enhancer
+test: $(TEST_TARGET)
+	./$(TEST_TARGET)
 
-test_enhancer: test_enhancer.c $(SOURCES) $(HEADERS)
-	$(CC) $(CFLAGS) -DTEST_ENHANCER -o $@ test_enhancer.c $(SOURCES) -lm
+$(TEST_TARGET): $(TEST_SOURCES) $(SOURCES) $(HEADERS)
+	$(CC) $(CFLAGS) -DTEST_ENHANCER -o $@ $(TEST_SOURCES) $(SOURCES) -lm

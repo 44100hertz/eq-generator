@@ -1,5 +1,5 @@
 {
-  description = "Speaker EQ correction suite for JamesDSP (Python + EEL)";
+  description = "Speaker EQ correction suite for JamesDSP (Python + C DSP)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -21,11 +21,13 @@
             ]))
           ];
           shellHook = ''
-            echo "EQ correction suite ready."
-            echo "  Generate EQ:   python eqgen.py -m <meas.wav> -t <target.wav> [-n <noise.wav>] -o <output>"
-            echo "  Run tests:     ./run_analysis.sh"
-            echo "  List tests:    ./run_analysis.sh --list"
-            echo "  Sanity check:  ./sanitycheck.sh"
+            echo "eqgen — speaker EQ correction suite"
+            echo "  Design EQ:   python -m eqgen.cli.eqgen -m <meas.wav> -t <target.wav> -o eq.json"
+            echo "  Audition:    python -m eqgen.cli.audition <speaker> /tmp/out --tracks song.flac"
+            echo "  Live wire:   python -m eqgen.cli.wire setup <speaker>"
+            echo "  Export:      python -m eqgen.cli.export --speaker small -o src/eq_coeffs.h"
+            echo "  Run tests:   make test"
+            echo "  Sanity:      make sanitycheck"
           '';
         };
       });

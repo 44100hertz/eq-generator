@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eqgen"
+version = "0.1.0"
+description = "Speaker EQ correction with psychoacoustic bass enhancement"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+]
+
+[project.scripts]
+eqgen = "eqgen.cli.eqgen:main"
+eqgen-audition = "eqgen.cli.audition:main"
+eqgen-enhance = "eqgen.cli.enhance:main"
+eqgen-wire = "eqgen.cli.wire:main"
+eqgen-export = "eqgen.cli.export:main"
+
+[tool.setuptools]
+packages = ["eqgen", "eqgen.cli", "eqgen.tests"]
