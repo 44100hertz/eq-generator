@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Live system-wide EQ via PipeWire LADSPA.
+Live system-wide EQ via PipeWire null-sink + DSP filter chain.
 
 Usage:
     python -m eqgen.cli.wire setup technics/standing
@@ -13,14 +13,15 @@ setup does:
   2. Fits IIR biquads
   3. Quantizes to Q4.28
   4. Generates src/eq_coeffs.h
-  5. Builds enhancer.so + eqgen_ladspa.so
+  5. Builds enhancer.so + eqgen_ladspa.so + filter
   6. Installs LADSPA plugin to ~/.ladspa/
-  7. Creates a LADSPA sink → wires to hardware output
+  7. Creates a null sink + DSP filter chain → wires to hardware output
 """
 
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -33,7 +34,7 @@ sys.path.insert(0, str(ROOT))
 
 from eqgen.pipeline import run_pipeline, design_eq
 from eqgen.quantize import BiquadQ28, q28_to_float, quantize_biquads_q28
-from eqgen.eq_fit import cascade_response_db, BiquadCoeffs
+from eqgen.eq_fit import cascade_response_db, BiquadCoeffs, fit_eq_curve
 
 MEAS_DIR = ROOT / "measurements"
 SRC_DIR = ROOT / "src"
@@ -197,7 +198,7 @@ def build_and_install():
 # ── Wiring ────────────────────────────────────────────────────────────
 
 def setup_wiring(cfg, coeffs_flat):
-    """Create a LADSPA sink wrapping eqgen_ladspa, set as default."""
+    """Create a null sink + DSP filter chain, set as default."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     state = {**cfg, "coeffs_q28": coeffs_flat,
              "n_biquads": len(coeffs_flat) // 5}
@@ -208,62 +209,117 @@ def setup_wiring(cfg, coeffs_flat):
     state["previous_sink"] = prev_sink
     print(f"\n── Current default sink: {prev_sink}")
 
-    ladspa_plugin = str(Path.home() / ".ladspa" / "eqgen_ladspa")
-
-    print(f"\n── Creating LADSPA sink (eqgen_sink → {prev_sink})...")
-    r = _pactl("load-module", "module-ladspa-sink",
+    # 1. Create null sink
+    print(f"\n── Creating null sink (eqgen_sink)...")
+    r = _pactl("load-module", "module-null-sink",
                "sink_name=eqgen_sink",
-               f"sink_master={prev_sink}",
-               f"plugin={ladspa_plugin}",
-               "label=eqgen",
-               f"control={cfg['release_secs']}",
-               "sink_properties=device.description=EQGen")
+               "sink_properties=device.description=EQGen",
+               "format=float32le",
+               "rate=48000",
+               "channels=2")
     if r.returncode != 0:
-        sys.exit(f"  ERROR: {r.stderr.strip()}")
-    module_id = r.stdout.strip()
-    state["ladspa_module_id"] = module_id
-    print(f"  Module #{module_id} loaded")
+        sys.exit(f"  ERROR: Cannot create null sink: {r.stderr.strip()}")
+    null_sink_id = r.stdout.strip()
+    state["null_sink_id"] = null_sink_id
+    print(f"  Module #{null_sink_id} loaded")
 
+    # 2. Build filter if needed
+    filter_bin = SRC_DIR / "eqgen_filter"
+    if not filter_bin.exists():
+        print(f"\n── Building DSP filter...")
+        r = _run(["make", "-C", str(SRC_DIR), "filter"],
+                 capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit(f"  ERROR: filter build failed: {r.stderr}")
+
+    # 3. Launch filter chain: parec → filter → pacat
+    print(f"\n── Launching DSP chain (eqgen_sink → filter → {prev_sink})...")
+    cmd = (
+        f"parec -d eqgen_sink.monitor --format=float32le --rate=48000 "
+        f"--latency-msec=20 2>/dev/null | "
+        f"{filter_bin} 48000 2>/tmp/eqgen_filter.log | "
+        f"pacat -d {prev_sink} --format=float32le --rate=48000 "
+        f"--latency-msec=20 2>/dev/null"
+    )
+    pid_file = STATE_DIR / "filter.pid"
+    log_file = STATE_DIR / "filter.log"
+    with open(log_file, "w") as lf:
+        proc = subprocess.Popen(
+            ["bash", "-c", cmd],
+            stdout=subprocess.DEVNULL, stderr=lf,
+            start_new_session=True,
+        )
+    pid_file.write_text(str(proc.pid))
+    state["filter_pid"] = proc.pid
+    time.sleep(0.5)
+
+    # Check it's still alive
+    if proc.poll() is not None:
+        sys.exit(f"  ERROR: filter chain exited early (see {log_file})")
+    print(f"  Filter chain PID {proc.pid} running")
+
+    # 4. Persist state
     with open(str(STATE_FILE), "w") as f:
         json.dump(state, f, indent=2)
 
+    # 5. Set null sink as default
     print(f"\n── Setting eqgen_sink as default...")
+    time.sleep(0.3)
     set_default_sink("eqgen_sink")
     time.sleep(0.3)
-    print(f"  Default sink: {get_default_sink()}")
+    new_sink = get_default_sink()
+    if new_sink and "eqgen" in new_sink:
+        print(f"  Default sink: {new_sink}")
+        print(f"\n  ✅ Audio now flows: app → eqgen_sink → filter → {prev_sink}")
+    else:
+        print(f"  Warning: eqgen_sink not set as default (got: {new_sink})")
+        teardown_wiring()
+        sys.exit(1)
 
-    print(f"\n  ✅ Audio now flows: app → eqgen_sink (LADSPA DSP) → {prev_sink}")
     print(f"  Run 'python -m eqgen.cli.wire teardown' to restore.")
 
 
 def teardown_wiring():
-    """Unload LADSPA sink, restore previous defaults."""
+    """Kill filter chain, unload null sink, restore defaults."""
     state = {}
     if STATE_FILE.exists():
         try:
             with open(STATE_FILE) as f:
                 state = json.load(f)
         except (json.JSONDecodeError, OSError):
-            print("State file corrupt — cleaning up by scanning.")
+            print("State file corrupt — cleaning up.")
 
-    mod_id = state.get("ladspa_module_id")
-    if mod_id:
-        print(f"Unloading LADSPA sink module #{mod_id}...")
-        _pactl("unload-module", mod_id)
-    else:
-        # Fallback: scan for eqgen-related modules if state file missing
-        r = _pactl("list", "modules", "short")
-        for line in r.stdout.splitlines():
-            if "eqgen" in line.lower():
-                parts = line.split()
-                if parts:
-                    _pactl("unload-module", parts[0])
-
+    # 1. Restore default sink first
     prev = state.get("previous_sink")
     if prev:
         print(f"Restoring default sink: {prev}")
         set_default_sink(prev)
+        time.sleep(0.2)
 
+    # 2. Kill filter chain
+    filter_pid = state.get("filter_pid")
+    if filter_pid:
+        try:
+            os.kill(int(filter_pid), 0)
+            print(f"Stopping filter chain (PID {filter_pid})...")
+            os.kill(int(filter_pid), signal.SIGTERM)
+            time.sleep(0.3)
+            try:
+                os.kill(int(filter_pid), signal.SIGKILL)
+            except OSError:
+                pass
+        except OSError:
+            pass
+
+    # 3. Unload null sink
+    null_sink_id = state.get("null_sink_id")
+    if null_sink_id:
+        print(f"Unloading null sink #{null_sink_id}...")
+        _pactl("unload-module", str(null_sink_id))
+
+    # 4. Clean up state
+    pid_file = STATE_DIR / "filter.pid"
+    pid_file.unlink(missing_ok=True)
     STATE_FILE.unlink(missing_ok=True)
     print("  ✅ Teardown complete.")
 

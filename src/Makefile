@@ -24,9 +24,12 @@ LADSPA_INSTALL_DIR = $(HOME)/.ladspa
 TEST_SOURCES   = test_enhancer.c
 TEST_TARGET    = test_enhancer
 
-.PHONY: all ladspa install-ladspa clean test
+FILTER_SOURCES = filter.c
+FILTER_TARGET  = eqgen_filter
 
-all: $(TARGET) $(LADSPA_TARGET)
+.PHONY: all ladspa install-ladspa filter clean test
+
+all: $(TARGET) $(LADSPA_TARGET) $(FILTER_TARGET)
 
 $(TARGET): $(SOURCES) $(HEADERS)
 	$(CC) $(CFLAGS) $(LDFLAGS_SO) -o $@ $(SOURCES)
@@ -40,8 +43,13 @@ install-ladspa: $(LADSPA_TARGET)
 	mkdir -p $(LADSPA_INSTALL_DIR)
 	cp $(LADSPA_TARGET) $(LADSPA_INSTALL_DIR)/
 
+$(FILTER_TARGET): $(FILTER_SOURCES) $(SOURCES) $(HEADERS)
+	$(CC) $(CFLAGS) -I. -o $@ $(FILTER_SOURCES) $(SOURCES) -lm
+
+filter: $(FILTER_TARGET)
+
 clean:
-	rm -f $(TARGET) $(LADSPA_TARGET) $(TEST_TARGET)
+	rm -f $(TARGET) $(LADSPA_TARGET) $(TEST_TARGET) $(FILTER_TARGET)
 
 test: $(TEST_TARGET)
 	./$(TEST_TARGET)
