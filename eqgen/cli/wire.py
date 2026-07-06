@@ -199,6 +199,13 @@ def build_and_install():
 
 def setup_wiring(cfg, coeffs_flat):
     """Create a null sink + DSP filter chain, set as default."""
+
+    # Tear down any previous instance first
+    if STATE_FILE.exists():
+        print(f"\n── Found existing EQGen instance, tearing down...")
+        teardown_wiring()
+        time.sleep(0.3)
+
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     state = {**cfg, "coeffs_q28": coeffs_flat,
              "n_biquads": len(coeffs_flat) // 5}
@@ -206,6 +213,17 @@ def setup_wiring(cfg, coeffs_flat):
     prev_sink = get_default_sink()
     if not prev_sink:
         sys.exit("ERROR: no default sink found")
+
+    # If we're already the default (e.g. leftover from previous run),
+    # find the real hardware sink to use as output target
+    if "eqgen" in prev_sink:
+        r = _pactl("list", "sinks", "short")
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and "eqgen" not in parts[1].lower():
+                prev_sink = parts[1]
+                break
+        print(f"\n── Current default is eqgen, using hardware sink: {prev_sink}")
     state["previous_sink"] = prev_sink
     print(f"\n── Current default sink: {prev_sink}")
 
@@ -317,7 +335,18 @@ def teardown_wiring():
         print(f"Unloading null sink #{null_sink_id}...")
         _pactl("unload-module", str(null_sink_id))
 
-    # 4. Clean up state
+    # 4. Fallback: scan for any orphaned eqgen sinks/modules
+    r = _pactl("list", "modules", "short")
+    for line in r.stdout.splitlines():
+        if "eqgen" in line.lower():
+            parts = line.split()
+            if parts:
+                _pactl("unload-module", parts[0])
+
+    # 5. Kill any lingering eqgen_filter processes
+    _run(["pkill", "-f", "eqgen_filter"], capture_output=True)
+
+    # 6. Clean up state
     pid_file = STATE_DIR / "filter.pid"
     pid_file.unlink(missing_ok=True)
     STATE_FILE.unlink(missing_ok=True)
