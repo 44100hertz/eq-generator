@@ -300,10 +300,10 @@ def setup_wiring(cfg, coeffs_flat):
     print(f"\n── Launching DSP chain (eqgen_sink → filter → {output_sink})...")
     cmd = (
         f"pw-cat -a --record --target {null_serial} "
-        f"--format f32 --rate {rate} --channels 2 - 2>/dev/null | "
+        f"--format f32 --rate {rate} --channels 2 --latency 20ms - 2>/dev/null | "
         f"{filter_bin} {rate} 2>/tmp/eqgen_filter.log | "
         f"pw-cat -a --playback --target 0 "
-        f"--format f32 --rate {rate} --channels 2 - 2>/dev/null"
+        f"--format f32 --rate {rate} --channels 2 --latency 20ms - 2>/dev/null"
     )
     pid_file = STATE_DIR / "filter.pid"
     log_file = STATE_DIR / "filter.log"
