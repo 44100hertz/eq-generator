@@ -226,6 +226,24 @@ def _find_hardware_sink():
     return None
 
 
+def _pw_node_serial(node_name):
+    """Return object.serial of a PipeWire node by name, or None."""
+    r = subprocess.run(
+        ["pw-dump"], capture_output=True, text=True, timeout=5)
+    if r.returncode != 0:
+        return None
+    try:
+        import json
+        data = json.loads(r.stdout)
+        for obj in data:
+            props = obj.get("info", {}).get("props", {})
+            if props.get("node.name") == node_name:
+                return props.get("object.serial")
+    except (json.JSONDecodeError, KeyError):
+        pass
+    return None
+
+
 def setup_wiring(cfg, coeffs_flat):
     """Create a null sink + DSP filter chain, set as default."""
 
@@ -248,12 +266,13 @@ def setup_wiring(cfg, coeffs_flat):
     print(f"\n── Hardware output: {output_sink}")
 
     # 1. Create null sink
-    print(f"\n── Creating null sink (eqgen_sink)...")
+    rate = int(cfg["fs"])
+    print(f"\n── Creating null sink (eqgen_sink @ {rate} Hz)...")
     r = _pactl("load-module", "module-null-sink",
                "sink_name=eqgen_sink",
                "sink_properties=device.description=EQGen",
                "format=float32le",
-               "rate=48000",
+               f"rate={rate}",
                "channels=2")
     if r.returncode != 0:
         sys.exit(f"  ERROR: Cannot create null sink: {r.stderr.strip()}")
@@ -270,14 +289,21 @@ def setup_wiring(cfg, coeffs_flat):
         if r.returncode != 0:
             sys.exit(f"  ERROR: filter build failed: {r.stderr}")
 
-    # 3. Launch filter chain: parec → filter → pacat
+    # 3. Resolve null sink serial (pw-cat -a needs numeric target)
+    null_serial = _pw_node_serial("eqgen_sink")
+    if not null_serial:
+        sys.exit("ERROR: cannot resolve eqgen_sink serial")
+
+    # 4. Launch filter chain: pw-cat → filter → pw-cat
+    # Record: pw-cat -a with numeric serial → captures from eqgen_sink monitor
+    # Playback: pw-cat -a --target 0 → creates unlinked ports, we link manually
     print(f"\n── Launching DSP chain (eqgen_sink → filter → {output_sink})...")
     cmd = (
-        f"parec -d eqgen_sink.monitor --format=float32le --rate=48000 "
-        f"--latency-msec=20 2>/dev/null | "
-        f"{filter_bin} 48000 2>/tmp/eqgen_filter.log | "
-        f"pacat -d {output_sink} --format=float32le --rate=48000 "
-        f"--latency-msec=20 2>/dev/null"
+        f"pw-cat -a --record --target {null_serial} "
+        f"--format f32 --rate {rate} --channels 2 - 2>/dev/null | "
+        f"{filter_bin} {rate} 2>/tmp/eqgen_filter.log | "
+        f"pw-cat -a --playback --target 0 "
+        f"--format f32 --rate {rate} --channels 2 - 2>/dev/null"
     )
     pid_file = STATE_DIR / "filter.pid"
     log_file = STATE_DIR / "filter.log"
@@ -296,7 +322,24 @@ def setup_wiring(cfg, coeffs_flat):
         sys.exit(f"  ERROR: filter chain exited early (see {log_file})")
     print(f"  Filter chain PID {proc.pid} running")
 
-    # 4. Persist state
+    # 5. Manually link playback pw-cat → hardware output
+    print(f"\n── Linking pw-cat → {output_sink}...")
+    time.sleep(0.3)
+    r = subprocess.run(
+        ["pw-link", "pw-cat:output_FL",
+         f"{output_sink}:playback_FL"],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit(f"  ERROR: pw-link FL failed: {r.stderr.strip()}")
+    r = subprocess.run(
+        ["pw-link", "pw-cat:output_FR",
+         f"{output_sink}:playback_FR"],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit(f"  ERROR: pw-link FR failed: {r.stderr.strip()}")
+    print(f"  Linked pw-cat:output → {output_sink}:playback")
+
+    # 6. Persist state
     with open(str(STATE_FILE), "w") as f:
         json.dump(state, f, indent=2)
 
