@@ -71,11 +71,11 @@ int main(int argc, char *argv[]) {
 
     fprintf(stderr, "filter: running at %.0f Hz\n", fs);
 
-    float buf[2048]; /* stereo interleaved: L,R,L,R,... */
+    float buf[512]; /* stereo interleaved: L,R,L,R,...  256 frames = 5.8ms @ 44100 */
     size_t frame_sz = 2 * sizeof(float);
 
     while (g_running) {
-        size_t nread = fread(buf, frame_sz, 1024, stdin);
+        size_t nread = fread(buf, frame_sz, 256, stdin);
         if (nread == 0) {
             if (feof(stdin)) break;
             if (ferror(stdin)) { perror("filter: read error"); break; }
