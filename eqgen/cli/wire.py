@@ -197,6 +197,35 @@ def build_and_install():
 
 # ── Wiring ────────────────────────────────────────────────────────────
 
+def _find_hardware_sink():
+    """Return the current default if it's hardware, else the best active
+    non-eqgen sink (preferring RUNNING > IDLE > SUSPENDED)."""
+    default = get_default_sink()
+    if default and "eqgen" not in default.lower():
+        return default
+
+    r = _pactl("list", "sinks", "short")
+    candidates = []
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name = parts[1]
+        if "eqgen" in name.lower():
+            continue
+        prio = 2  # SUSPENDED or unknown
+        if "RUNNING" in line:
+            prio = 0
+        elif "IDLE" in line:
+            prio = 1
+        candidates.append((prio, name))
+
+    if candidates:
+        candidates.sort()
+        return candidates[0][1]
+    return None
+
+
 def setup_wiring(cfg, coeffs_flat):
     """Create a null sink + DSP filter chain, set as default."""
 
@@ -210,22 +239,13 @@ def setup_wiring(cfg, coeffs_flat):
     state = {**cfg, "coeffs_q28": coeffs_flat,
              "n_biquads": len(coeffs_flat) // 5}
 
-    prev_sink = get_default_sink()
-    if not prev_sink:
-        sys.exit("ERROR: no default sink found")
+    # Resolve the real hardware output target
+    output_sink = _find_hardware_sink()
+    if not output_sink:
+        sys.exit("ERROR: no hardware sink found")
 
-    # If we're already the default (e.g. leftover from previous run),
-    # find the real hardware sink to use as output target
-    if "eqgen" in prev_sink:
-        r = _pactl("list", "sinks", "short")
-        for line in r.stdout.splitlines():
-            parts = line.split()
-            if len(parts) >= 2 and "eqgen" not in parts[1].lower():
-                prev_sink = parts[1]
-                break
-        print(f"\n── Current default is eqgen, using hardware sink: {prev_sink}")
-    state["previous_sink"] = prev_sink
-    print(f"\n── Current default sink: {prev_sink}")
+    state["previous_sink"] = output_sink
+    print(f"\n── Hardware output: {output_sink}")
 
     # 1. Create null sink
     print(f"\n── Creating null sink (eqgen_sink)...")
@@ -251,12 +271,12 @@ def setup_wiring(cfg, coeffs_flat):
             sys.exit(f"  ERROR: filter build failed: {r.stderr}")
 
     # 3. Launch filter chain: parec → filter → pacat
-    print(f"\n── Launching DSP chain (eqgen_sink → filter → {prev_sink})...")
+    print(f"\n── Launching DSP chain (eqgen_sink → filter → {output_sink})...")
     cmd = (
         f"parec -d eqgen_sink.monitor --format=float32le --rate=48000 "
         f"--latency-msec=20 2>/dev/null | "
         f"{filter_bin} 48000 2>/tmp/eqgen_filter.log | "
-        f"pacat -d {prev_sink} --format=float32le --rate=48000 "
+        f"pacat -d {output_sink} --format=float32le --rate=48000 "
         f"--latency-msec=20 2>/dev/null"
     )
     pid_file = STATE_DIR / "filter.pid"
@@ -288,7 +308,7 @@ def setup_wiring(cfg, coeffs_flat):
     new_sink = get_default_sink()
     if new_sink and "eqgen" in new_sink:
         print(f"  Default sink: {new_sink}")
-        print(f"\n  ✅ Audio now flows: app → eqgen_sink → filter → {prev_sink}")
+        print(f"\n  ✅ Audio now flows: app → eqgen_sink → filter → {output_sink}")
     else:
         print(f"  Warning: eqgen_sink not set as default (got: {new_sink})")
         teardown_wiring()
@@ -307,11 +327,11 @@ def teardown_wiring():
         except (json.JSONDecodeError, OSError):
             print("State file corrupt — cleaning up.")
 
-    # 1. Restore default sink first
-    prev = state.get("previous_sink")
-    if prev:
-        print(f"Restoring default sink: {prev}")
-        set_default_sink(prev)
+    # 1. Restore any hardware sink as default (don't trust stale saved state)
+    hw_sink = _find_hardware_sink()
+    if hw_sink:
+        print(f"Restoring default sink: {hw_sink}")
+        set_default_sink(hw_sink)
         time.sleep(0.2)
 
     # 2. Kill filter chain
