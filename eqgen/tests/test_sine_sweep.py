@@ -34,7 +34,7 @@ target_db = 20.0 * np.log10(np.array([max(eq_curve[f], 1e-12) for f in eq_freqs]
 fit = fit_eq_curve(eq_freqs, target_db, FS, max_bands=MAX_BANDS,
                              min_freq=f_min, max_freq=f_max,
                              min_peaking_freq=40.0,
-                             gain_range=(-24.0, 24.0), q_range=(0.3, 6.0))
+                             gain_range=(-60.0, 60.0), q_range=(0.3, 6.0))
 
 bq_q28 = quantize_biquads_q28(fit.biquads)
 coeffs = [v for bq in bq_q28 for v in [bq.b0, bq.b1, bq.b2, bq.a1, bq.a2]]

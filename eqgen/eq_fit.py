@@ -175,8 +175,8 @@ def fit_eq_curve(
     min_freq: float = 20.0,
     max_freq: float = 20000.0,
     min_peaking_freq: float = 40.0,
-    gain_range: Tuple[float, float] = (-24.0, 24.0),
-    q_range: Tuple[float, float] = (0.3, 6.0),
+    gain_range: Tuple[float, float] = (-60.0, 60.0),
+    q_range: Tuple[float, float] = (0.3, 32.0),
     stop_db: float = 0.3,
 ) -> FitResult:
     """Fit a target gain curve (dB) to cascaded peaking biquads.
@@ -207,30 +207,35 @@ def fit_eq_curve(
         FitResult with biquads, metadata, and final residual.
     """
     result = FitResult()
-    mask = (freqs >= min_freq) & (freqs <= max_freq)
 
-    cascade_db = np.zeros(len(freqs))
-    residual = target_db.copy()
+    # Evaluate on a uniform log-spaced grid so residual search isn't
+    # biased by the adaptive measurement grid's point density.
+    N_EVAL = 256
+    eval_freqs = np.logspace(np.log10(min_freq), np.log10(max_freq), N_EVAL)
+    eval_target = np.interp(eval_freqs, freqs, target_db)
+    eval_mask = np.ones(N_EVAL, dtype=bool)  # all points already in [min,max]
+
+    cascade_db = np.zeros(N_EVAL)
+    residual = eval_target.copy()
 
     for i in range(max_bands):
-        masked_residual = np.abs(residual[mask])
-        too_low = freqs[mask] < min_peaking_freq
-        actionable = masked_residual.copy()
+        actionable = np.abs(residual)
+        too_low = eval_freqs < min_peaking_freq
         actionable[too_low] = 0.0
 
         if np.max(actionable) < stop_db:
             break
 
         idx = np.argmax(actionable)
-        f0 = freqs[mask][idx]
-        error_db = residual[mask][idx]
+        f0 = eval_freqs[idx]
+        error_db = residual[idx]
 
         best_gain, best_Q, best_err = _search_band_params(
-            f0, error_db, cascade_db, target_db, freqs, fs, mask,
+            f0, error_db, cascade_db, eval_target, eval_freqs, fs, eval_mask,
             gain_range=gain_range, q_range=q_range,
         )
 
-        current_rms = float(np.sqrt(np.mean(residual[mask] ** 2)))
+        current_rms = float(np.sqrt(np.mean(residual ** 2)))
         if current_rms - best_err < 0.01 and current_rms < stop_db * 2.0:
             break
 
@@ -243,11 +248,12 @@ def fit_eq_curve(
             "Q": best_Q,
         })
 
-        pk_db = _peaking_response_db(f0, best_gain, best_Q, freqs, fs)
+        pk_db = _peaking_response_db(f0, best_gain, best_Q, eval_freqs, fs)
         cascade_db = cascade_db + pk_db
-        residual = target_db - cascade_db
+        residual = eval_target - cascade_db
 
-    result.residual_db = residual
+    # Store residual on the original freqs for API compatibility
+    result.residual_db = target_db - cascade_response_db(result.biquads, freqs, fs)
     return result
 
 
@@ -364,8 +370,8 @@ def _golden_search_Q(f0: float, gain_db: float, cascade_db: np.ndarray,
 def _search_band_params(f0: float, residual_at_f0: float,
                          cascade_db: np.ndarray, target_db: np.ndarray,
                          freqs: np.ndarray, fs: float, mask: np.ndarray,
-                         gain_range: Tuple[float, float] = (-24.0, 24.0),
-                         q_range: Tuple[float, float] = (0.3, 6.0),
+                         gain_range: Tuple[float, float] = (-60.0, 60.0),
+                         q_range: Tuple[float, float] = (0.3, 32.0),
                          ) -> Tuple[float, float, float]:
     """Search for optimal (gain_db, Q) for a peaking filter at f0.
 

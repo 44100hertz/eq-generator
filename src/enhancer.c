@@ -1,7 +1,7 @@
 /**
  * enhancer.c — Harmonic bass enhancer implementation (process_fixed_v2)
  *
- * Port of dsp.py process_fixed_v2 to ESP32-C3 Q16 fixed-point.
+ * Port of dsp.py process_fixed_v2 to ESP32 Q16 fixed-point.
  *
  * Uses:
  *   - BiquadQ28 for all filtering (Q4.28 coefficients, Q16 state)
@@ -216,24 +216,14 @@ int32_t cheb_t3(int32_t x) {
     return (int32_t)(four_x3 - three_x);
 }
 
-/* ── Software reciprocal (for targets without hardware divide) ─────── */
-
-/** Compute 1/x in Q16.16 using 64-bit division.
- *  x is Q16 (> 0 expected). Result is recip in Q16.16.
- */
-static inline uint32_t soft_reciprocal(int32_t x) {
-    if (x <= 0) return 0x7FFFFFFF;
-    /* 1.0 in Q16.16 = 0x100000000 = 4,294,967,296 = (int64_t)1 << 32 */
-    /* 1/x in Q16.16 = (1 << 32) / x */
-    return (uint32_t)(((uint64_t)1 << 32) / (uint32_t)x);
-}
-
 /* ── Per-channel tick ──────────────────────────────────────────────── */
 
 static int32_t enhancer_process_channel(BassEnhancerChan *ch,
                                         const BassEnhancerCfg *cfg,
                                         int32_t x)
 {
+    const ReciprocalLUT *lut = ch->env_t2.lut;  /* all envs share the same LUT */
+
     /* ── Stage 0: DC blocker (first-order HP at ~5 Hz) ───────────── */
     x = DCBlocker_tick(&ch->dc_block, x);
 
@@ -249,7 +239,7 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
     /* Normalize: lp_t2 / env_t2 (with safety floor) */
     int32_t norm_t2;
     if (env_t2 > 6) {  /* floor: ~0.0001 in Q16, matches Python/EEL */
-        uint32_t inv = soft_reciprocal(env_t2);
+        uint32_t inv = ReciprocalLUT_lookup(lut, env_t2);
         norm_t2 = (int32_t)(((int64_t)lp_t2 * (int64_t)inv) >> 16);
     } else {
         norm_t2 = 0;
@@ -268,7 +258,7 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
 
     int32_t norm_t3;
     if (env_t3 > 6) {
-        uint32_t inv = soft_reciprocal(env_t3);
+        uint32_t inv = ReciprocalLUT_lookup(lut, env_t3);
         norm_t3 = (int32_t)(((int64_t)lp_t3 * (int64_t)inv) >> 16);
     } else {
         norm_t3 = 0;
@@ -295,7 +285,7 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
        through untouched.  Brick-wall clamp as safety net.       */
     int32_t env_lim = Env_tick(&ch->env_lim, out);
     int32_t env_peak = env_lim > 65536 ? env_lim : 65536;  /* max(env, 1.0) */
-    uint32_t inv = soft_reciprocal(env_peak);
+    uint32_t inv = ReciprocalLUT_lookup(lut, env_peak);
     int32_t lim_gain = (int32_t)(inv >> 16);  /* Q16.16 → Q16 */
     harm_hp = (int32_t)(((int64_t)harm_hp * (int64_t)lim_gain) >> 16);
     out = dry_hp + harm_hp;

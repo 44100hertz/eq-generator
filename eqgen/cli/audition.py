@@ -29,7 +29,7 @@ MEAS_DIR = ROOT / "measurements"
 
 def run_speaker(speaker_name: str, out_dir: str, music_dir: str = None,
                 fc: float = 60.0, h2: float = 0.5, h3: float = 1.0,
-                max_bands: int = 24, max_noise: float = 0.65,
+                max_bands: int = 40, max_noise: float = 0.65,
                 tracks: list = None):
     """Design EQ for a speaker and process music tracks through it."""
     meas_dir = MEAS_DIR / speaker_name
@@ -135,8 +135,8 @@ def main():
                     help="2nd harmonic amplitude [0.5]")
     ap.add_argument("--h3", type=float, default=1.0,
                     help="3rd harmonic amplitude [1.0]")
-    ap.add_argument("--max-bands", type=int, default=24,
-                    help="Max IIR biquad bands [24]")
+    ap.add_argument("--max-bands", type=int, default=40,
+                    help="Max IIR biquad bands [40]")
     ap.add_argument("--max-noise", type=float, default=0.65,
                     help="Adaptive EQ noise threshold [0.65]")
     args = ap.parse_args()

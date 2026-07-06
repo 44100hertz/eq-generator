@@ -27,7 +27,7 @@
             echo "  Live wire:   python -m eqgen.cli.wire setup <speaker>"
             echo "  Export:      python -m eqgen.cli.export --speaker small -o src/eq_coeffs.h"
             echo "  Run tests:   make test"
-            echo "  Sanity:      make sanitycheck"
+            echo "  Graph check: make graph-check"
           '';
         };
       });

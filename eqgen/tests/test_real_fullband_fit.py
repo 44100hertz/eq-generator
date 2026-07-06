@@ -50,7 +50,7 @@ for label, tgt in [("CLAMPED ±24 dB", target_db), ("RAW (unclamped)", target_ra
     fit = fit_eq_curve(
         eq_freqs, tgt, fs, max_bands=40,
         min_freq=FC/2.0, max_freq=nyquist, min_peaking_freq=max(40.0, FC/2.0),
-        gain_range=(-24.0, 24.0), q_range=(0.3, 6.0), stop_db=0.3,
+        gain_range=(-60.0, 60.0), q_range=(0.3, 6.0), stop_db=0.3,
     )
     bq_q28 = quantize_biquads_q28(fit.biquads)
     q28_floats = [BiquadCoeffs(b0=q28_to_float(b.b0), b1=q28_to_float(b.b1),

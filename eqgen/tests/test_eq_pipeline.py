@@ -3,7 +3,7 @@ End-to-end test: measurement data → EQ curve → IIR biquad fit → 16.16 quan
 
 This is the complete Python pipeline that will later be ported to C.
 The output of this test determines whether the IIR fit and quantization
-are good enough for the ESP32-C3 to run.
+are good enough for the ESP32 to run.
 
 Pipeline:
   1. Load real measurement data (speaker response vs target)

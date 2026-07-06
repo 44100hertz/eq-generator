@@ -1,0 +1,29 @@
+# ── Bluetooth Classic + A2DP ──────────────────────────────────
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CLASSIC_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_A2DP_ENABLE=y
+CONFIG_BT_SPP_ENABLED=n
+CONFIG_BT_HFP_ENABLE=n
+CONFIG_BT_HID_ENABLED=n
+CONFIG_BT_BLE_ENABLED=n
+
+# ── Performance ───────────────────────────────────────────────
+CONFIG_ESP32_DEFAULT_CPU_FREQ_240=y
+CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ=240
+CONFIG_FREERTOS_UNICORE=n
+CONFIG_FREERTOS_HZ=1000
+
+# ── Memory ────────────────────────────────────────────────────
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=n
+CONFIG_BT_BTU_TASK_STACK_SIZE=4096
+
+# ── Partition table ───────────────────────────────────────────
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# ── Reduce bloat ──────────────────────────────────────────────
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_BTDM_CTRL_BR_EDR_SCO_DATA_PATH_EFF=0

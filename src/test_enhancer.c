@@ -23,10 +23,10 @@
 #endif
 #include <assert.h>
 
-#include "src/biquad_q28.h"
-#include "src/envelope.h"
-#include "src/enhancer.h"
-#include "src/dc_blocker.h"
+#include "biquad_q28.h"
+#include "envelope.h"
+#include "enhancer.h"
+#include "dc_blocker.h"
 
 #define FS 44100.0f
 #define Q16_SCALE 65536
@@ -262,8 +262,8 @@ static int test_cpu_budget(void) {
            samples_per_sec, samples_per_sec / FS, (int)FS);
     printf("  CPU usage: %.1f%% at 160 MHz\n", cpu_pct);
 
-    /* On desktop this will be very fast; on ESP32-C3, scale by ~10-20x */
-    printf("  Estimated ESP32-C3 (20× slower): %.1f µs/frame, %.1f%% CPU\n",
+    /* On desktop this will be very fast; on ESP32 scale by ~5-10x */
+    printf("  Estimated ESP32 (10× slower): %.1f µs/frame, %.1f%% CPU\n",
            us_per_frame * 20.0, cpu_pct * 20.0);
 
     printf("  PASS (benchmark)\n\n");

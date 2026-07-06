@@ -13,16 +13,14 @@ setup does:
   2. Fits IIR biquads
   3. Quantizes to Q4.28
   4. Generates src/eq_coeffs.h
-  5. Builds enhancer.so + LADSPA plugin
-  6. Installs to ~/.ladspa/
-  7. Creates null sink + native filter → wires to hardware output
+  5. Builds enhancer.so + eqgen_ladspa.so
+  6. Installs LADSPA plugin to ~/.ladspa/
+  7. Creates a LADSPA sink → wires to hardware output
 """
 
 import argparse
 import json
 import os
-import re
-import signal
 import subprocess
 import sys
 import time
@@ -52,28 +50,6 @@ def _run(cmd, **kwargs):
 
 def _pactl(*args):
     return subprocess.run(["pactl"] + list(args), capture_output=True, text=True)
-
-
-def _pw_link(out_node, out_port, in_node, in_port):
-    cmd = ["pw-link", f"{out_node}:{out_port}", f"{in_node}:{in_port}"]
-    print(f"  $ {' '.join(cmd)}")
-    subprocess.run(cmd)
-
-
-def _pw_unlink(out_node, out_port, in_node, in_port):
-    cmd = ["pw-link", "-d", f"{out_node}:{out_port}", f"{in_node}:{in_port}"]
-    print(f"  $ {' '.join(cmd)}")
-    subprocess.run(cmd)
-
-
-def get_pw_rate():
-    r = subprocess.run(["pactl", "list", "sinks"], capture_output=True, text=True)
-    for line in r.stdout.splitlines():
-        if "Sample Specification" in line:
-            m = re.search(r'(\d+)Hz', line)
-            if m:
-                return int(m.group(1))
-    return 48000
 
 
 def get_default_sink():
@@ -125,7 +101,7 @@ def generate_eq_header(bq_q28, bands, cfg):
 
 def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
                        target_path=None, fc=60.0, h2=0.5, h3=1.0,
-                       max_noise=0.65, max_bands=24, target_fs=None):
+                       max_noise=0.65, max_bands=40, target_fs=None):
     """Run pipeline + IIR fit, return biquads and config."""
     if speaker_name:
         meas_dir = MEAS_DIR / speaker_name
@@ -221,7 +197,7 @@ def build_and_install():
 # ── Wiring ────────────────────────────────────────────────────────────
 
 def setup_wiring(cfg, coeffs_flat):
-    """Create null sink, launch bridge, link, set as default."""
+    """Create a LADSPA sink wrapping eqgen_ladspa, set as default."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     state = {**cfg, "coeffs_q28": coeffs_flat,
              "n_biquads": len(coeffs_flat) // 5}
@@ -230,70 +206,38 @@ def setup_wiring(cfg, coeffs_flat):
     if not prev_sink:
         sys.exit("ERROR: no default sink found")
     state["previous_sink"] = prev_sink
-    pw_rate = get_pw_rate()
     print(f"\n── Current default sink: {prev_sink}")
-    print(f"── PW rate: {pw_rate} Hz  |  DSP rate: {cfg['fs']:.0f} Hz")
 
-    print(f"\n── Creating eqgen_sink (null sink)...")
-    r = _pactl("load-module", "module-null-sink",
+    ladspa_plugin = str(Path.home() / ".ladspa" / "eqgen_ladspa")
+
+    print(f"\n── Creating LADSPA sink (eqgen_sink → {prev_sink})...")
+    r = _pactl("load-module", "module-ladspa-sink",
                "sink_name=eqgen_sink",
+               f"sink_master={prev_sink}",
+               f"plugin={ladspa_plugin}",
+               "label=eqgen",
+               f"control={cfg['release_secs']}",
                "sink_properties=device.description=EQGen")
     if r.returncode != 0:
         sys.exit(f"  ERROR: {r.stderr.strip()}")
     module_id = r.stdout.strip()
-    state["null_sink_module_id"] = module_id
+    state["ladspa_module_id"] = module_id
     print(f"  Module #{module_id} loaded")
-    time.sleep(0.5)
-
-    print(f"\n── Building eqgen_filter...")
-    _run(["make", "-C", str(SRC_DIR), "filter"], capture_output=True, text=True)
-
-    filter_bin = str(SRC_DIR / "eqgen_filter")
-    print(f"\n── Launching native PipeWire filter...")
-    filter_proc = subprocess.Popen(
-        [filter_bin, str(pw_rate)],
-        start_new_session=True,
-    )
-    state["bridge_pid"] = filter_proc.pid
-
-    with open(str(STATE_FILE), "w") as f:
-        json.dump(state, f, indent=2)
-
-    time.sleep(0.8)
-    if filter_proc.poll() is not None:
-        sys.exit("  ERROR: filter process exited immediately")
-    print(f"  Filter PID: {filter_proc.pid}")
-
-    print(f"\n── Creating links...")
-    _pw_link("eqgen_sink", "monitor_FL", "eqgen_filter", "input_L")
-    _pw_link("eqgen_sink", "monitor_FR", "eqgen_filter", "input_R")
-    _pw_link("eqgen_filter", "output_L", prev_sink, "playback_FL")
-    _pw_link("eqgen_filter", "output_R", prev_sink, "playback_FR")
-
-    time.sleep(0.3)
-    r = subprocess.run(["pw-link", "-l"], capture_output=True, text=True)
-    links_ok = all(name in r.stdout for name in [
-        "eqgen_sink:monitor_FL", "eqgen_filter:input_L",
-        "eqgen_filter:output_L", prev_sink + ":playback_FL",
-    ])
-    if not links_ok:
-        print("  ⚠️  Links may not be correct. Check: pw-link -l | grep eqgen")
-    else:
-        print("  ✅ Links verified")
 
     with open(str(STATE_FILE), "w") as f:
         json.dump(state, f, indent=2)
 
     print(f"\n── Setting eqgen_sink as default...")
     set_default_sink("eqgen_sink")
+    time.sleep(0.3)
     print(f"  Default sink: {get_default_sink()}")
 
-    print(f"\n  ✅ Audio now flows: app → eqgen_sink → DSP filter → {prev_sink}")
+    print(f"\n  ✅ Audio now flows: app → eqgen_sink (LADSPA DSP) → {prev_sink}")
     print(f"  Run 'python -m eqgen.cli.wire teardown' to restore.")
 
 
 def teardown_wiring():
-    """Restore previous state from state file."""
+    """Unload LADSPA sink, restore previous defaults."""
     state = {}
     if STATE_FILE.exists():
         try:
@@ -302,28 +246,15 @@ def teardown_wiring():
         except (json.JSONDecodeError, OSError):
             print("State file corrupt — cleaning up by scanning.")
 
-    pid = state.get("bridge_pid")
-    if pid:
-        print(f"Killing bridge (PID {pid})...")
-        try:
-            os.killpg(pid, signal.SIGTERM)
-            time.sleep(0.3)
-            os.killpg(pid, signal.SIGKILL)
-        except OSError:
-            for sig in (signal.SIGTERM, signal.SIGKILL):
-                try:
-                    os.kill(pid, sig)
-                except OSError:
-                    pass
-
-    mod_id = state.get("null_sink_module_id")
+    mod_id = state.get("ladspa_module_id")
     if mod_id:
-        print(f"Unloading null sink module #{mod_id}...")
+        print(f"Unloading LADSPA sink module #{mod_id}...")
         _pactl("unload-module", mod_id)
     else:
+        # Fallback: scan for eqgen-related modules if state file missing
         r = _pactl("list", "modules", "short")
         for line in r.stdout.splitlines():
-            if "module-null-sink" in line:
+            if "eqgen" in line.lower():
                 parts = line.split()
                 if parts:
                     _pactl("unload-module", parts[0])
@@ -360,7 +291,7 @@ def main():
     p_setup.add_argument("--h3", type=float, default=1.0)
     p_setup.add_argument("--release", type=float, default=0.2)
     p_setup.add_argument("--max-noise", type=float, default=0.65)
-    p_setup.add_argument("--max-bands", type=int, default=24)
+    p_setup.add_argument("--max-bands", type=int, default=40)
     p_setup.add_argument("--no-wire", action="store_true",
                          help="Build plugin only, don't wire to output")
 
@@ -373,7 +304,7 @@ def main():
     p_build.add_argument("--fc", type=float, default=60.0)
     p_build.add_argument("--h2", type=float, default=0.5)
     p_build.add_argument("--h3", type=float, default=1.0)
-    p_build.add_argument("--max-bands", type=int, default=24)
+    p_build.add_argument("--max-bands", type=int, default=40)
     p_build.add_argument("--max-noise", type=float, default=0.65)
 
     args = ap.parse_args()
@@ -383,19 +314,16 @@ def main():
         return
 
     if args.command == "setup":
-        pw_rate = get_pw_rate()
         if args.speaker and not args.measurement:
             eq_freqs, bq_q28, bands, cfg, coeffs_flat = run_full_pipeline(
                 speaker_name=args.speaker, fc=args.fc, h2=args.h2, h3=args.h3,
                 max_noise=args.max_noise, max_bands=args.max_bands,
-                target_fs=pw_rate,
             )
         elif args.measurement and args.target:
             eq_freqs, bq_q28, bands, cfg, coeffs_flat = run_full_pipeline(
                 meas_paths=args.measurement, noise_path=args.noise,
                 target_path=args.target, fc=args.fc, h2=args.h2, h3=args.h3,
                 max_noise=args.max_noise, max_bands=args.max_bands,
-                target_fs=pw_rate,
             )
         else:
             ap.error("Need either speaker name, or -m/-t")

@@ -199,8 +199,7 @@ class Graph:
         return Graph(new_points)
 
     def bass_enhancer_preprocess(self, fc: float, measurement: "Graph",
-                                  ramp_db: float = -60.0, h2: float = 1.0,
-                                  h3: float = 1.0) -> "Graph":
+                                  h2: float = 1.0, h3: float = 1.0) -> "Graph":
         """Preprocess EQ curve for the harmonic bass enhancer.
 
         For each frequency f, computes the EQ gain G such that the
@@ -223,18 +222,12 @@ class Graph:
             for p in self.points
         ]
 
-        ramp_start = max(20.0, fc / 3.0)
-        ramp_end = fc / 2.0
-        if ramp_end > ramp_start:
-            ramp_ratio = db_to_ratio(ramp_db)
-            for p in new_points:
-                f = p["x"]
-                if f <= ramp_start:
-                    p["y"] *= ramp_ratio
-                elif f < ramp_end:
-                    t = (f - ramp_start) / (ramp_end - ramp_start)
-                    atten_db = ramp_db * (1.0 - t)
-                    p["y"] *= db_to_ratio(atten_db)
+        # Below fc/2 the enhancer handles bass perception via harmonics.
+        # Hold correction flat at the model gain computed AT fc/2.
+        flat_val = solve(fc / 2.0, self.point(fc / 2.0))
+        for p in new_points:
+            if p["x"] <= fc / 2.0:
+                p["y"] = flat_val
 
         return Graph(new_points)
 
@@ -328,8 +321,12 @@ def run_pipeline(
     high_rolloffs: Optional[List[Tuple[float, float]]] = None,
     low_rolloffs: Optional[List[Tuple[float, float]]] = None,
     sample_rate_override: Optional[float] = None,
-) -> Tuple[np.ndarray, np.ndarray, float]:
-    """Run the full EQ correction pipeline and return (freqs_hz, gains_db, sample_rate).
+    detailed: bool = False,
+):
+    """Run the full EQ correction pipeline.
+
+    Without detailed: returns (freqs_hz, gains_db, sample_rate).
+    With detailed=True: returns a dict with all intermediate graphs for visualization.
 
     Steps:
       1. Read & validate WAV files
@@ -428,6 +425,40 @@ def run_pipeline(
 
     freqs = np.array([p["x"] for p in comp.points])
     gains_db = np.array([ratio_to_db(p["y"]) for p in comp.points])
+
+    if detailed:
+        # Gather all intermediate graphs for visualization
+        raw_resp = []
+        for p in measurement_full.points:
+            raw_resp.append({"freq": p["x"], "db": ratio_to_db(p["y"])})
+        raw_target = []
+        for p in target_full.points:
+            raw_target.append({"freq": p["x"], "db": ratio_to_db(p["y"])})
+        noise_data = []
+        if noise_full_res is not None:
+            for p in noise_full_res.points:
+                noise_data.append({"freq": p["x"], "cv": p["y"]})
+        # Also get per-bin CV from pooled for the raw measurement noise
+        pooled_noise = [{"freq": p["freq"], "cv": p["noise"]} for p in pooled]
+        meas_sub = []
+        for p in measurement_mean.points:
+            meas_sub.append({"freq": p["x"], "db": ratio_to_db(p["y"])})
+        targ_sub = []
+        for p in target.points:
+            targ_sub.append({"freq": p["x"], "db": ratio_to_db(p["y"])})
+        return {
+            "freqs": freqs.tolist(),
+            "gains_db": gains_db.tolist(),
+            "sample_rate": sample_rate,
+            "raw_measurement": raw_resp,
+            "raw_target": raw_target,
+            "noise_cv": pooled_noise,
+            "noise_floor": noise_data,
+            "meas_subtracted": meas_sub,
+            "target_resampled": targ_sub,
+            "eq_points_freqs": eq_pts.tolist(),
+        }
+
     return freqs, gains_db, sample_rate
 
 
@@ -444,7 +475,7 @@ def design_eq(
     freqs: np.ndarray,
     target_db: np.ndarray,
     fs: float,
-    max_bands: int = 24,
+    max_bands: int = 40,
 ) -> Tuple[List[int], List[dict], np.ndarray, np.ndarray, np.ndarray]:
     """Design a quantized IIR EQ to match the target curve.
 

@@ -194,7 +194,6 @@ def preprocess_eq_curve(
     fc: float,
     h2: float,
     h3: float,
-    ramp_db: float = -60.0,
 ) -> dict:
     """Compute preprocessed EQ gains matching the Rust pipeline.
 
@@ -202,24 +201,10 @@ def preprocess_eq_curve(
         A(f, G) = target_curve[f]
     where A is model_perceived_amplitude with the given speaker.
 
-    Clamps G ≤ target / speaker(f) (bare speaker correction).
-    Applies a linear ramp below fc/2 to attenuate sub-bass gains.
+    Below fc/2 the enhancer handles bass perception via harmonics —
+    EQ should stay flat there.
     """
     result = {}
-    ramp_start = max(20.0, fc / 3.0)
-    ramp_end = fc / 2.0
-
-    # Precompute ramp factors per frequency
-    def ramp_factor(f):
-        if ramp_end <= ramp_start:
-            return 1.0
-        if f <= ramp_start:
-            return 10.0 ** (ramp_db / 20.0)
-        if f >= ramp_end:
-            return 1.0
-        t = (f - ramp_start) / (ramp_end - ramp_start)
-        atten_db = ramp_db * (1.0 - t)
-        return 10.0 ** (atten_db / 20.0)
 
     for f, target in sorted(target_curve.items()):
         S_f = speaker_response(f)
@@ -228,9 +213,20 @@ def preprocess_eq_curve(
 
         bare_correction = target / S_f if S_f > 1e-12 else 0.01
         G = min(G, bare_correction)
-        G *= ramp_factor(f)
 
         result[f] = G
+
+    # Below fc/2: hold correction flat at the model gain computed AT fc/2.
+    freqs_sorted = sorted(target_curve.keys())
+    target_at_fc2 = float(np.interp(fc / 2.0, freqs_sorted,
+                                     [target_curve[f] for f in freqs_sorted]))
+    S_fc2 = speaker_response(fc / 2.0)
+    model_g = model_perceived_amplitude(fc / 2.0, 1.0, fc, h2, h3, speaker_response)
+    flat_val = target_at_fc2 / model_g if model_g > 1e-12 else 0.01
+    flat_val = min(flat_val, target_at_fc2 / S_fc2 if S_fc2 > 1e-12 else 0.01)
+    for f in result:
+        if f <= fc / 2.0:
+            result[f] = flat_val
 
     return dict(sorted(result.items()))
 

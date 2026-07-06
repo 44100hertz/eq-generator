@@ -2,8 +2,8 @@
 
 A rapid prototyping suite for designing fixed‑point IIR EQ curves with harmonic
 bass enhancement.  Measure a speaker on the desktop, tune parameters, audition
-instantly, then **export Q4.28 coefficients** for deployment on an ESP32‑C3
-running DSP + Bluetooth → I2S audio.
+instantly, then **export Q4.28 coefficients** for deployment on an ESP32
+running DSP + Bluetooth A2DP → I2S DAC → line out.
 
 The DSP core in `src/` is the same C code that ships on the embedded target —
 the desktop tools exist so you never have to tune in C.
@@ -60,7 +60,7 @@ target.wav ──────┘         │                                    
                                           (offline WAV)              (live PipeWire LADSPA)
 ```
 
-### DSP core (runs identically on desktop and ESP32‑C3)
+### DSP core (runs identically on desktop and ESP32)
 
 ```
   input (Q16)
@@ -113,7 +113,7 @@ eqgen/
 │   ├── audio_io.py          # WAV I/O and measurement loading
 │   └── run_all.py           # Test runner
 │
-├── src/                     # C DSP — same code that ships on ESP32‑C3
+├── src/                     # C DSP — same code that ships on ESP32
 │   ├── enhancer.c / .h      # Harmonic bass enhancer (Q16 fixed‑point)
 │   ├── enhancer_api.c / .h  # C API used by Python via ctypes
 │   ├── biquad_q28.h         # Q4.28 biquad filter
@@ -235,7 +235,7 @@ Tear down:
 Tweak cutoff, harmonic amplitudes, noise threshold, number of bands — re‑run,
 re‑listen until it sounds right.
 
-### 5. Export for ESP32‑C3
+### 5. Export for ESP32
 
 When satisfied, bake the coefficients into a C header:
 
@@ -310,18 +310,21 @@ pip install numpy scipy matplotlib       # otherwise
 make -C src                              # builds enhancer.so + eqgen_ladspa.so
 ```
 
-### ESP32‑C3
+### ESP32 (firmware)
 
-1. Run `python export_coeffs.py ... -o src/eq_coeffs.h` to generate coefficients.
-2. Add these files to your ESP‑IDF project:
+1. Run `python -m eqgen.cli.export ... -o src/eq_coeffs.h` to generate coefficients.
+2. Add these DSP source files to your ESP‑IDF project:
    - `src/enhancer.c`, `src/enhancer.h`
    - `src/biquad_q28.h`
    - `src/envelope.h`
    - `src/dc_blocker.h`
    - `src/eq_coeffs.h` (generated)
-3. Call the enhancer API from your audio callback — see `src/enhancer_api.h` for
-   the C interface.  Input/output format is signed 16‑bit PCM, 44100 Hz (or
-   whatever sample rate the coefficients were designed at).
+3. In your audio callback (A2DP sink → I2S), convert int16 samples to Q16,
+   call `BassEnhancer_process_stereo()`, and convert back.  The DSP runs at
+   44.1 kHz or 48 kHz — whatever sample rate the coefficients were designed at.
+
+   With 24 EQ biquads the DSP consumes ~20% of one core on a 240 MHz ESP32,
+   leaving the second core free for the Bluetooth stack and I2S DMA.
 
 ---
 
@@ -383,6 +386,27 @@ Each contains `.wav` recordings (for the current pipeline) and possibly legacy
 `.txt` FFT dumps (recorded with an older measurement tool).
 
 ---
+
+## Hardware
+
+The standalone Bluetooth DSP box runs on:
+
+- **ESP32-WROOM-32** dev board (38‑pin generic) — the original ESP32, not C3/S2/S3.
+  The C3/S3 lines lack Bluetooth Classic hardware and cannot run A2DP.
+- **PCM5102A I2S DAC module** — 112 dB SNR, line‑out via 3.5 mm jack, no MCLK needed.
+- **3 wires**: BCK, LRCK (WS), DIN between ESP32 and DAC.  No codec, no driver IC.
+
+Total BOM: ~$8–12.
+
+| Component | Search keywords | Notes |
+|---|---|---|
+| ESP32 dev board | "ESP32 WROOM-32 38-pin" | Must be original ESP32, not C3/S2/S3 |
+| I2S DAC module | "PCM5102 I2S DAC" | Line‑out on 3.5 mm jack, ~$2 |
+| Power | USB‑C breakout or 5V barrel jack | Dev board already has 3.3 V regulator |
+| Enclosure | "aluminum project box" + panel‑mount 3.5 mm jack | Optional |
+
+Avoid: ESP32-A1S, ESP32-LyraT, or any "ESP32 audio board" with an onboard codec —
+these are harder to hack than bare I2S.
 
 ## License
 
