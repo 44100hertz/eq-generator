@@ -1,3 +1,8 @@
 __pycache__/
 *.pyc
 measurements/
+src/enhancer.so
+fr_math/
+src/eqgen_filter
+src/eqgen_ladspa.so
+test_enhancer

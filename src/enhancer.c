@@ -1,0 +1,317 @@
+/**
+ * enhancer.c — Harmonic bass enhancer implementation (process_fixed_v2)
+ *
+ * Port of dsp.py process_fixed_v2 to ESP32-C3 Q16 fixed-point.
+ *
+ * Uses:
+ *   - BiquadQ28 for all filtering (Q4.28 coefficients, Q16 state)
+ *   - Env for peak-hold envelope following
+ *   - FR_DIV for 1/envelope normalization
+ *   - Chebyshev T2(x) = 2x² - 1, T3(x) = 4x³ - 3x
+ *
+ * Intermediate precision: 64-bit accumulator for poly eval, 32-bit clip.
+ */
+
+#include "enhancer.h"
+#include <math.h>
+#include <string.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+/* ── Butterworth design in Q4.28 ───────────────────────────────────── */
+
+/* Q4.28 scale: 2^28 = 268435456 */
+#define Q28 (268435456.0)
+#define Q16 (65536.0)
+
+static int32_t float2q28(float v) {
+    if (v >= 7.999999f) return 0x7FFFFFFF;
+    if (v <= -8.0f)     return (int32_t)0x80000000;
+    return (int32_t)(v * Q28 + (v >= 0.0f ? 0.5f : -0.5f));
+}
+
+void bass_design_butter_lp_q28(float fc, float fs, int32_t coeffs_out[5]) {
+    float omega = tanf((float)M_PI * fc / fs);
+    float c = 1.0f + 1.41421356237f * omega + omega * omega;
+
+    float b0 = (omega * omega) / c;
+    float b1 = (2.0f * omega * omega) / c;
+    float b2 = (omega * omega) / c;
+    float a1 = (2.0f * (omega * omega - 1.0f)) / c;
+    float a2 = (1.0f - 1.41421356237f * omega + omega * omega) / c;
+
+    coeffs_out[0] = float2q28(b0);
+    coeffs_out[1] = float2q28(b1);
+    coeffs_out[2] = float2q28(b2);
+    coeffs_out[3] = float2q28(a1);
+    coeffs_out[4] = float2q28(a2);
+}
+
+void bass_design_butter_hp_q28(float fc, float fs, int32_t coeffs_out[5]) {
+    float omega = tanf((float)M_PI * fc / fs);
+    float c = 1.0f + 1.41421356237f * omega + omega * omega;
+
+    float b0 = 1.0f / c;
+    float b1 = -2.0f / c;
+    float b2 = 1.0f / c;
+    float a1 = (2.0f * (omega * omega - 1.0f)) / c;
+    float a2 = (1.0f - 1.41421356237f * omega + omega * omega) / c;
+
+    coeffs_out[0] = float2q28(b0);
+    coeffs_out[1] = float2q28(b1);
+    coeffs_out[2] = float2q28(b2);
+    coeffs_out[3] = float2q28(a1);
+    coeffs_out[4] = float2q28(a2);
+}
+
+/* ── Envelope reciprocal LUT ───────────────────────────────────────── */
+
+void ReciprocalLUT_init(ReciprocalLUT *lut) {
+    for (int i = 0; i < ENV_LUT_SIZE; i++) {
+        /* lut[i] = 1.0 / ((i + 1) / 256.0) = 256.0 / (i + 1) */
+        /* Store as Q16.16: value * 65536 * 65536 / something? */
+        /* Actually: for an input x with top 8 bits = i, we want 1/x in Q16.16 */
+        /* x is in Q16, so x = (i * 2^N) for some normalization shift */
+        /* We store reciprocal of normalized index for later use */
+        float recip = 1.0f / ((float)(i + 1) / 256.0f);
+        lut->entries[i] = (uint32_t)(recip * 65536.0f + 0.5f);
+    }
+}
+
+/* ── Configuration initialization ──────────────────────────────────── */
+
+void BassEnhancerCfg_init(BassEnhancerCfg *cfg,
+                          float cutoff_hz, float h2_amp, float h3_amp,
+                          float release_secs, float fs,
+                          float limiter_release_secs,
+                          int eq_n_biquads, const int32_t *eq_coeffs)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->cutoff_hz = cutoff_hz;
+    cfg->h2_amp     = h2_amp;
+    cfg->h3_amp     = h3_amp;
+    cfg->fs         = fs;
+    cfg->release_secs = release_secs;
+    cfg->limiter_release_secs = limiter_release_secs;
+
+    /* Pre-compute Q16 values */
+    cfg->release_coeff_q16 = (int32_t)(expf(-1.0f / (fs * release_secs)) * Q16 + 0.5f);
+    cfg->h2_amp_q16 = (int32_t)(h2_amp * Q16 + 0.5f);
+    cfg->h3_amp_q16 = (int32_t)(h3_amp * Q16 + 0.5f);
+
+    /* Limiter release coefficient */
+    cfg->limiter_release_coeff_q16 = (int32_t)(
+        expf(-1.0f / (fs * limiter_release_secs)) * Q16 + 0.5f);
+
+    /* Design LP/HP filters at Q4.28 precision */
+    bass_design_butter_lp_q28(cutoff_hz, fs, cfg->lp_t2_coeffs);
+    bass_design_butter_lp_q28(cutoff_hz / 2.0f, fs, cfg->lp_t3_coeffs);
+    bass_design_butter_hp_q28(cutoff_hz, fs, cfg->hp_coeffs);
+    bass_design_butter_hp_q28(cutoff_hz, fs, cfg->hp_harm_coeffs);
+
+    /* EQ settings */
+    cfg->eq_n_biquads = eq_n_biquads;
+    cfg->eq_coeffs    = eq_coeffs;
+}
+
+/* ── Enhancer init / reset ─────────────────────────────────────────── */
+
+void BassEnhancer_init(BassEnhancer *enh,
+                       const BassEnhancerCfg *cfg,
+                       const ReciprocalLUT *lut,
+                       BiquadQ28 *eq_bqs_left,
+                       BiquadQ28 *eq_bqs_right)
+{
+    memset(enh, 0, sizeof(*enh));
+    enh->cfg = *cfg;
+
+    /* Initialize EQ biquad arrays */
+    enh->left.eq_bqs  = eq_bqs_left;
+    enh->right.eq_bqs = eq_bqs_right;
+    for (int i = 0; i < cfg->eq_n_biquads; i++) {
+        BiquadQ28_init(&eq_bqs_left[i],  &cfg->eq_coeffs[i * 5]);
+        BiquadQ28_init(&eq_bqs_right[i], &cfg->eq_coeffs[i * 5]);
+    }
+
+    /* Initialize enhancer biquads */
+    BiquadQ28_init(&enh->left.lp_t2,   cfg->lp_t2_coeffs);
+    BiquadQ28_init(&enh->left.lp_t3,   cfg->lp_t3_coeffs);
+    BiquadQ28_init(&enh->left.hp,      cfg->hp_coeffs);
+    BiquadQ28_init(&enh->left.hp_harm, cfg->hp_harm_coeffs);
+
+    BiquadQ28_init(&enh->right.lp_t2,   cfg->lp_t2_coeffs);
+    BiquadQ28_init(&enh->right.lp_t3,   cfg->lp_t3_coeffs);
+    BiquadQ28_init(&enh->right.hp,      cfg->hp_coeffs);
+    BiquadQ28_init(&enh->right.hp_harm, cfg->hp_harm_coeffs);
+
+    /* Initialize DC blockers (5 Hz cutoff) */
+    float dc_R = expf(-2.0f * (float)M_PI * 5.0f / cfg->fs);
+    int32_t dc_R_q16 = (int32_t)(dc_R * Q16 + 0.5f);
+    DCBlocker_init(&enh->left.dc_block,  dc_R_q16);
+    DCBlocker_init(&enh->right.dc_block, dc_R_q16);
+
+    /* Initialize envelopes */
+    Env_init(&enh->left.env_t2,  lut, cfg->release_coeff_q16);
+    Env_init(&enh->left.env_t3,  lut, cfg->release_coeff_q16);
+    Env_init(&enh->right.env_t2, lut, cfg->release_coeff_q16);
+    Env_init(&enh->right.env_t3, lut, cfg->release_coeff_q16);
+
+    Env_init(&enh->left.env_lim,  lut, cfg->limiter_release_coeff_q16);
+    Env_init(&enh->right.env_lim, lut, cfg->limiter_release_coeff_q16);
+}
+
+void BassEnhancer_reset(BassEnhancer *enh) {
+    BassEnhancerCfg *cfg = &enh->cfg;
+
+    for (int i = 0; i < cfg->eq_n_biquads; i++) {
+        BiquadQ28_reset(&enh->left.eq_bqs[i]);
+        BiquadQ28_reset(&enh->right.eq_bqs[i]);
+    }
+
+    BiquadQ28_reset(&enh->left.lp_t2);
+    BiquadQ28_reset(&enh->left.lp_t3);
+    BiquadQ28_reset(&enh->left.hp);
+    BiquadQ28_reset(&enh->left.hp_harm);
+    BiquadQ28_reset(&enh->right.lp_t2);
+    BiquadQ28_reset(&enh->right.lp_t3);
+    BiquadQ28_reset(&enh->right.hp);
+    BiquadQ28_reset(&enh->right.hp_harm);
+
+    DCBlocker_reset(&enh->left.dc_block);
+    DCBlocker_reset(&enh->right.dc_block);
+
+    memset(&enh->left.env_t2,  0, sizeof(Env));
+    memset(&enh->left.env_t3,  0, sizeof(Env));
+    memset(&enh->right.env_t2, 0, sizeof(Env));
+    memset(&enh->right.env_t3, 0, sizeof(Env));
+    memset(&enh->left.env_lim,  0, sizeof(Env));
+    memset(&enh->right.env_lim, 0, sizeof(Env));
+}
+
+/* ── Single-channel processing ─────────────────────────────────────── */
+
+/** Chebyshev T2: 2x² - 1. x in Q16 (±1 = 65536). Result in Q16. */
+int32_t cheb_t2(int32_t x) {
+    /* x_sq = x² in Q32 */
+    int64_t x_sq = (int64_t)x * (int64_t)x;
+    /* 2x²: shift Q32 -> Q16 (>> 16), then *2 */
+    int64_t two_x2 = (x_sq >> 15);  /* = 2 * x² / 2^16 */
+
+    /* T2 = 2x² - 1 = two_x2 - 65536 */
+    return (int32_t)(two_x2 - 65536);
+}
+
+/** Chebyshev T3: 4x³ - 3x. x in Q16. Result in Q16. */
+int32_t cheb_t3(int32_t x) {
+    /* x² in Q32 */
+    int64_t x_sq = (int64_t)x * (int64_t)x;
+    /* x³ in Q48 */
+    int64_t x_cu = x_sq * (int64_t)x;
+    /* 4x³: Q48 -> Q16: >> 32 then *4, or >> 30 */
+    int64_t four_x3 = (x_cu >> 30);  /* 4 * x³ / 2^48 */
+    /* 3x in Q16 */
+    int64_t three_x = (int64_t)x * 3;
+    return (int32_t)(four_x3 - three_x);
+}
+
+/* ── Software reciprocal (for targets without hardware divide) ─────── */
+
+/** Compute 1/x in Q16.16 using 64-bit division.
+ *  x is Q16 (> 0 expected). Result is recip in Q16.16.
+ */
+static inline uint32_t soft_reciprocal(int32_t x) {
+    if (x <= 0) return 0x7FFFFFFF;
+    /* 1.0 in Q16.16 = 0x100000000 = 4,294,967,296 = (int64_t)1 << 32 */
+    /* 1/x in Q16.16 = (1 << 32) / x */
+    return (uint32_t)(((uint64_t)1 << 32) / (uint32_t)x);
+}
+
+/* ── Per-channel tick ──────────────────────────────────────────────── */
+
+static int32_t enhancer_process_channel(BassEnhancerChan *ch,
+                                        const BassEnhancerCfg *cfg,
+                                        int32_t x)
+{
+    /* ── Stage 0: DC blocker (first-order HP at ~5 Hz) ───────────── */
+    x = DCBlocker_tick(&ch->dc_block, x);
+
+    /* ── Stage 1: EQ preprocessing ────────────────────────────────── */
+    int32_t eq_out = BiquadQ28_cascade(ch->eq_bqs, cfg->eq_n_biquads, x);
+
+    /* ── Stage 1: LP filter at cutoff_hz for T2 path ─────────────── */
+    int32_t lp_t2 = BiquadQ28_tick(&ch->lp_t2, eq_out);
+
+    /* Envelope of the low-passed signal */
+    int32_t env_t2 = Env_tick(&ch->env_t2, lp_t2);
+
+    /* Normalize: lp_t2 / env_t2 (with safety floor) */
+    int32_t norm_t2;
+    if (env_t2 > 6) {  /* floor: ~0.0001 in Q16, matches Python/EEL */
+        uint32_t inv = soft_reciprocal(env_t2);
+        norm_t2 = (int32_t)(((int64_t)lp_t2 * (int64_t)inv) >> 16);
+    } else {
+        norm_t2 = 0;
+    }
+
+    /* Scale by h2_amp and apply Chebyshev T2 */
+    int32_t cheb_in_t2 = (int32_t)(((int64_t)norm_t2 * (int64_t)cfg->h2_amp_q16) >> 16);
+    int32_t harm_t2 = cheb_t2(cheb_in_t2);
+
+    /* Scale back by envelope */
+    int32_t harm_scaled_t2 = (int32_t)(((int64_t)harm_t2 * (int64_t)env_t2) >> 16);
+
+    /* ── Stage 2: LP filter at cutoff_hz/2 for T3 path ────────────── */
+    int32_t lp_t3 = BiquadQ28_tick(&ch->lp_t3, eq_out);
+    int32_t env_t3 = Env_tick(&ch->env_t3, lp_t3);
+
+    int32_t norm_t3;
+    if (env_t3 > 6) {
+        uint32_t inv = soft_reciprocal(env_t3);
+        norm_t3 = (int32_t)(((int64_t)lp_t3 * (int64_t)inv) >> 16);
+    } else {
+        norm_t3 = 0;
+    }
+
+    int32_t cheb_in_t3 = (int32_t)(((int64_t)norm_t3 * (int64_t)cfg->h3_amp_q16) >> 16);
+    int32_t harm_t3 = cheb_t3(cheb_in_t3);
+    int32_t harm_scaled_t3 = (int32_t)(((int64_t)harm_t3 * (int64_t)env_t3) >> 16);
+
+    /* ── Stage 3: Mix ──────────────────────────────────────────────── */
+    /* HP-filter the harmonic sum */
+    int32_t harm_sum = harm_scaled_t2 + harm_scaled_t3;
+    int32_t harm_hp  = BiquadQ28_tick(&ch->hp_harm, harm_sum);
+
+    /* HP-filter the dry signal */
+    int32_t dry_hp = BiquadQ28_tick(&ch->hp, eq_out);
+
+    /* Mix: dry + harmonic_hp */
+    int32_t out = dry_hp + harm_hp;
+
+    /* ── Harmonic AGC limiter (matches EEL reference) ──────────── */
+    /* Always active: lim_gain = 1.0 / max(env, 1.0).
+       Attenuates harmonics when total output is loud; dry passes
+       through untouched.  Brick-wall clamp as safety net.       */
+    int32_t env_lim = Env_tick(&ch->env_lim, out);
+    int32_t env_peak = env_lim > 65536 ? env_lim : 65536;  /* max(env, 1.0) */
+    uint32_t inv = soft_reciprocal(env_peak);
+    int32_t lim_gain = (int32_t)(inv >> 16);  /* Q16.16 → Q16 */
+    harm_hp = (int32_t)(((int64_t)harm_hp * (int64_t)lim_gain) >> 16);
+    out = dry_hp + harm_hp;
+
+    /* Brick-wall clamp (±1.0 in Q16) */
+    if (out >  65536) out =  65536;
+    if (out < -65536) out = -65536;
+
+    return out;
+}
+
+/* ── Stereo processing ─────────────────────────────────────────────── */
+
+void BassEnhancer_process_stereo(BassEnhancer *enh,
+                                 int32_t *left, int32_t *right)
+{
+    *left  = enhancer_process_channel(&enh->left,  &enh->cfg, *left);
+    *right = enhancer_process_channel(&enh->right, &enh->cfg, *right);
+}
