@@ -51,7 +51,7 @@ def db_to_ratio(db: float) -> float:
 
 
 def ratio_to_db(ratio: float) -> float:
-    return 20.0 * np.log10(max(ratio, 1e-20))
+    return 20.0 * np.log10(np.maximum(ratio, 1e-20))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -294,7 +294,8 @@ def run_pipeline(
         target_vals[mask] *= atten ** octaves
 
     # 8. Correction
-    corr = np.where(meas_vals > 1e-20, target_vals / meas_vals, 1e6)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        corr = np.where(meas_vals > 1e-20, target_vals / meas_vals, 1e6)
 
     # 9. Bass enhancer preprocessing
     if bass_enhancer_cutoff is not None:
