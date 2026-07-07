@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
-from scipy.interpolate import UnivariateSpline
 
 from eqgen.eq_fit import BiquadCoeffs, cascade_response_db, fit_eq_curve
 from eqgen.quantize import BiquadQ28, q28_to_float, quantize_biquads_q28
@@ -143,27 +142,90 @@ def welch_stats(samples: np.ndarray, sample_rate: float) -> List[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Spline helpers
+# CV-weighted kernel smoother
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _build_spline(stats: List[dict]) -> UnivariateSpline:
-    """Build a CV-weighted cubic smoothing spline from Welch stats.
+def _find_viable_range(freqs: np.ndarray, cv: np.ndarray,
+                       cv_threshold: float = 2.0,
+                       margin_oct: float = 0.25) -> Tuple[float, float]:
+    """Find the frequency range where CV stays below *cv_threshold*.
 
-    Low-CV bins get high weight (spline passes close to them).
-    High-CV bins get low weight (spline is free to smooth them away).
+    Works outward from the middle: the last frequency where a running
+    maximum of CV (over ~⅓ octave) exceeds the threshold defines the
+    boundary.  A *margin_oct* pad is subtracted to stay safely inside.
+    If no shelf is found, returns the full range.
     """
-    freqs = np.array([s["freq"] for s in stats])
-    values = np.array([s["mean"] for s in stats])
-    cv = np.array([s["cv"] for s in stats])
-    weights = 1.0 / np.clip(cv, 0.01, None)
-    log_f = np.log10(freqs)
-    return UnivariateSpline(log_f, values, w=weights,
-                            s=len(freqs) * 0.05, k=3, ext=0)
+    log_f = np.log2(freqs)
+    n = len(freqs)
+
+    # Running max over ~⅓ octave to catch sustained CV shelves, not single-bin spikes
+    bin_width = (log_f[-1] - log_f[0]) / (n - 1) if n > 1 else 0.0
+    radius = max(1, int(np.ceil((1.0 / 3.0) / bin_width))) if bin_width > 0 else 1
+    kernel = np.ones(2 * radius + 1)
+    cv_smooth = np.convolve(np.maximum(cv, 0), kernel, mode='same') / len(kernel)
+
+    mid = n // 2
+    margin_bins = int(np.ceil(margin_oct / bin_width)) if bin_width > 0 else 0
+
+    # Low boundary: walk left from middle, find first bin exceeding threshold
+    lo = 0
+    for i in range(mid, 0, -1):
+        if cv_smooth[i] > cv_threshold:
+            lo = min(i + 1 + margin_bins, n - 1)
+            break
+
+    # High boundary: walk right from middle
+    hi = n - 1
+    for i in range(mid, n):
+        if cv_smooth[i] > cv_threshold:
+            hi = max(i - 1 - margin_bins, 0)
+            break
+
+    return freqs[lo], freqs[hi]
 
 
-def _eval_spline(spl: UnivariateSpline, eval_freqs: np.ndarray) -> np.ndarray:
-    """Evaluate a smoothing spline on a log-spaced frequency grid."""
-    return np.maximum(spl(np.log10(eval_freqs)), 0.0)
+def _smooth_kernel(bin_freqs: np.ndarray, bin_values: np.ndarray,
+                   bin_cv: np.ndarray, eval_freqs: np.ndarray,
+                   bandwidth_oct = 0.5) -> np.ndarray:
+    """Evaluate a CV-weighted kernel smoother on a log-spaced grid.
+
+    Each output point is a weighted average of input bins within
+    ±bandwidth_oct octaves.  *bandwidth_oct* may be a scalar or a
+    per-evaluation-point array.  Distance weight (tricube) decays to
+    zero at the bandwidth edge.  Confidence weight is 1/CV, so low-CV
+    bins dominate their local region while high-CV bins are averaged out.
+
+    Unlike a cubic spline, this cannot oscillate below zero or collapse
+    to a flat line — the output is always a convex combination of input
+    values.
+    """
+    bandwidth_oct = np.asarray(bandwidth_oct, dtype=float)
+    scalar_bw = bandwidth_oct.ndim == 0
+
+    n_out = len(eval_freqs)
+    log_freqs = np.log2(bin_freqs)
+    log_eval = np.log2(eval_freqs)
+    conf = 1.0 / np.clip(bin_cv, 0.01, None)
+
+    result = np.empty(n_out)
+    # Process one point at a time since bandwidth may vary per point
+    for i in range(n_out):
+        d = np.abs(log_eval[i] - log_freqs)
+        bw = float(bandwidth_oct) if scalar_bw else float(bandwidth_oct[i])
+        if bw <= 0.0:
+            # Zero bandwidth — nearest-bin interpolation
+            j = np.argmin(d)
+            result[i] = bin_values[j]
+            continue
+        d_norm = d / bw
+        w_dist = np.where(d_norm < 1.0, (1.0 - d_norm ** 3) ** 3, 0.0)
+        w = w_dist * conf
+        w_sum = w.sum()
+        if w_sum > 0:
+            result[i] = np.average(bin_values, weights=w)
+        else:
+            result[i] = np.average(bin_values, weights=conf)
+    return np.maximum(result, 0.0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -180,6 +242,7 @@ def run_pipeline(
     high_rolloffs: Optional[List[Tuple[float, float]]] = None,
     low_rolloffs: Optional[List[Tuple[float, float]]] = None,
     sample_rate_override: Optional[float] = None,
+    smooth_exponent: float = 1.0,
     detailed: bool = False,
 ):
     """Run the full EQ correction pipeline.
@@ -259,27 +322,50 @@ def run_pipeline(
             noise_ratio = min(0.99, effective_noise / P_meas)
             pooled[i]["cv"] = pooled[i]["cv"] / np.sqrt(max(0.01, 1.0 - noise_ratio))
 
-    # 5. CV-weighted smoothing splines
-    spline_meas = _build_spline(pooled)
+    # 5. Extract arrays for kernel smoothing
+    meas_freqs = np.array([s["freq"] for s in pooled])
+    meas_raw = np.array([s["mean"] for s in pooled])
+    meas_cv = np.array([s["cv"] for s in pooled])
 
     target_stats = welch_stats(target_samples, sample_rate)
-    spline_targ = _build_spline(target_stats)
+    targ_freqs = np.array([s["freq"] for s in target_stats])
+    targ_raw = np.array([s["mean"] for s in target_stats])
+    targ_cv = np.array([s["cv"] for s in target_stats])
 
-    spline_noise = None
+    noise_freqs = None
+    noise_raw = None
+    noise_cv = None
     if noise_stats is not None:
-        spline_noise = _build_spline(noise_stats)
+        noise_freqs = np.array([s["freq"] for s in noise_stats])
+        noise_raw = np.array([s["mean"] for s in noise_stats])
+        noise_cv = np.array([s["cv"] for s in noise_stats])
 
-    # 6. Evaluate on uniform log-spaced grid
+    # 6. CV-weighted kernel smoothing on uniform log-spaced grid.
+    # Bandwidth scales with local CV: at the Rayleigh floor (0.52) it
+    # is tiny (essentially no smoothing); at CV=2+ it widens significantly.
+    MIN_CV = 0.52   # Rayleigh CV — the noise floor for stationary signals
+    BASE_BW = 0.08  # octaves at MIN_CV (~3 FFT bins at 400 Hz)
+
     eval_freqs = np.logspace(np.log10(BOTTOM_F), np.log10(TOP_F), N_EVAL)
 
-    meas_vals = _eval_spline(spline_meas, eval_freqs)
+    # Estimate local CV at each eval point to scale bandwidth
+    cv_at_eval = _smooth_kernel(meas_freqs, meas_cv, meas_cv, eval_freqs,
+                                bandwidth_oct=0.3)
+    bw_meas = np.maximum(BASE_BW * (cv_at_eval / MIN_CV) ** smooth_exponent, 0.01)
+    meas_vals = _smooth_kernel(meas_freqs, meas_raw, meas_cv, eval_freqs,
+                               bandwidth_oct=bw_meas)
 
     # Spectral subtraction
-    if spline_noise is not None:
-        noise_vals = _eval_spline(spline_noise, eval_freqs)
+    if noise_freqs is not None:
+        noise_vals = _smooth_kernel(noise_freqs, noise_raw, noise_cv, eval_freqs)
         meas_vals = np.maximum(meas_vals - noise_vals, meas_vals * 0.01)
 
-    target_vals = _eval_spline(spline_targ, eval_freqs)
+    # Target uses its own CV-scaled bandwidth
+    cv_targ = _smooth_kernel(targ_freqs, targ_cv, targ_cv, eval_freqs,
+                             bandwidth_oct=0.3)
+    bw_targ = np.maximum(BASE_BW * (cv_targ / MIN_CV) ** smooth_exponent, 0.01)
+    target_vals = _smooth_kernel(targ_freqs, targ_raw, targ_cv, eval_freqs,
+                                 bandwidth_oct=bw_targ)
 
     # 7. Rolloffs
     for freq, db in high_rolloffs:
@@ -303,10 +389,14 @@ def run_pipeline(
         from eqgen.model import model_gain_needed
 
         def meas_at(f: float) -> float:
-            """Measurement magnitude at frequency f (or 0 if out of range)."""
+            """Smoothed measurement magnitude at frequency f (or 0 if out of range)."""
             if f <= 0 or f > TOP_F:
                 return 0.0
-            return float(spline_meas(np.log10(f)))
+            cv_f = float(np.interp(np.log10(f), np.log10(eval_freqs), cv_at_eval,
+                                   left=cv_at_eval[0], right=cv_at_eval[-1]))
+            bw = float(np.maximum(BASE_BW * (cv_f / MIN_CV) ** smooth_exponent, 0.01))
+            return float(_smooth_kernel(meas_freqs, meas_raw, meas_cv,
+                                        np.array([f]), bandwidth_oct=bw)[0])
 
         # Compute flat correction value at fc/2 before modifying corr
         idx_fc2 = int(np.searchsorted(eval_freqs, fc / 2.0))
@@ -322,6 +412,18 @@ def run_pipeline(
         # Below fc/2 the enhancer handles bass perception via harmonics.
         # Hold correction flat at the model gain computed at fc/2.
         corr[:idx_fc2 + 1] = flat_val
+
+    # 10. Clamp correction flat outside the CV-defined viable range.
+    # CV shelves (sudden sustained increases) indicate frequencies where
+    # the measurement is too unreliable to correct — hold the correction
+    # constant beyond those boundaries.
+    lo_f, hi_f = _find_viable_range(meas_freqs, meas_cv)
+    lo_idx = int(np.searchsorted(eval_freqs, lo_f))
+    hi_idx = int(np.searchsorted(eval_freqs, hi_f))
+    if lo_idx > 0:
+        corr[:lo_idx] = corr[lo_idx]
+    if hi_idx < len(corr) - 1:
+        corr[hi_idx + 1:] = corr[hi_idx]
 
     freqs = eval_freqs
     gains_db = ratio_to_db(corr)

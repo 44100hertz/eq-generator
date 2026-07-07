@@ -29,7 +29,8 @@ MEAS_DIR = ROOT / "measurements"
 
 def run_speaker(speaker_name: str, out_dir: str, music_dir: str = None,
                 fc: float = 60.0, h2: float = 0.5, h3: float = 1.0,
-                max_bands: int = 40, tracks: list = None):
+                max_bands: int = 40, smooth_exponent: float = 1.0,
+                 tracks: list = None):
     """Design EQ for a speaker and process music tracks through it."""
     meas_dir = MEAS_DIR / speaker_name
     if not meas_dir.exists():
@@ -134,6 +135,8 @@ def main():
                     help="2nd harmonic amplitude [0.5]")
     ap.add_argument("--h3", type=float, default=1.0,
                     help="3rd harmonic amplitude [1.0]")
+    ap.add_argument("--smooth-exponent", type=float, default=1.0,
+                    help="CV smoothing aggressiveness [1.0]")
     ap.add_argument("--max-bands", type=int, default=40,
                     help="Max IIR biquad bands [40]")
     args = ap.parse_args()

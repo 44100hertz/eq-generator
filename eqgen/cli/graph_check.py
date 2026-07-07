@@ -32,7 +32,7 @@ MEAS_DIR = ROOT / "measurements"
 # ── Pipeline wrapper ──────────────────────────────────────────────────
 
 def gather_all(speaker_name=None, meas_paths=None, noise_path=None,
-               target_path=None, fc=60.0, h2=0.5, h3=1.0,
+               target_path=None, fc=60.0, h2=0.5, h3=1.0, smooth_exponent=1.0,
                max_bands=40):
     """Run pipeline + IIR fit + harmonic model; return everything as a dict for JSON."""
     if speaker_name:
@@ -61,6 +61,7 @@ def gather_all(speaker_name=None, meas_paths=None, noise_path=None,
     detailed = run_pipeline(
         meas_paths, target_path, noise_path,
         bass_enhancer_cutoff=fc, h2=h2, h3=h3,
+        smooth_exponent=smooth_exponent,
         detailed=True,
     )
 
@@ -461,6 +462,8 @@ def main():
     ap.add_argument("--fc", type=float, default=60.0, help="Bass enhancer cutoff Hz")
     ap.add_argument("--h2", type=float, default=0.5, help="2nd harmonic amplitude")
     ap.add_argument("--h3", type=float, default=1.0, help="3rd harmonic amplitude")
+    ap.add_argument("--smooth-exponent", type=float, default=1.0,
+                    help="CV smoothing aggressiveness [1.0]")
     ap.add_argument("--max-bands", type=int, default=40)
     ap.add_argument("--no-open", action="store_true", help="Don't open in browser")
     args = ap.parse_args()
@@ -474,7 +477,7 @@ def main():
         meas_paths=args.measurement,
         noise_path=args.noise,
         target_path=args.target,
-        fc=args.fc, h2=args.h2, h3=args.h3,
+        fc=args.fc, h2=args.h2, h3=args.h3, smooth_exponent=args.smooth_exponent,
         max_bands=args.max_bands,
     )
 
