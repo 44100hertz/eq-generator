@@ -102,7 +102,7 @@ def generate_eq_header(bq_q28, bands, cfg):
 
 def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
                        target_path=None, fc=60.0, h2=0.5, h3=1.0,
-                       max_noise=0.65, max_bands=40, target_fs=None):
+                       max_bands=40, target_fs=None):
     """Run pipeline + IIR fit, return biquads and config."""
     if speaker_name:
         meas_dir = MEAS_DIR / speaker_name
@@ -129,7 +129,7 @@ def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
     print(f"\n── EQ pipeline (Welch + adaptive points + model)...")
     eq_freqs, target_db, fs = run_pipeline(
         meas_paths, target_path, noise_path,
-        bass_enhancer_cutoff=fc, h2=h2, h3=h3, max_noise=max_noise,
+        bass_enhancer_cutoff=fc, h2=h2, h3=h3,
     )
 
     offset_db = float(np.mean(target_db))
@@ -438,7 +438,6 @@ def main():
     p_setup.add_argument("--h2", type=float, default=0.5)
     p_setup.add_argument("--h3", type=float, default=1.0)
     p_setup.add_argument("--release", type=float, default=0.2)
-    p_setup.add_argument("--max-noise", type=float, default=0.65)
     p_setup.add_argument("--max-bands", type=int, default=40)
     p_setup.add_argument("--no-wire", action="store_true",
                          help="Build plugin only, don't wire to output")
@@ -453,7 +452,6 @@ def main():
     p_build.add_argument("--h2", type=float, default=0.5)
     p_build.add_argument("--h3", type=float, default=1.0)
     p_build.add_argument("--max-bands", type=int, default=40)
-    p_build.add_argument("--max-noise", type=float, default=0.65)
 
     args = ap.parse_args()
 
@@ -465,13 +463,12 @@ def main():
         if args.speaker and not args.measurement:
             eq_freqs, bq_q28, bands, cfg, coeffs_flat = run_full_pipeline(
                 speaker_name=args.speaker, fc=args.fc, h2=args.h2, h3=args.h3,
-                max_noise=args.max_noise, max_bands=args.max_bands,
+                max_bands=args.max_bands,
             )
         elif args.measurement and args.target:
             eq_freqs, bq_q28, bands, cfg, coeffs_flat = run_full_pipeline(
                 meas_paths=args.measurement, noise_path=args.noise,
-                target_path=args.target, fc=args.fc, h2=args.h2, h3=args.h3,
-                max_noise=args.max_noise, max_bands=args.max_bands,
+                target_path=args.target, fc=args.fc, h2=args.h2, h3=args.h3, max_bands=args.max_bands,
             )
         else:
             ap.error("Need either speaker name, or -m/-t")
@@ -489,8 +486,7 @@ def main():
 
     elif args.command == "build":
         eq_freqs, bq_q28, bands, cfg, coeffs_flat = run_full_pipeline(
-            speaker_name=args.speaker, fc=args.fc, h2=args.h2, h3=args.h3,
-            max_noise=args.max_noise, max_bands=args.max_bands,
+            speaker_name=args.speaker, fc=args.fc, h2=args.h2, h3=args.h3, max_bands=args.max_bands,
         )
         generate_eq_header(bq_q28, bands, cfg)
         build_and_install()

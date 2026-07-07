@@ -29,8 +29,7 @@ MEAS_DIR = ROOT / "measurements"
 
 def run_speaker(speaker_name: str, out_dir: str, music_dir: str = None,
                 fc: float = 60.0, h2: float = 0.5, h3: float = 1.0,
-                max_bands: int = 40, max_noise: float = 0.65,
-                tracks: list = None):
+                max_bands: int = 40, tracks: list = None):
     """Design EQ for a speaker and process music tracks through it."""
     meas_dir = MEAS_DIR / speaker_name
     if not meas_dir.exists():
@@ -57,7 +56,7 @@ def run_speaker(speaker_name: str, out_dir: str, music_dir: str = None,
     print(f"\n── EQ pipeline (Welch + adaptive points + model)...")
     eq_freqs, target_db, fs = run_pipeline(
         [meas_path], target,
-        bass_enhancer_cutoff=fc, h2=h2, h3=h3, max_noise=max_noise)
+        bass_enhancer_cutoff=fc, h2=h2, h3=h3)
 
     offset_db = float(np.mean(target_db))
     target_db = target_db - offset_db
@@ -137,15 +136,12 @@ def main():
                     help="3rd harmonic amplitude [1.0]")
     ap.add_argument("--max-bands", type=int, default=40,
                     help="Max IIR biquad bands [40]")
-    ap.add_argument("--max-noise", type=float, default=0.65,
-                    help="Adaptive EQ noise threshold [0.65]")
     args = ap.parse_args()
 
     run_speaker(args.speaker, args.out_dir,
                 music_dir=args.music_dir,
                 fc=args.fc, h2=args.h2, h3=args.h3,
-                max_bands=args.max_bands, max_noise=args.max_noise,
-                tracks=args.tracks)
+                max_bands=args.max_bands, tracks=args.tracks)
 
 
 if __name__ == "__main__":

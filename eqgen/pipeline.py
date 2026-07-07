@@ -1,5 +1,5 @@
 """
-Shared pipeline: Welch FFT → adaptive EQ points → correction → IIR fit → C DSP.
+Shared pipeline: Welch FFT → CV-weighted smoothing → correction → IIR fit → C DSP.
 
 This module is the single source of truth for the EQ design and audio processing
 pipeline.  All CLI entry points (eqgen, audition, wire, export) delegate here.
@@ -8,7 +8,7 @@ Exports:
   run_pipeline()   — WAV inputs → (freqs, gains_db, sample_rate)
   design_eq()      — EQ curve → quantized biquad coefficients
   process_track()  — audio file → C enhancer → WAV
-  Graph            — frequency-response curve with interpolation and transforms
+  curve_to_json()  — serialise (freqs, gains_db) for JSON output
 """
 
 import json
@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+from scipy.interpolate import UnivariateSpline
 
 from eqgen.eq_fit import BiquadCoeffs, cascade_response_db, fit_eq_curve
 from eqgen.quantize import BiquadQ28, q28_to_float, quantize_biquads_q28
@@ -35,6 +36,10 @@ BOTTOM_F = 20.0       # Hz — lowest frequency analyzed
 TOP_F = 14000.0       # Hz — highest frequency analyzed
 WELCH_FFT_SIZE = 16384
 WELCH_OVERLAP = 0.5
+
+# Evaluation grid for the output curve — matches the IIR fitter's internal
+# log-spaced grid so no re-interpolation is needed downstream.
+N_EVAL = 256
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -83,7 +88,7 @@ def read_wav(path: str) -> Tuple[np.ndarray, float]:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def welch_stats(samples: np.ndarray, sample_rate: float) -> List[dict]:
-    """Run Welch's method and return per-bin mean and per-bin CV."""
+    """Run Welch's method and return per-bin mean magnitude, power, and CV."""
     fft_size = WELCH_FFT_SIZE
     noverlap = int(fft_size * WELCH_OVERLAP)
 
@@ -138,176 +143,27 @@ def welch_stats(samples: np.ndarray, sample_rate: float) -> List[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Graph: frequency-response curve
+# Spline helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class Graph:
-    """A frequency-response curve: list of (x=freq, y=value) points."""
+def _build_spline(stats: List[dict]) -> UnivariateSpline:
+    """Build a CV-weighted cubic smoothing spline from Welch stats.
 
-    def __init__(self, points):
-        if isinstance(points, list) and len(points) > 0:
-            if isinstance(points[0], dict):
-                self.points = [
-                    {"x": p.get("freq", p.get("x")), "y": p.get("mean", p.get("y"))}
-                    for p in points
-                ]
-            else:
-                self.points = [{"x": p[0], "y": p[1]} for p in points]
-        else:
-            self.points = []
-
-    def point(self, x: float) -> float:
-        """Linear interpolation to find y at given x."""
-        if not self.points:
-            return 0.0
-        if x <= self.points[0]["x"]:
-            return self.points[0]["y"]
-        if x >= self.points[-1]["x"]:
-            return self.points[-1]["y"]
-        lo, hi = 0, len(self.points) - 1
-        while hi - lo > 1:
-            mid = (lo + hi) // 2
-            if self.points[mid]["x"] <= x:
-                lo = mid
-            else:
-                hi = mid
-        p1 = self.points[lo]
-        p2 = self.points[hi]
-        slope = (p2["y"] - p1["y"]) / (p2["x"] - p1["x"])
-        return p1["y"] + (x - p1["x"]) * slope
-
-    def emit(self, x_values: np.ndarray) -> "Graph":
-        """Return Graph with y values interpolated to exactly x_values."""
-        result = []
-        for i, x in enumerate(x_values):
-            left = x_values[i - 1] if i > 0 else x
-            right = x_values[i + 1] if i + 1 < len(x_values) else x
-            x1 = (x + left) / 2.0
-            x2 = (x + right) / 2.0
-            total = 0.0
-            for j in range(20):
-                xj = x1 + (x2 - x1) * j / 20.0
-                yj = self.point(xj)
-                total += yj * yj
-            result.append({"x": x, "y": np.sqrt(total / 20.0)})
-        return Graph(result)
-
-    def rolloff(self, freq: float, db_per_octave: float, direction: str) -> "Graph":
-        """Apply a shelving rolloff above ('high') or below ('low') freq."""
-        atten = db_to_ratio(db_per_octave)
-        new_points = []
-        for p in self.points:
-            ratio = p["x"] / freq if direction == "high" else freq / p["x"]
-            octaves = np.log2(max(ratio, 1.0))
-            new_points.append({"x": p["x"], "y": p["y"] * (atten ** octaves)})
-        return Graph(new_points)
-
-    def bass_enhancer_preprocess(self, fc: float, measurement: "Graph",
-                                  h2: float = 1.0, h3: float = 1.0) -> "Graph":
-        """Preprocess EQ curve for the harmonic bass enhancer.
-
-        For each frequency f, computes the EQ gain G such that the
-        perceived output A(f, G) matches the target curve.
-        Delegates to model.model_gain_needed for the core solve.
-        """
-        from eqgen.model import model_gain_needed
-
-        def solve(f: float, comp: float) -> float:
-            if f > 2.0 * fc:
-                return comp
-            m_f = measurement.point(f)
-            G = model_gain_needed(f, comp * m_f, fc, h2, h3, measurement.point)
-            if G < 1e-12:
-                return 0.01
-            return min(G, comp)
-
-        new_points = [
-            {"x": p["x"], "y": solve(p["x"], p["y"])}
-            for p in self.points
-        ]
-
-        # Below fc/2 the enhancer handles bass perception via harmonics.
-        # Hold correction flat at the model gain computed AT fc/2.
-        flat_val = solve(fc / 2.0, self.point(fc / 2.0))
-        for p in new_points:
-            if p["x"] <= fc / 2.0:
-                p["y"] = flat_val
-
-        return Graph(new_points)
-
-    def max_value(self) -> float:
-        return max(p["y"] for p in self.points) if self.points else 0.0
-
-    def to_json(self) -> list:
-        """Serialize as list of {freq, gain_db} for JSON output."""
-        return [
-            {"freq": round(p["x"], 2), "gain_db": round(ratio_to_db(p["y"]), 3)}
-            for p in self.points
-        ]
+    Low-CV bins get high weight (spline passes close to them).
+    High-CV bins get low weight (spline is free to smooth them away).
+    """
+    freqs = np.array([s["freq"] for s in stats])
+    values = np.array([s["mean"] for s in stats])
+    cv = np.array([s["cv"] for s in stats])
+    weights = 1.0 / np.clip(cv, 0.01, None)
+    log_f = np.log10(freqs)
+    return UnivariateSpline(log_f, values, w=weights,
+                            s=len(freqs) * 0.05, k=3, ext=0)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Adaptive EQ point generation
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _erb_hz(freq: float) -> float:
-    """Equivalent Rectangular Bandwidth at freq (Hz)."""
-    return 24.7 * (4.37 * freq / 1000.0 + 1.0)
-
-
-def eq_points_adaptive(pooled: List[dict], max_noise: float,
-                        min_erb_fraction: float = 0.11,
-                        max_span_octaves: float = 2.0) -> np.ndarray:
-    """Generate EQ points greedily from pooled Welch FFT stats."""
-    bin_hz = float(pooled[1]["freq"] - pooled[0]["freq"]) if len(pooled) > 1 else 1.0
-    max_ratio = 2.0 ** max_span_octaves
-
-    points = []
-    n = sx = sx2 = sv = 0.0
-    span_start = 0
-    bins_in_span = 0
-
-    def finalize(end_idx: int):
-        nonlocal n, sx, sx2, sv, span_start, bins_in_span
-        start = span_start
-        f_lo = BOTTOM_F if start == 0 else pooled[start]["freq"] - bin_hz / 2.0
-        f_hi = TOP_F if end_idx >= len(pooled) - 1 else pooled[end_idx]["freq"] + bin_hz / 2.0
-        points.append((f_lo + f_hi) / 2.0)
-        span_start = end_idx + 1
-        n = sx = sx2 = sv = 0.0
-        bins_in_span = 0
-
-    for i, b in enumerate(pooled):
-        c = float(b["count"])
-        m = b["mean"]
-        var_i = (b["cv"] * m) ** 2
-
-        f_lo = BOTTOM_F if span_start == 0 else pooled[span_start]["freq"] - bin_hz / 2.0
-        f_hi = pooled[i]["freq"] + bin_hz / 2.0
-        if bins_in_span > 0 and f_hi / f_lo > max_ratio:
-            finalize(i - 1)
-
-        n += c
-        sx += c * m
-        sx2 += c * m * m
-        sv += c * var_i
-        bins_in_span += 1
-
-        span_hz = f_hi - f_lo
-        center = (f_lo + f_hi) / 2.0
-        min_hz = _erb_hz(center) * min_erb_fraction
-        if span_hz >= min_hz:
-            wm = sx / n
-            if wm > 1e-20:
-                within_var = sv / n
-                noise = np.sqrt(within_var) / wm
-                if noise <= max_noise:
-                    finalize(i)
-
-    if bins_in_span > 0:
-        finalize(len(pooled) - 1)
-
-    return np.array(points)
+def _eval_spline(spl: UnivariateSpline, eval_freqs: np.ndarray) -> np.ndarray:
+    """Evaluate a smoothing spline on a log-spaced frequency grid."""
+    return np.maximum(spl(np.log10(eval_freqs)), 0.0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -318,7 +174,6 @@ def run_pipeline(
     measurement_paths: List[str],
     target_path: str,
     noise_path: Optional[str] = None,
-    max_noise: float = 0.65,
     bass_enhancer_cutoff: Optional[float] = None,
     h2: float = 1.0,
     h3: float = 1.0,
@@ -330,16 +185,17 @@ def run_pipeline(
     """Run the full EQ correction pipeline.
 
     Without detailed: returns (freqs_hz, gains_db, sample_rate).
-    With detailed=True: returns a dict with all intermediate graphs for visualization.
+    With detailed=True: returns a dict with all intermediate data for
+    visualization.
 
     Steps:
       1. Read & validate WAV files
-      2. Welch FFT on each measurement
-      3. Pool per-bin stats across measurements
-      4. Merge noise floor CV (if noise file provided)
-      5. Adaptive EQ points (noise-weighted frequency grid)
-      6. Resample measurement + spectral subtraction
-      7. Resample target + rolloffs
+      2. Welch FFT on each input
+      3. Pool per-bin stats across measurement files
+      4. Merge noise-floor CV + inflate CV in noise-dominated bins
+      5. Build CV-weighted smoothing splines (measurement, target, noise)
+      6. Evaluate on uniform log-spaced grid + spectral subtraction
+      7. Apply rolloffs to target
       8. Correction = target / measurement
       9. Bass enhancer preprocessing (if cutoff provided)
     """
@@ -367,7 +223,7 @@ def run_pipeline(
     for s in all_stats[1:]:
         assert len(s) == bin_count, "Frequency ranges differ"
 
-    # 3. Pool stats
+    # 3. Pool stats across measurement files
     pooled = []
     for i in range(bin_count):
         total_n = sum(s[i]["count"] for s in all_stats)
@@ -382,89 +238,113 @@ def run_pipeline(
             "cv": pooled_cv,
         })
 
-    # 4. Build graph
-    measurement_full = Graph(pooled)
-
-    # 5. Noise merge
-    noise_full_res = None
+    # 4. Noise merge: max-CV + noise-floor inflation
+    noise_stats = None
     if noise_path:
         noise_samples, noise_rate = read_wav(noise_path)
         assert noise_rate == sample_rate
         noise_stats = welch_stats(noise_samples, sample_rate)
+
+        # 4a. max() merge — high-CV intermittent noise dominates
         for i in range(min(len(pooled), len(noise_stats))):
             pooled[i]["cv"] = max(pooled[i]["cv"], noise_stats[i]["cv"])
-        noise_full_res = Graph(noise_stats)
 
-        # 5b. Noise-floor CV inflation: penalise bins where measurement
-        # power is dominated by background noise, even if that noise is
-        # stationary (low CV).  Uses mean-squared magnitude (power), not
-        # mean magnitude, to avoid underestimating noise contribution.
+        # 4b. Noise-floor inflation — stationary noise with poor SNR
         for i in range(len(pooled)):
             P_meas = max(pooled[i]["mean_sq"], 1e-20)
             P_noise = max(noise_stats[i]["mean_sq"], 1e-20)
             cv_n = noise_stats[i]["cv"]
-            # Inflate noise power by 1σ to account for peak, not mean, noise
+            # Inflate noise power by 1σ — accounts for peak, not mean, noise
             effective_noise = P_noise * (1.0 + cv_n)
             noise_ratio = min(0.99, effective_noise / P_meas)
             pooled[i]["cv"] = pooled[i]["cv"] / np.sqrt(max(0.01, 1.0 - noise_ratio))
 
-    # 6. Adaptive EQ points
-    eq_pts = eq_points_adaptive(pooled, max_noise)
+    # 5. CV-weighted smoothing splines
+    spline_meas = _build_spline(pooled)
 
-    # 7. Resample measurement + spectral subtraction
-    measurement_mean = measurement_full.emit(eq_pts)
-    if noise_full_res is not None:
-        noise_mean = noise_full_res.emit(eq_pts)
-        for i in range(len(measurement_mean.points)):
-            m = measurement_mean.points[i]["y"]
-            n = noise_mean.points[i]["y"]
-            measurement_mean.points[i]["y"] = max(m - n, m * 0.01)
-
-    # 8. Target
     target_stats = welch_stats(target_samples, sample_rate)
-    target_full = Graph(target_stats)
-    target = target_full.emit(eq_pts)
+    spline_targ = _build_spline(target_stats)
+
+    spline_noise = None
+    if noise_stats is not None:
+        spline_noise = _build_spline(noise_stats)
+
+    # 6. Evaluate on uniform log-spaced grid
+    eval_freqs = np.logspace(np.log10(BOTTOM_F), np.log10(TOP_F), N_EVAL)
+
+    meas_vals = _eval_spline(spline_meas, eval_freqs)
+
+    # Spectral subtraction
+    if spline_noise is not None:
+        noise_vals = _eval_spline(spline_noise, eval_freqs)
+        meas_vals = np.maximum(meas_vals - noise_vals, meas_vals * 0.01)
+
+    target_vals = _eval_spline(spline_targ, eval_freqs)
+
+    # 7. Rolloffs
     for freq, db in high_rolloffs:
-        target = target.rolloff(freq, db, "high")
+        atten = db_to_ratio(db)
+        mask = eval_freqs > freq
+        octaves = np.log2(np.maximum(eval_freqs[mask] / freq, 1.0))
+        target_vals[mask] *= atten ** octaves
     for freq, db in low_rolloffs:
-        target = target.rolloff(freq, db, "low")
+        atten = db_to_ratio(db)
+        mask = eval_freqs < freq
+        octaves = np.log2(np.maximum(freq / eval_freqs[mask], 1.0))
+        target_vals[mask] *= atten ** octaves
 
-    # 9. Correction
-    comp_points = []
-    for i, x in enumerate(eq_pts):
-        t = target.points[i]["y"]
-        m = measurement_mean.points[i]["y"]
-        comp_points.append({"x": x, "y": t / m if m > 1e-20 else 1e6})
-    comp = Graph(comp_points)
+    # 8. Correction
+    corr = np.where(meas_vals > 1e-20, target_vals / meas_vals, 1e6)
 
-    # 10. Bass enhancer preprocessing
+    # 9. Bass enhancer preprocessing
     if bass_enhancer_cutoff is not None:
-        comp = comp.bass_enhancer_preprocess(
-            bass_enhancer_cutoff, measurement_mean, h2=h2, h3=h3)
+        fc = bass_enhancer_cutoff
+        from eqgen.model import model_gain_needed
 
-    freqs = np.array([p["x"] for p in comp.points])
-    gains_db = np.array([ratio_to_db(p["y"]) for p in comp.points])
+        def meas_at(f: float) -> float:
+            """Measurement magnitude at frequency f (or 0 if out of range)."""
+            if f <= 0 or f > TOP_F:
+                return 0.0
+            return float(spline_meas(np.log10(f)))
+
+        # Compute flat correction value at fc/2 before modifying corr
+        idx_fc2 = int(np.searchsorted(eval_freqs, fc / 2.0))
+        m_fc2 = meas_at(fc / 2.0)
+        G_flat = model_gain_needed(fc / 2.0, corr[idx_fc2] * m_fc2, fc, h2, h3, meas_at)
+        flat_val = min(G_flat, corr[idx_fc2])
+
+        for i, f in enumerate(eval_freqs):
+            G = model_gain_needed(f, corr[i] * meas_at(f), fc, h2, h3, meas_at)
+            if G > 1e-12:
+                corr[i] = min(G, corr[i])
+
+        # Below fc/2 the enhancer handles bass perception via harmonics.
+        # Hold correction flat at the model gain computed at fc/2.
+        corr[:idx_fc2 + 1] = flat_val
+
+    freqs = eval_freqs
+    gains_db = ratio_to_db(corr)
 
     if detailed:
-        # Gather all intermediate graphs for visualization
-        raw_resp = []
-        for p in measurement_full.points:
-            raw_resp.append({"freq": p["x"], "db": ratio_to_db(p["y"])})
-        raw_target = []
-        for p in target_full.points:
-            raw_target.append({"freq": p["x"], "db": ratio_to_db(p["y"])})
-        noise_data = []
-        if noise_full_res is not None:
-            for p in noise_full_res.points:
-                noise_data.append({"freq": p["x"], "cv": p["y"]})
-        # Also get per-bin CV from pooled for the raw measurement noise
+        # Raw measurement (Welch bins)
+        raw_resp = [{"freq": float(s["freq"]), "db": ratio_to_db(s["mean"])}
+                    for s in pooled]
+        # Raw target (Welch bins)
+        raw_target = [{"freq": float(s["freq"]), "db": ratio_to_db(s["mean"])}
+                      for s in target_stats]
+        # CV per bin (after merge + inflation)
         cv_data = [{"freq": p["freq"], "cv": p["cv"]} for p in pooled]
-        meas_sub = []
-        for p in measurement_mean.points:
-            meas_sub.append({"freq": p["x"], "db": ratio_to_db(p["y"])})
-        targ_sub = []
-        for p in target.points:
-            targ_sub.append({"freq": p["x"], "db": ratio_to_db(p["y"])})
+        # Noise floor CV
+        noise_data = []
+        if noise_stats is not None:
+            noise_data = [{"freq": s["freq"], "cv": s["cv"]} for s in noise_stats]
+        # Subtracted measurement (eval grid)
+        meas_sub = [{"freq": float(f), "db": ratio_to_db(v)}
+                    for f, v in zip(eval_freqs, meas_vals)]
+        # Target after rolloffs (eval grid)
+        targ_sub = [{"freq": float(f), "db": ratio_to_db(v)}
+                    for f, v in zip(eval_freqs, target_vals)]
+
         return {
             "freqs": freqs.tolist(),
             "gains_db": gains_db.tolist(),
@@ -475,15 +355,21 @@ def run_pipeline(
             "noise_floor": noise_data,
             "meas_subtracted": meas_sub,
             "target_resampled": targ_sub,
-            "eq_points_freqs": eq_pts.tolist(),
         }
 
     return freqs, gains_db, sample_rate
 
 
-def pipeline_to_graph(freqs: np.ndarray, gains_db: np.ndarray) -> Graph:
-    """Convert pipeline output arrays back to a Graph for serialization."""
-    return Graph([{"x": f, "y": db_to_ratio(g)} for f, g in zip(freqs, gains_db)])
+# ═══════════════════════════════════════════════════════════════════════════════
+# Serialisation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def curve_to_json(freqs: np.ndarray, gains_db: np.ndarray) -> list:
+    """Convert (freqs, gains_db) to JSON-serialisable list of {freq, gain_db}."""
+    return [
+        {"freq": round(float(f), 2), "gain_db": round(float(g), 3)}
+        for f, g in zip(freqs, gains_db)
+    ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

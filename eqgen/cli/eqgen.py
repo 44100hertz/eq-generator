@@ -20,9 +20,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from eqgen.pipeline import (
-    run_pipeline, pipeline_to_graph, Graph, db_to_ratio, ratio_to_db,
-)
+from eqgen.pipeline import run_pipeline, curve_to_json, db_to_ratio, ratio_to_db
 
 
 def parse_rolloff(spec: str):
@@ -57,8 +55,6 @@ Examples:
     ap.add_argument("--low-rolloff", action="append", default=[],
                     metavar="FREQ,DB_OCTAVE",
                     help="Low-frequency rolloff (e.g. 100,-12). Repeatable.")
-    ap.add_argument("--max-noise", type=float, default=0.65,
-                    help="Max per-span noise CV [default: 0.65]")
     ap.add_argument("--bass-enhancer-cutoff", "--fc", type=float, default=None,
                     dest="fc", help="Bass enhancer cutoff Hz")
     ap.add_argument("--h2", type=float, default=1.0,
@@ -73,17 +69,15 @@ Examples:
 
     freqs, gains_db, sample_rate = run_pipeline(
         args.measurement, args.target, args.noise,
-        max_noise=args.max_noise,
         bass_enhancer_cutoff=args.fc,
         h2=args.h2, h3=args.h3,
         high_rolloffs=high_rolloffs,
         low_rolloffs=low_rolloffs,
     )
 
-    graph = pipeline_to_graph(freqs, gains_db)
     output = {
         "sample_rate": sample_rate,
-        "points": graph.to_json(),
+        "points": curve_to_json(freqs, gains_db),
     }
 
     json_str = json.dumps(output, indent=2)

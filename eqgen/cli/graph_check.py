@@ -33,7 +33,7 @@ MEAS_DIR = ROOT / "measurements"
 
 def gather_all(speaker_name=None, meas_paths=None, noise_path=None,
                target_path=None, fc=60.0, h2=0.5, h3=1.0,
-               max_noise=0.65, max_bands=40):
+               max_bands=40):
     """Run pipeline + IIR fit + harmonic model; return everything as a dict for JSON."""
     if speaker_name:
         meas_dir = MEAS_DIR / speaker_name
@@ -60,7 +60,7 @@ def gather_all(speaker_name=None, meas_paths=None, noise_path=None,
     # ── Run pipeline with detailed intermediate data ──────────────────
     detailed = run_pipeline(
         meas_paths, target_path, noise_path,
-        max_noise=max_noise, bass_enhancer_cutoff=fc, h2=h2, h3=h3,
+        bass_enhancer_cutoff=fc, h2=h2, h3=h3,
         detailed=True,
     )
 
@@ -141,6 +141,8 @@ def gather_all(speaker_name=None, meas_paths=None, noise_path=None,
         "raw_target": detailed["raw_target"],
         "noise_cv": detailed["noise_cv"],
         "noise_floor": detailed["noise_floor"],
+        "meas_smoothed": detailed["meas_subtracted"],
+        "targ_smoothed": detailed["target_resampled"],
         "correction": correction,
         "error": error,
         "predicted_error": predicted_error,
@@ -207,24 +209,30 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <span><i class="swatch" style="background:#d2991d"></i> Target</span></div>
 </div>
 
-<div class="chart"><h2>2. Error (Measurement &minus; Target)</h2>
+<div class="chart"><h2>2. Smoothed Curves (CV-weighted spline)</h2>
+  <canvas id="c_smooth"></canvas>
+  <div class="legend"><span><i class="swatch" style="background:#58a6ff"></i> Measurement (after smoothing + subtraction)</span>
+    <span><i class="swatch" style="background:#d2991d"></i> Target (after smoothing + rolloffs)</span></div>
+</div>
+
+<div class="chart"><h2>3. Error (Measurement &minus; Target)</h2>
   <canvas id="c_error"></canvas>
   <div class="legend"><span><i class="swatch" style="background:#f85149"></i> Error dB</span>
     <span><i class="swatch" style="background:rgba(255,255,255,0.1);border:1px dashed #30363d;height:0"></i> 0 dB line</span></div>
 </div>
 
-<div class="chart"><h2>3. Noise Floor (per-bin CV)</h2>
+<div class="chart"><h2>4. CV (coefficient of variation)</h2>
   <canvas id="c_noise"></canvas>
-  <div class="legend"><span><i class="swatch" style="background:#8b949e"></i> CV (coefficient of variation)</span></div>
+  <div class="legend"><span><i class="swatch" style="background:#8b949e"></i> CV (merged + noise-floor inflated)</span></div>
 </div>
 
-<div class="chart"><h2>4. IIR Fit vs Ideal Correction</h2>
+<div class="chart"><h2>5. IIR Fit vs Ideal Correction</h2>
   <canvas id="c_iir_fit"></canvas>
   <div class="legend"><span><i class="swatch" style="background:#3fb950"></i> Ideal correction</span>
     <span><i class="swatch" style="background:#bc8cff;height:1px;border:1px dashed #bc8cff"></i> IIR biquad fit</span></div>
 </div>
 
-<div class="chart"><h2>5. Predicted Error (corrected output &minus; target)</h2>
+<div class="chart"><h2>6. Predicted Error (corrected output &minus; target)</h2>
   <canvas id="c_predicted"></canvas>
   <div class="legend"><span><i class="swatch" style="background:#58a6ff"></i> Predicted output</span>
     <span><i class="swatch" style="background:rgba(255,255,255,0.12);border:1px dashed #30363d;height:0"></i> 0 dB (flat)</span></div>
@@ -385,13 +393,18 @@ initChart('c_raw', [
   {name:'Target', data:DATA.raw_target, color:COLORS[3]},
 ], 'dB');
 
+initChart('c_smooth', [
+  {name:'Measurement', data:DATA.meas_smoothed, color:COLORS[0]},
+  {name:'Target', data:DATA.targ_smoothed, color:COLORS[3]},
+], 'dB');
+
 initChart('c_error', [
   {name:'Error', data:DATA.error, color:COLORS[2]},
 ], 'dB', {yMin: -30, yMax: 30});
 
 initChart('c_noise', [
   {name:'CV', data:DATA.noise_cv, color:COLORS[5]||'#8b949e'},
-], 'CV', {yMin: 0, yMax: 1.2});
+], 'CV');
 
 initChart('c_iir_fit', [
   {name:'Ideal', data:DATA.correction, color:COLORS[1]},
@@ -448,7 +461,6 @@ def main():
     ap.add_argument("--fc", type=float, default=60.0, help="Bass enhancer cutoff Hz")
     ap.add_argument("--h2", type=float, default=0.5, help="2nd harmonic amplitude")
     ap.add_argument("--h3", type=float, default=1.0, help="3rd harmonic amplitude")
-    ap.add_argument("--max-noise", type=float, default=0.65)
     ap.add_argument("--max-bands", type=int, default=40)
     ap.add_argument("--no-open", action="store_true", help="Don't open in browser")
     args = ap.parse_args()
@@ -463,7 +475,7 @@ def main():
         noise_path=args.noise,
         target_path=args.target,
         fc=args.fc, h2=args.h2, h3=args.h3,
-        max_noise=args.max_noise, max_bands=args.max_bands,
+        max_bands=args.max_bands,
     )
 
     out_path = args.output or f"output/{args.speaker or 'custom'}_report.html"
