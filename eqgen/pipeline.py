@@ -92,6 +92,7 @@ def welch_stats(samples: np.ndarray, sample_rate: float) -> List[dict]:
     bin_count = fft_size // 2 + 1
 
     raw_sum = np.zeros(bin_count)
+    raw_sum_sq = np.zeros(bin_count)
     norm_sum = np.zeros(bin_count)
     norm_sum_sq = np.zeros(bin_count)
     window_count = 0
@@ -101,6 +102,7 @@ def welch_stats(samples: np.ndarray, sample_rate: float) -> List[dict]:
         spectrum = np.fft.rfft(segment)
         mags_window = np.abs(spectrum) / fft_size
         raw_sum += mags_window
+        raw_sum_sq += mags_window * mags_window
 
         mean_mag = np.mean(mags_window)
         if mean_mag > 0:
@@ -121,6 +123,7 @@ def welch_stats(samples: np.ndarray, sample_rate: float) -> List[dict]:
         if f < BOTTOM_F or f > TOP_F:
             continue
         mean_val = max(raw_sum[i] / n, 0.0)
+        mean_sq = max(raw_sum_sq[i] / n, 0.0)
         norm_mean = norm_sum[i] / n
         norm_var = (norm_sum_sq[i] / n) - (norm_mean * norm_mean)
         cv = (np.sqrt(norm_var) / norm_mean) if norm_mean > 0 else float('inf')
@@ -128,7 +131,8 @@ def welch_stats(samples: np.ndarray, sample_rate: float) -> List[dict]:
             "freq": f,
             "count": window_count,
             "mean": mean_val,
-            "noise": cv,
+            "mean_sq": mean_sq,
+            "cv": cv,
         })
     return results
 
@@ -276,7 +280,7 @@ def eq_points_adaptive(pooled: List[dict], max_noise: float,
     for i, b in enumerate(pooled):
         c = float(b["count"])
         m = b["mean"]
-        var_i = (b["noise"] * m) ** 2
+        var_i = (b["cv"] * m) ** 2
 
         f_lo = BOTTOM_F if span_start == 0 else pooled[span_start]["freq"] - bin_hz / 2.0
         f_hi = pooled[i]["freq"] + bin_hz / 2.0
@@ -368,12 +372,14 @@ def run_pipeline(
     for i in range(bin_count):
         total_n = sum(s[i]["count"] for s in all_stats)
         total_sum = sum(s[i]["mean"] * s[i]["count"] for s in all_stats)
-        pooled_noise = sum(s[i]["noise"] * s[i]["count"] for s in all_stats) / total_n
+        total_sum_sq = sum(s[i]["mean_sq"] * s[i]["count"] for s in all_stats)
+        pooled_cv = sum(s[i]["cv"] * s[i]["count"] for s in all_stats) / total_n
         pooled.append({
             "freq": all_stats[0][i]["freq"],
             "count": total_n,
             "mean": total_sum / total_n,
-            "noise": pooled_noise,
+            "mean_sq": total_sum_sq / total_n,
+            "cv": pooled_cv,
         })
 
     # 4. Build graph
@@ -386,8 +392,21 @@ def run_pipeline(
         assert noise_rate == sample_rate
         noise_stats = welch_stats(noise_samples, sample_rate)
         for i in range(min(len(pooled), len(noise_stats))):
-            pooled[i]["noise"] = max(pooled[i]["noise"], noise_stats[i]["noise"])
+            pooled[i]["cv"] = max(pooled[i]["cv"], noise_stats[i]["cv"])
         noise_full_res = Graph(noise_stats)
+
+        # 5b. Noise-floor CV inflation: penalise bins where measurement
+        # power is dominated by background noise, even if that noise is
+        # stationary (low CV).  Uses mean-squared magnitude (power), not
+        # mean magnitude, to avoid underestimating noise contribution.
+        for i in range(len(pooled)):
+            P_meas = max(pooled[i]["mean_sq"], 1e-20)
+            P_noise = max(noise_stats[i]["mean_sq"], 1e-20)
+            cv_n = noise_stats[i]["cv"]
+            # Inflate noise power by 1σ to account for peak, not mean, noise
+            effective_noise = P_noise * (1.0 + cv_n)
+            noise_ratio = min(0.99, effective_noise / P_meas)
+            pooled[i]["cv"] = pooled[i]["cv"] / np.sqrt(max(0.01, 1.0 - noise_ratio))
 
     # 6. Adaptive EQ points
     eq_pts = eq_points_adaptive(pooled, max_noise)
@@ -439,7 +458,7 @@ def run_pipeline(
             for p in noise_full_res.points:
                 noise_data.append({"freq": p["x"], "cv": p["y"]})
         # Also get per-bin CV from pooled for the raw measurement noise
-        pooled_noise = [{"freq": p["freq"], "cv": p["noise"]} for p in pooled]
+        cv_data = [{"freq": p["freq"], "cv": p["cv"]} for p in pooled]
         meas_sub = []
         for p in measurement_mean.points:
             meas_sub.append({"freq": p["x"], "db": ratio_to_db(p["y"])})
@@ -452,7 +471,7 @@ def run_pipeline(
             "sample_rate": sample_rate,
             "raw_measurement": raw_resp,
             "raw_target": raw_target,
-            "noise_cv": pooled_noise,
+            "noise_cv": cv_data,
             "noise_floor": noise_data,
             "meas_subtracted": meas_sub,
             "target_resampled": targ_sub,
