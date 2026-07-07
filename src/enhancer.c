@@ -86,6 +86,7 @@ void BassEnhancerCfg_init(BassEnhancerCfg *cfg,
                           float cutoff_hz, float h2_amp, float h3_amp,
                           float release_secs, float fs,
                           float limiter_release_secs,
+                          float pre_gain,
                           int eq_n_biquads, const int32_t *eq_coeffs)
 {
     memset(cfg, 0, sizeof(*cfg));
@@ -100,6 +101,11 @@ void BassEnhancerCfg_init(BassEnhancerCfg *cfg,
     cfg->release_coeff_q16 = (int32_t)(exp(-1.0 / (fs * release_secs)) * Q16 + 0.5);
     cfg->h2_amp_q16 = (int32_t)(h2_amp * Q16 + 0.5);
     cfg->h3_amp_q16 = (int32_t)(h3_amp * Q16 + 0.5);
+
+    /* Pre-gain clamp: [1/16, 16.0] = [-24, +24] dB range in Q16 */
+    if (pre_gain < 0.0625f) pre_gain = 0.0625f;
+    if (pre_gain > 16.0f)   pre_gain = 16.0f;
+    cfg->pre_gain_q16 = (int32_t)(pre_gain * Q16 + (pre_gain >= 0.0f ? 0.5f : -0.5f));
 
     /* Limiter release coefficient */
     cfg->limiter_release_coeff_q16 = (int32_t)(
@@ -228,6 +234,12 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
 
     /* ── Stage 0: DC blocker (first-order HP at ~5 Hz) ───────────── */
     x = DCBlocker_tick(&ch->dc_block, x);
+
+    /* ── Stage 0a: Pre-gain (uniform gain before EQ, Q16) ────────── */
+    /* Skips multiply when pre_gain == 1.0 (65536) for efficiency.   */
+    if (cfg->pre_gain_q16 != 65536) {
+        x = (int32_t)(((int64_t)x * (int64_t)cfg->pre_gain_q16) >> 16);
+    }
 
     /* ── Stage 1: EQ preprocessing ────────────────────────────────── */
     int32_t eq_out = BiquadQ28_cascade(ch->eq_bqs, cfg->eq_n_biquads, x);

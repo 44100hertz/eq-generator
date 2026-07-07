@@ -118,6 +118,11 @@ static void *eqgen_instantiate(const void *desc,
                          EQGEN_RELEASE_SECS,
                          (float)fs,
                          EQGEN_LIMITER_RELEASE_SECS,
+#ifdef EQGEN_PRE_GAIN_Q16
+                         (float)EQGEN_PRE_GAIN_Q16 / 65536.0f,
+#else
+                         1.0f,
+#endif
                          EQGEN_N_BIQUADS,
                          eqgen_coeffs_q28);
     ReciprocalLUT_init(&inst->lut);
@@ -211,6 +216,11 @@ static void eqgen_run(void *handle, unsigned long nframes)
                              release,
                              inst->fs,
                              EQGEN_LIMITER_RELEASE_SECS,
+#ifdef EQGEN_PRE_GAIN_Q16
+                             (float)EQGEN_PRE_GAIN_Q16 / 65536.0f,
+#else
+                             1.0f,
+#endif
                              EQGEN_N_BIQUADS,
                              eqgen_coeffs_q28);
         BassEnhancer_init(&inst->enh, &cfg, &inst->lut,

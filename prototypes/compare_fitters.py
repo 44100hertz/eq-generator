@@ -170,7 +170,7 @@ if __name__ == "__main__":
 
     for label, meas, targ, noise, fc, h2, h3 in scenarios:
         try:
-            freqs, gains_db, fs = run_pipeline(
+            freqs, gains_db, fs, _max_gain = run_pipeline(
                 meas, targ, noise,
                 max_noise=0.65,
                 bass_enhancer_cutoff=fc,

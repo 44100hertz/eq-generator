@@ -24,6 +24,7 @@ typedef struct {
     float   h3_amp;
     float   release_secs;
     float   limiter_release_secs;
+    float   pre_gain;      /* linear gain applied before EQ (typ. 1.0) */
     float   fs;
     int     eq_n_biquads;
     const int32_t *eq_coeffs_q28;  /* array of 5*n Q4.28 coefficients */

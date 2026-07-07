@@ -53,6 +53,7 @@ class EnhancerParams(Structure):
         ("h3_amp", c_float),
         ("release_secs", c_float),
         ("limiter_release_secs", c_float),
+        ("pre_gain", c_float),
         ("fs", c_float),
         ("eq_n_biquads", c_int32),
         ("eq_coeffs_q28", c_void_p),
@@ -95,6 +96,7 @@ def create_enhancer(
     h3_amp: float = 0.33,
     release_secs: float = 0.2,
     limiter_release_secs: float = 0.049,
+    pre_gain: float = 1.0,
     fs: float = 44100.0,
     coeffs_q28: List[int] | None = None,
 ) -> ctypes.c_void_p:
@@ -107,6 +109,9 @@ def create_enhancer(
         limiter_release_secs: AGC limiter release time (s, typ. 0.049).
             The limiter applies 1.0/max(env,1.0) to harmonics only —
             always active, matching the EEL reference behaviour.
+        pre_gain: linear gain applied before EQ (default 1.0).
+            Set to db_to_ratio(max_gain_db) of the ideal correction
+            curve so EQ biquads only cut, never boost.
         fs: sample rate (Hz).
         coeffs_q28: flat list of Q4.28 biquad coefficients.
     """
@@ -125,6 +130,7 @@ def create_enhancer(
         h3_amp=h3_amp,
         release_secs=release_secs,
         limiter_release_secs=limiter_release_secs,
+        pre_gain=pre_gain,
         fs=fs,
         eq_n_biquads=n_biquads,
         eq_coeffs_q28=cast(eq_arr, c_void_p),

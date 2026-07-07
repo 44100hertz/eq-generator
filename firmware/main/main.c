@@ -52,6 +52,11 @@ static void dsp_init(void)
                          0.2f,     /* release_secs */
                          (float)EQGEN_FS,
                          0.049f,   /* limiter_release_secs */
+#ifdef EQGEN_PRE_GAIN_Q16
+                         (float)EQGEN_PRE_GAIN_Q16 / 65536.0f,
+#else
+                         1.0f,
+#endif
                          EQGEN_N_BIQUADS,
                          eqgen_coeffs_q28);
 

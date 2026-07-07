@@ -46,7 +46,13 @@ def generate_header(speaker_name: str, speaker_fn, fs: float, fc: float,
     target_linear = np.array([1.0 / max(speaker_fn(f), 1e-12) for f in freqs])
     target_db = np.clip(20.0 * np.log10(np.maximum(target_linear, 1e-12)), -24.0, 24.0)
 
-    fit = fit_eq_curve(freqs, target_db, fs, max_bands=max_bands,
+    # Pre-gain: shift the target down so the EQ only needs cuts.
+    max_gain_db = max(0.0, float(np.max(target_db)))
+    pre_gain = 10.0 ** (max_gain_db / 20.0) if max_gain_db > 0.0 else 1.0
+    pre_gain_q16 = int(round(pre_gain * 65536.0))
+    shifted_db = target_db - max_gain_db if max_gain_db > 0.0 else target_db
+
+    fit = fit_eq_curve(freqs, shifted_db, fs, max_bands=max_bands,
                        min_freq=f_min, max_freq=f_max)
 
     bq_q28 = quantize_biquads_q28(fit.biquads)
@@ -63,6 +69,7 @@ def generate_header(speaker_name: str, speaker_fn, fs: float, fc: float,
     lines.append(f"#define EQGEN_CUTOFF_HZ            {fc:.1f}f")
     lines.append(f"#define EQGEN_H2_AMP               {h2:.3f}f")
     lines.append(f"#define EQGEN_H3_AMP               {h3:.3f}f")
+    lines.append(f"#define EQGEN_PRE_GAIN_Q16          {pre_gain_q16}  // {pre_gain:.2f}x = {max_gain_db:+.1f} dB")
     lines.append(f"#define EQGEN_FS                   {fs:.0f}")
     lines.append(f"#define EQGEN_N_BIQUADS            {fit.n_bands}")
     lines.append("")

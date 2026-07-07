@@ -13,7 +13,7 @@ CFLAGS   ?= -O2 -Wall -Wextra
 LDFLAGS_SO ?= -shared -fPIC -lm
 
 SOURCES        = enhancer.c enhancer_api.c
-HEADERS        = enhancer.h enhancer_api.h biquad_q28.h envelope.h dc_blocker.h
+HEADERS        = enhancer.h enhancer_api.h biquad_q28.h envelope.h dc_blocker.h eq_coeffs.h
 TARGET         = enhancer.so
 
 LADSPA_SOURCES = enhancer.c ladspa/ladspa_wrapper.c
@@ -24,7 +24,7 @@ LADSPA_INSTALL_DIR = $(HOME)/.ladspa
 TEST_SOURCES   = test_enhancer.c
 TEST_TARGET    = test_enhancer
 
-FILTER_SOURCES = filter.c
+FILTER_SOURCES = filter.c enhancer.c enhancer_api.c
 FILTER_TARGET  = eqgen_filter
 
 .PHONY: all ladspa install-ladspa filter clean test
@@ -43,8 +43,8 @@ install-ladspa: $(LADSPA_TARGET)
 	mkdir -p $(LADSPA_INSTALL_DIR)
 	cp $(LADSPA_TARGET) $(LADSPA_INSTALL_DIR)/
 
-$(FILTER_TARGET): $(FILTER_SOURCES) $(SOURCES) $(HEADERS)
-	$(CC) $(CFLAGS) -I. -o $@ $(FILTER_SOURCES) $(SOURCES) -lm
+$(FILTER_TARGET): $(FILTER_SOURCES) $(HEADERS)
+	$(CC) $(CFLAGS) -I. -o $@ $(FILTER_SOURCES) -lm
 
 filter: $(FILTER_TARGET)
 

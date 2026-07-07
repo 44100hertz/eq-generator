@@ -69,7 +69,7 @@ Examples:
     high_rolloffs = [parse_rolloff(s) for s in args.high_rolloff]
     low_rolloffs = [parse_rolloff(s) for s in args.low_rolloff]
 
-    freqs, gains_db, sample_rate = run_pipeline(
+    freqs, gains_db, sample_rate, max_gain_db = run_pipeline(
         args.measurement, args.target, args.noise,
         bass_enhancer_cutoff=args.fc,
         h2=args.h2, h3=args.h3,
@@ -80,6 +80,7 @@ Examples:
 
     output = {
         "sample_rate": sample_rate,
+        "max_gain_db": round(max_gain_db, 2),
         "points": curve_to_json(freqs, gains_db),
     }
 

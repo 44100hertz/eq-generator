@@ -64,6 +64,11 @@ int main(int argc, char *argv[]) {
                          EQGEN_RELEASE_SECS,
                          fs,
                          EQGEN_LIMITER_RELEASE_SECS,
+#ifdef EQGEN_PRE_GAIN_Q16
+                         (float)EQGEN_PRE_GAIN_Q16 / 65536.0f,
+#else
+                         1.0f,
+#endif
                          n_bq,
                          eqgen_coeffs_q28);
     ReciprocalLUT_init(&lut);

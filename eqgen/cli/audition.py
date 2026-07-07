@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from eqgen.pipeline import (
-    run_pipeline, design_eq, process_track,
+    run_pipeline, design_eq, process_track, db_to_ratio,
 )
 
 MEAS_DIR = ROOT / "measurements"
@@ -55,15 +55,19 @@ def run_speaker(speaker_name: str, out_dir: str, music_dir: str = None,
 
     # ── EQ pipeline ────────────────────────────────────────────────
     print(f"\n── EQ pipeline (Welch + adaptive points + model)...")
-    eq_freqs, target_db, fs = run_pipeline(
-        [meas_path], target)
+    eq_freqs, target_db, fs, max_gain_db = run_pipeline(
+        [meas_path], target,
+        bass_enhancer_cutoff=fc, h2=h2, h3=h3)
 
+    pre_gain = db_to_ratio(max_gain_db)
     print(f"  {len(eq_freqs)} adaptive EQ points, {eq_freqs[0]:.0f}–{eq_freqs[-1]:.0f} Hz")
+    if max_gain_db > 0:
+        print(f"  Max correction gain: {max_gain_db:+.1f} dB → pre-gain: {pre_gain:.2f}x")
 
     # ── IIR fit ────────────────────────────────────────────────────
     print(f"\n── Fitting IIR biquads...")
     coeffs, bands, eq_freqs, target_db, fitted_db = design_eq(
-        eq_freqs, target_db, fs, max_bands=max_bands)
+        eq_freqs, target_db, fs, max_bands=max_bands, pre_gain_db=max_gain_db)
 
     print(f"  {len(bands)} bands")
     err = fitted_db - target_db
@@ -109,7 +113,7 @@ def run_speaker(speaker_name: str, out_dir: str, music_dir: str = None,
             out_dir, f"{speaker_name.replace('/', '_')}_{safe}.wav")
         print(f"  [{processed+1}/{max_tracks}] {name}")
         if process_track(path, out_path, coeffs, len(bands),
-                         cutoff_hz=fc, h2=h2, h3=h3):
+                         cutoff_hz=fc, h2=h2, h3=h3, pre_gain=pre_gain):
             processed += 1
         print()
 

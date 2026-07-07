@@ -70,7 +70,10 @@ def gather_all(speaker_name=None, meas_paths=None, noise_path=None,
     fs = detailed["sample_rate"]
 
     # ── IIR fit ───────────────────────────────────────────────────────
-    fit = fit_eq_curve(freqs, gains_db, fs, max_bands=max_bands,
+    max_gain_db = detailed.get("max_gain_db", 0.0)
+    pre_gain = 10.0 ** (max_gain_db / 20.0) if max_gain_db > 0.0 else 1.0
+    shifted_db = gains_db - max_gain_db if max_gain_db > 0.0 else gains_db
+    fit = fit_eq_curve(freqs, shifted_db, fs, max_bands=max_bands,
                        min_freq=freqs[0], max_freq=freqs[-1],
                        min_peaking_freq=freqs[0])
     bq_q28 = quantize_biquads_q28(fit.biquads)
@@ -82,7 +85,10 @@ def gather_all(speaker_name=None, meas_paths=None, noise_path=None,
     # ── High-resolution IIR response for smoother graph 4 ────────────
     freqs_hires = np.logspace(np.log10(freqs[0]), np.log10(freqs[-1]), 500)
     fitted_db_hires = cascade_response_db(q28_floats, freqs_hires, fs)
-    iir_fit = [{"freq": float(f), "db": float(d)}
+    # The biquads were designed for the shifted target (gains_db - max_gain_db).
+    # Add max_gain_db back so the IIR trace shows the full end-to-end
+    # response (pre-gain + biquads), aligning with the unshifted "Ideal" trace.
+    iir_fit = [{"freq": float(f), "db": float(d + max_gain_db)}
                for f, d in zip(freqs_hires, fitted_db_hires)]
 
     correction = [{"freq": float(f), "db": float(d)} for f, d in zip(freqs, gains_db)]
@@ -130,7 +136,8 @@ def gather_all(speaker_name=None, meas_paths=None, noise_path=None,
 
         enh = effi.create_enhancer(
             cutoff_hz=fc, h2_amp=h2, h3_amp=h3,
-            release_secs=0.2, fs=fs, coeffs_q28=fitted_coeffs_q28,
+            release_secs=0.2, pre_gain=pre_gain,
+            fs=fs, coeffs_q28=fitted_coeffs_q28,
         )
         effi.reset_enhancer(enh)
         for i in range(0, len(pcm), 4):

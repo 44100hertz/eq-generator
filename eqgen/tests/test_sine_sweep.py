@@ -22,7 +22,7 @@ mp = str(ROOT/"measurements/technics/standing/measurement2.wav")
 tp = str(ROOT/"measurements/technics/standing/target.wav")
 
 # Run pipeline: measurement → correction curve
-freqs, gains_db, fs = run_pipeline([mp], tp)
+freqs, gains_db, fs, _max_gain = run_pipeline([mp], tp)
 
 # Fit IIR biquads to the correction curve
 fit = fit_eq_curve(freqs, gains_db, FS, max_bands=MAX_BANDS,

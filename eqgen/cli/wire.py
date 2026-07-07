@@ -79,6 +79,9 @@ def generate_eq_header(bq_q28, bands, cfg):
     lines.append(f"#define EQGEN_H3_AMP               {cfg['h3_amp']:.3f}f")
     lines.append(f"#define EQGEN_RELEASE_SECS         {cfg['release_secs']:.3f}f")
     lines.append(f"#define EQGEN_LIMITER_RELEASE_SECS {cfg['limiter_release_secs']:.3f}f")
+    pre_gain = cfg.get('pre_gain', 1.0)
+    pre_gain_q16 = int(round(pre_gain * 65536.0))
+    lines.append(f"#define EQGEN_PRE_GAIN_Q16          {pre_gain_q16}")
     lines.append(f"#define EQGEN_FS                   {cfg['fs']:.0f}")
     lines.append(f"#define EQGEN_N_BIQUADS            {len(bands)}")
     lines.append("")
@@ -128,16 +131,22 @@ def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
             sys.exit("ERROR: need --measurement, --target (or speaker name)")
 
     print(f"\n── EQ pipeline (Welch + adaptive points + model)...")
-    eq_freqs, target_db, fs = run_pipeline(
+    eq_freqs, target_db, fs, max_gain_db = run_pipeline(
         meas_paths, target_path, noise_path,
+        bass_enhancer_cutoff=fc, h2=h2, h3=h3,
     )
+
+    pre_gain = 10.0 ** (max_gain_db / 20.0) if max_gain_db > 0.0 else 1.0
+    shifted_db = target_db - max_gain_db if max_gain_db > 0.0 else target_db
 
     print(f"  {len(eq_freqs)} adaptive EQ points, "
           f"{eq_freqs[0]:.0f}–{eq_freqs[-1]:.0f} Hz")
+    if max_gain_db > 0:
+        print(f"  Max correction gain: {max_gain_db:+.1f} dB → pre-gain: {pre_gain:.2f}x")
 
     design_fs = float(target_fs) if target_fs else fs
     print(f"\n── Fitting IIR biquads at {design_fs:.0f} Hz (max {max_bands} bands)...")
-    fit = fit_eq_curve(eq_freqs, target_db, design_fs, max_bands=max_bands,
+    fit = fit_eq_curve(eq_freqs, shifted_db, design_fs, max_bands=max_bands,
                        min_freq=eq_freqs[0], max_freq=eq_freqs[-1],
                        min_peaking_freq=eq_freqs[0])
 
@@ -153,7 +162,10 @@ def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
             a2=q28_to_float(bq.a2),
         ))
     fitted_db = cascade_response_db(q28_floats, eq_freqs, design_fs)
-    err = fitted_db - target_db
+    # Compare against the shifted target curve used for fitting, not the
+    # original (unshifted) target.  Pre-gain in the C hot path restores
+    # the missing offset.
+    err = fitted_db - shifted_db
     for label, lo, hi in [
         ("Bass ≤250Hz", 0, 250), ("Mid 250-2k", 250, 2000),
         ("Treble >2k", 2000, 99999),
@@ -165,6 +177,7 @@ def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
     cfg = {
         "cutoff_hz": fc, "h2_amp": h2, "h3_amp": h3,
         "release_secs": 0.2, "limiter_release_secs": 0.049,
+        "pre_gain": pre_gain,
         "fs": float(design_fs),
     }
 
@@ -178,7 +191,12 @@ def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
 # ── Build & install ───────────────────────────────────────────────────
 
 def build_and_install():
-    print(f"\n── Building enhancer.so + eqgen_ladspa.so...")
+    print(f"\n── Building enhancer.so + filter + ladspa...")
+    # Touch filter sources so make rebuilds everything with the freshly-
+    # generated eq_coeffs.h (which includes shifted coefficients and
+    # EQGEN_PRE_GAIN_Q16).
+    for f in ["filter.c", "ladspa/ladspa_wrapper.c"]:
+        (SRC_DIR / f).touch()
     r = _run(["make", "-C", str(SRC_DIR), "all"], capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stderr)

@@ -436,6 +436,14 @@ def run_pipeline(
         mid_mean = float(np.mean(gains_db[mid_mask]))
         gains_db = gains_db - mid_mean
 
+    # Pre-gain: the max positive gain of the *normalized* correction curve.
+    # By applying this as a uniform gain before the EQ biquads, the
+    # fitted EQ curve only needs cuts (negative gains), avoiding
+    # internal clipping from large boosts in the biquad cascade.
+    # Must be computed AFTER normalization so recording-level offsets
+    # don't inflate the pre-gain.
+    max_gain_db = max(0.0, float(np.max(gains_db)))
+
     if detailed:
         # Raw measurement (Welch bins)
         raw_resp = [{"freq": float(s["freq"]), "db": ratio_to_db(s["mean"])}
@@ -460,6 +468,7 @@ def run_pipeline(
             "freqs": freqs.tolist(),
             "gains_db": gains_db.tolist(),
             "sample_rate": sample_rate,
+            "max_gain_db": max_gain_db,
             "raw_measurement": raw_resp,
             "raw_target": raw_target,
             "noise_cv": cv_data,
@@ -468,7 +477,7 @@ def run_pipeline(
             "target_resampled": targ_sub,
         }
 
-    return freqs, gains_db, sample_rate
+    return freqs, gains_db, sample_rate, max_gain_db
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -492,14 +501,22 @@ def design_eq(
     target_db: np.ndarray,
     fs: float,
     max_bands: int = 40,
+    pre_gain_db: float = 0.0,
 ) -> Tuple[List[int], List[dict], np.ndarray, np.ndarray, np.ndarray]:
     """Design a quantized IIR EQ to match the target curve.
+
+    If pre_gain_db > 0, the target curve is shifted down by that
+    amount — the EQ only cuts (never boosts), and the missing gain
+    is provided by a uniform pre-gain stage in the C hot path.
 
     Returns (coeffs_flat_q28, bands, freqs, target_db, fitted_db).
     coeffs_flat_q28 is a flat list of int32 Q4.28 coefficients:
     [b0, b1, b2, a1, a2, b0, b1, b2, a1, a2, ...].
     """
-    fit = fit_eq_curve(freqs, target_db, fs, max_bands=max_bands,
+    # Shift the target down so the EQ only needs cuts.
+    # Pre-gain in the hot path restores the missing overall gain.
+    shifted_db = target_db - pre_gain_db if pre_gain_db > 0.0 else target_db
+    fit = fit_eq_curve(freqs, shifted_db, fs, max_bands=max_bands,
                        min_freq=freqs[0], max_freq=freqs[-1],
                        min_peaking_freq=freqs[0])
 
@@ -548,6 +565,7 @@ def process_track(
     cutoff_hz: float = 60.0,
     h2: float = 0.5,
     h3: float = 1.0,
+    pre_gain: float = 1.0,
     start_sec: float = 30.0,
     duration_sec: float = 40.0,
     release_secs: float = 0.2,
@@ -573,6 +591,7 @@ def process_track(
     enh = enhancer_ffi.create_enhancer(
         cutoff_hz=cutoff_hz, h2_amp=h2, h3_amp=h3,
         release_secs=release_secs,
+        pre_gain=pre_gain,
         fs=44100.0, coeffs_q28=coeffs_q28)
 
     out_data = bytearray(len(pcm))

@@ -42,6 +42,7 @@ typedef struct {
     int32_t h2_amp_q16;         /* h2_amp in Q16                      */
     int32_t h3_amp_q16;         /* h3_amp in Q16                      */
     int32_t limiter_release_coeff_q16; /* exp(-1/(fs*lim_rel)) in Q16  */
+    int32_t pre_gain_q16;       /* pre-gain before EQ (Q16, 1.0=65536)*/
 
     /* Butterworth LP/HP coefficients in Q4.28 */
     int32_t lp_t2_coeffs[5];    /* LP at cutoff_hz  (for T2 path)     */
@@ -99,6 +100,7 @@ void BassEnhancerCfg_init(BassEnhancerCfg *cfg,
                           float cutoff_hz, float h2_amp, float h3_amp,
                           float release_secs, float fs,
                           float limiter_release_secs,
+                          float pre_gain,
                           int eq_n_biquads, const int32_t *eq_coeffs);
 
 /** Initialize a BassEnhancer instance.
