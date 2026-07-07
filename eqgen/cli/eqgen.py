@@ -57,12 +57,12 @@ Examples:
                     help="Low-frequency rolloff (e.g. 100,-12). Repeatable.")
     ap.add_argument("--bass-enhancer-cutoff", "--fc", type=float, default=None,
                     dest="fc", help="Bass enhancer cutoff Hz")
-    ap.add_argument("--smooth-exponent", type=float, default=1.0,
-                    help="CV smoothing aggressiveness. 0=fixed, 1=linear, 2=amplified [1.0]")
     ap.add_argument("--h2", type=float, default=1.0,
                     help="2nd harmonic amplitude")
     ap.add_argument("--h3", type=float, default=1.0,
                     help="3rd harmonic amplitude")
+    ap.add_argument("--smooth-exponent", type=float, default=1.0,
+                    help="CV smoothing aggressiveness. 0=fixed, 1=linear, 2=amplified [1.0]")
 
     args = ap.parse_args()
 
@@ -72,7 +72,8 @@ Examples:
     freqs, gains_db, sample_rate = run_pipeline(
         args.measurement, args.target, args.noise,
         bass_enhancer_cutoff=args.fc,
-        h2=args.h2, h3=args.h3, smooth_exponent=args.smooth_exponent,
+        h2=args.h2, h3=args.h3,
+        smooth_exponent=args.smooth_exponent,
         high_rolloffs=high_rolloffs,
         low_rolloffs=low_rolloffs,
     )

@@ -63,10 +63,20 @@ class BiquadQ28:
     @classmethod
     def from_float(cls, bc: BiquadCoeffs) -> "BiquadQ28":
         """Quantize float coefficients to Q4.28."""
+        Q28_INT32_MAX = 0x7FFFFFFF   # 2^31 - 1 = 7.999999996
+        Q28_INT32_MIN = -0x80000000  # -2^31    = -8.0
+
         def q28(v: float) -> int:
             v_clamped = max(-8.0 + 1e-9, min(8.0 - 1e-9, v))
-            return int(round(v_clamped * Q28_SCALE)) if v_clamped >= 0 \
+            raw = int(round(v_clamped * Q28_SCALE)) if v_clamped >= 0 \
                 else -int(round(-v_clamped * Q28_SCALE))
+            # bc.float2q28 returns 0x7FFFFFFF for v >= 7.999999; raw may
+            # round up to 0x80000000, which overflows c_int32 → -8.0.
+            if raw > Q28_INT32_MAX:
+                return Q28_INT32_MAX
+            if raw < Q28_INT32_MIN:
+                return Q28_INT32_MIN
+            return raw
         return cls(b0=q28(bc.b0), b1=q28(bc.b1), b2=q28(bc.b2),
                    a1=q28(bc.a1), a2=q28(bc.a2))
 

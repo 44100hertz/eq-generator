@@ -62,6 +62,7 @@ class EnhancerParams(Structure):
 # ── Function binding (idempotent) ─────────────────────────────────────
 
 _bound = False
+_eq_arr_keepalive = None  # prevent GC of ctypes coeff arrays
 
 
 def _bind() -> None:
@@ -116,6 +117,8 @@ def create_enhancer(
     n_biquads = len(coeffs_q28) // 5
 
     eq_arr = (c_int32 * len(coeffs_q28))(*coeffs_q28)
+    global _eq_arr_keepalive
+    _eq_arr_keepalive = eq_arr  # prevent garbage collection
     params = EnhancerParams(
         cutoff_hz=cutoff_hz,
         h2_amp=h2_amp,

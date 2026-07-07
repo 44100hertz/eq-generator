@@ -33,7 +33,7 @@ static int32_t float2q28(float v) {
 }
 
 void bass_design_butter_lp_q28(float fc, float fs, int32_t coeffs_out[5]) {
-    float omega = tanf((float)M_PI * fc / fs);
+    float omega = (float)tan((double)M_PI * fc / fs);
     float c = 1.0f + 1.41421356237f * omega + omega * omega;
 
     float b0 = (omega * omega) / c;
@@ -50,7 +50,7 @@ void bass_design_butter_lp_q28(float fc, float fs, int32_t coeffs_out[5]) {
 }
 
 void bass_design_butter_hp_q28(float fc, float fs, int32_t coeffs_out[5]) {
-    float omega = tanf((float)M_PI * fc / fs);
+    float omega = (float)tan((double)M_PI * fc / fs);
     float c = 1.0f + 1.41421356237f * omega + omega * omega;
 
     float b0 = 1.0f / c;
@@ -97,13 +97,13 @@ void BassEnhancerCfg_init(BassEnhancerCfg *cfg,
     cfg->limiter_release_secs = limiter_release_secs;
 
     /* Pre-compute Q16 values */
-    cfg->release_coeff_q16 = (int32_t)(expf(-1.0f / (fs * release_secs)) * Q16 + 0.5f);
-    cfg->h2_amp_q16 = (int32_t)(h2_amp * Q16 + 0.5f);
-    cfg->h3_amp_q16 = (int32_t)(h3_amp * Q16 + 0.5f);
+    cfg->release_coeff_q16 = (int32_t)(exp(-1.0 / (fs * release_secs)) * Q16 + 0.5);
+    cfg->h2_amp_q16 = (int32_t)(h2_amp * Q16 + 0.5);
+    cfg->h3_amp_q16 = (int32_t)(h3_amp * Q16 + 0.5);
 
     /* Limiter release coefficient */
     cfg->limiter_release_coeff_q16 = (int32_t)(
-        expf(-1.0f / (fs * limiter_release_secs)) * Q16 + 0.5f);
+        exp(-1.0 / (fs * limiter_release_secs)) * Q16 + 0.5);
 
     /* Design LP/HP filters at Q4.28 precision */
     bass_design_butter_lp_q28(cutoff_hz, fs, cfg->lp_t2_coeffs);
@@ -147,7 +147,7 @@ void BassEnhancer_init(BassEnhancer *enh,
     BiquadQ28_init(&enh->right.hp_harm, cfg->hp_harm_coeffs);
 
     /* Initialize DC blockers (5 Hz cutoff) */
-    float dc_R = expf(-2.0f * (float)M_PI * 5.0f / cfg->fs);
+    float dc_R = (float)exp(-2.0 * M_PI * 5.0 / cfg->fs);
     int32_t dc_R_q16 = (int32_t)(dc_R * Q16 + 0.5f);
     DCBlocker_init(&enh->left.dc_block,  dc_R_q16);
     DCBlocker_init(&enh->right.dc_block, dc_R_q16);
@@ -182,12 +182,14 @@ void BassEnhancer_reset(BassEnhancer *enh) {
     DCBlocker_reset(&enh->left.dc_block);
     DCBlocker_reset(&enh->right.dc_block);
 
-    memset(&enh->left.env_t2,  0, sizeof(Env));
-    memset(&enh->left.env_t3,  0, sizeof(Env));
-    memset(&enh->right.env_t2, 0, sizeof(Env));
-    memset(&enh->right.env_t3, 0, sizeof(Env));
-    memset(&enh->left.env_lim,  0, sizeof(Env));
-    memset(&enh->right.env_lim, 0, sizeof(Env));
+    /* Only reset envelope peak — keep lut and release coeff set by init.
+       memset(..., 0, sizeof(Env)) would wipe the lut pointer → NULL deref. */
+    enh->left.env_t2.peak   = 0;
+    enh->left.env_t3.peak   = 0;
+    enh->right.env_t2.peak  = 0;
+    enh->right.env_t3.peak  = 0;
+    enh->left.env_lim.peak  = 0;
+    enh->right.env_lim.peak = 0;
 }
 
 /* ── Single-channel processing ─────────────────────────────────────── */
@@ -273,7 +275,7 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
     int32_t harm_sum = harm_scaled_t2 + harm_scaled_t3;
     int32_t harm_hp  = BiquadQ28_tick(&ch->hp_harm, harm_sum);
 
-    /* HP-filter the dry signal */
+    /* HP-filter the dry signal. */
     int32_t dry_hp = BiquadQ28_tick(&ch->hp, eq_out);
 
     /* Mix: dry + harmonic_hp */

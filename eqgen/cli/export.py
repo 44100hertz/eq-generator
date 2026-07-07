@@ -19,14 +19,14 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from eqgen.model import preprocess_eq_curve, small_speaker
 from eqgen.eq_fit import fit_eq_curve
 from eqgen.quantize import BiquadQ28, quantize_biquads_q28
+from eqgen.pipeline import run_pipeline
 
 
 SPEAKERS = {
     "flat": lambda f: 1.0,
-    "small": small_speaker,
+    "small": lambda f: 0.25 if f <= 50 else (1.0 if f >= 100 else 0.25 + 0.75 * (f - 50) / 50),
     "steep": lambda f: 0.063 if f <= 40 else (1.0 if f >= 80
         else 0.063 + 0.937 * (f - 40) / 40),
 }
@@ -34,17 +34,19 @@ SPEAKERS = {
 
 def generate_header(speaker_name: str, speaker_fn, fs: float, fc: float,
                     h2: float, h3: float, max_bands: int) -> str:
-    """Generate C header content for a speaker model's EQ coefficients."""
+    """Generate C header content for a speaker model's EQ coefficients.
+
+    Uses the pipeline (measurement → correction) approach. For synthetic
+    speaker models, we compute correction = 1/speaker_response."""
     f_min = fc / 2.0
     f_max = min(16000.0, fs * 0.49)
     freqs = np.logspace(np.log10(f_min), np.log10(f_max), 200)
-    target_curve = {float(f): 0.5 for f in freqs}
-    eq_curve = preprocess_eq_curve(target_curve, speaker_fn, fc, h2, h3)
-    eq_freqs = np.array(sorted(eq_curve.keys()))
-    target_db = 20.0 * np.log10(
-        np.array([max(eq_curve[f], 1e-12) for f in eq_freqs]))
 
-    fit = fit_eq_curve(eq_freqs, target_db, fs, max_bands=max_bands,
+    # Target: flat perceived output → correction = 1/speaker
+    target_linear = np.array([1.0 / max(speaker_fn(f), 1e-12) for f in freqs])
+    target_db = np.clip(20.0 * np.log10(np.maximum(target_linear, 1e-12)), -24.0, 24.0)
+
+    fit = fit_eq_curve(freqs, target_db, fs, max_bands=max_bands,
                        min_freq=f_min, max_freq=f_max)
 
     bq_q28 = quantize_biquads_q28(fit.biquads)

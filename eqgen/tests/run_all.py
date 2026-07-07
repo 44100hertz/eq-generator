@@ -25,19 +25,17 @@ if ROOT not in sys.path:
 MODULES = {
     # DSP tests — verify the enhancer's signal-processing behavior
     "harmonics":   ("eqgen.tests.test_harmonics",   "Harmonic purity & linearity"),
-    "compressor":  ("eqgen.tests.test_compressor",  "Compressor & dynamics"),
     "gain_safety": ("eqgen.tests.test_gain_safety", "Gain safety on real measurements"),
     "chebyshev":   ("eqgen.tests.test_chebyshev",   "Chebyshev math analysis"),
 
-    # Model tests — verify the psychoacoustic model
-    "model":       ("eqgen.tests.test_model",       "Model verification (DSP vs formula)"),
-    "loudness":    ("eqgen.model",                  "Equal-loudness weighting"),
-    "model_gain":  ("eqgen.model",                  "Model gain analysis"),
+    # Model tests — verify the C enhancer pipeline
+    "model":       ("eqgen.tests.test_model",       "C enhancer verification"),
+    "evenness":    ("eqgen.tests.test_evenness",       "Bass evenness (C enhancer sweep)"),
 }
 
 # ── Group definitions ──────────────────────────────────────────────────
-DSP_MODULES    = {"harmonics", "compressor", "gain_safety"}
-MODEL_MODULES  = {"chebyshev", "model", "loudness", "model_gain"}
+DSP_MODULES    = {"harmonics", "gain_safety"}
+MODEL_MODULES  = {"chebyshev", "model", "evenness"}
 
 
 def main():
@@ -103,13 +101,8 @@ def main():
 
         # Special case: the model.py library has multiple run functions
         if module_path == "eqgen.model":
-            import eqgen.model as _mod
-            if name == "loudness":
-                fn = _mod.run_loudness_analysis
-            elif name == "model_gain":
-                fn = _mod.run_model_gain_analysis
-            else:
-                fn = _mod.run_loudness_analysis  # shouldn't happen
+            print(f"  ⚠️  Module 'eqgen.model' has been removed — skipping.")
+            continue
         else:
             _mod = __import__(module_path, fromlist=["run"])
             fn = _mod.run

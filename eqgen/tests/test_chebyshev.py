@@ -32,7 +32,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from eqgen.dsp import design_butter_lp, design_butter_hp, biquad_tick
-from eqgen.model import butterworth_hp_mag
+from eqgen.dsp import butterworth_hp_mag
 
 
 def analyze_chebyshev_mix(

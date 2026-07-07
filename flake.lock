@@ -34,10 +34,27 @@
         "type": "github"
       }
     },
+    "pyrirtool": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1561915659,
+        "narHash": "sha256-NHZjDP4+fKXfvX6/AfPyc0W9iOWcemycMXbTGSv92zM=",
+        "owner": "maj4e",
+        "repo": "pyrirtool",
+        "rev": "cc64f504d06896dccb5cf214e8d240f06d65b10f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "maj4e",
+        "repo": "pyrirtool",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "pyrirtool": "pyrirtool"
       }
     },
     "systems": {

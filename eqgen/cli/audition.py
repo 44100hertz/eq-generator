@@ -56,13 +56,9 @@ def run_speaker(speaker_name: str, out_dir: str, music_dir: str = None,
     # ── EQ pipeline ────────────────────────────────────────────────
     print(f"\n── EQ pipeline (Welch + adaptive points + model)...")
     eq_freqs, target_db, fs = run_pipeline(
-        [meas_path], target,
-        bass_enhancer_cutoff=fc, h2=h2, h3=h3)
+        [meas_path], target)
 
-    offset_db = float(np.mean(target_db))
-    target_db = target_db - offset_db
-    print(f"  {len(eq_freqs)} adaptive EQ points, {eq_freqs[0]:.0f}–{eq_freqs[-1]:.0f} Hz"
-          f"  (offset {offset_db:+.1f} dB)")
+    print(f"  {len(eq_freqs)} adaptive EQ points, {eq_freqs[0]:.0f}–{eq_freqs[-1]:.0f} Hz")
 
     # ── IIR fit ────────────────────────────────────────────────────
     print(f"\n── Fitting IIR biquads...")

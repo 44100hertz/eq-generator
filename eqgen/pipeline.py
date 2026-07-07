@@ -389,14 +389,11 @@ def run_pipeline(
         from eqgen.model import model_gain_needed
 
         def meas_at(f: float) -> float:
-            """Smoothed measurement magnitude at frequency f (or 0 if out of range)."""
+            """Measurement magnitude (kernel-smoothed) at frequency f."""
             if f <= 0 or f > TOP_F:
                 return 0.0
-            cv_f = float(np.interp(np.log10(f), np.log10(eval_freqs), cv_at_eval,
-                                   left=cv_at_eval[0], right=cv_at_eval[-1]))
-            bw = float(np.maximum(BASE_BW * (cv_f / MIN_CV) ** smooth_exponent, 0.01))
             return float(_smooth_kernel(meas_freqs, meas_raw, meas_cv,
-                                        np.array([f]), bandwidth_oct=bw)[0])
+                                         np.array([f]), bandwidth_oct=0.08).item())
 
         # Compute flat correction value at fc/2 before modifying corr
         idx_fc2 = int(np.searchsorted(eval_freqs, fc / 2.0))
@@ -427,6 +424,17 @@ def run_pipeline(
 
     freqs = eval_freqs
     gains_db = ratio_to_db(corr)
+
+    # Normalize: re-center correction so midrange mean = 0 dB.
+    # Raw FFT magnitudes are uncalibrated — measurement and target WAVs
+    # may have different recording levels, creating a spurious DC offset
+    # in the correction curve.  Subtracting the midrange mean gives the
+    # IIR fitter a balanced mix of positive and negative peaks around
+    # 0 dB instead of an all-positive curve with a large offset.
+    mid_mask = (freqs >= 500.0) & (freqs <= 2000.0)
+    if np.any(mid_mask):
+        mid_mean = float(np.mean(gains_db[mid_mask]))
+        gains_db = gains_db - mid_mean
 
     if detailed:
         # Raw measurement (Welch bins)

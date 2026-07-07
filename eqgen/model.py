@@ -16,20 +16,7 @@ enhancer, produces the desired perceived level.
 
 import numpy as np
 
-
-# ── Butterworth filter magnitude responses ────────────────────────────
-
-def butterworth_lp_mag(f: float, fc: float) -> float:
-    """2nd-order Butterworth LP magnitude at frequency f."""
-    w = f / fc
-    return 1.0 / np.sqrt(1.0 + w**4)
-
-
-def butterworth_hp_mag(f: float, fc: float) -> float:
-    """2nd-order Butterworth HP magnitude at frequency f."""
-    w = f / fc
-    return w * w / np.sqrt(1.0 + w**4)
-
+from eqgen.dsp import butterworth_lp_mag, butterworth_hp_mag
 
 
 # ── Core model ────────────────────────────────────────────────────────

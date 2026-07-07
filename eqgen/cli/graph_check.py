@@ -87,6 +87,90 @@ def gather_all(speaker_name=None, meas_paths=None, noise_path=None,
 
     correction = [{"freq": float(f), "db": float(d)} for f, d in zip(freqs, gains_db)]
 
+    # ── Farina exponential sine sweep → C DSP (EQ biquads + enhancer) ──
+    # A single continuous sweep replaces 100 stepped-sine measurements.
+    # Deconvolution separates the linear response (H1) from harmonic
+    # distortion (H2, H3) cleanly in the time domain — zero leakage.
+    # Amplitude 0.5 = -6 dBFS (normal music level).
+    from eqgen.farina import (generate_sweep, deconvolve,
+                               harmonic_ir, harmonic_response)
+
+    SWEEP_AMP = 0.5
+    SWEEP_DUR = 3.0          # seconds
+    SWEEP_F1 = max(freqs[0], 15.0)
+    SWEEP_F2 = min(freqs[-1], 10000.0)
+
+    eval_sweep_freqs = np.logspace(np.log10(SWEEP_F1),
+                                   np.log10(SWEEP_F2), 100)
+
+    # Build actual fitted EQ coefficients as flat int list for the enhancer
+    fitted_coeffs_q28 = []
+    for bq in bq_q28:
+        fitted_coeffs_q28.extend([bq.b0, bq.b1, bq.b2, bq.a1, bq.a2])
+
+    pipeline_h1 = []
+    pipeline_h2 = []
+    pipeline_h3 = []
+
+    try:
+        from eqgen import enhancer_ffi as effi
+        import struct
+
+        sweep_signal, invfilter, sweep_len = generate_sweep(
+            fs, SWEEP_F1, SWEEP_F2, SWEEP_DUR, SWEEP_AMP,
+            silence_start=0.5, silence_end=0.5,
+        )
+
+        # Feed the sweep through the C DSP pipeline sample-by-sample
+        n_total = len(sweep_signal)
+        pcm = bytearray(n_total * 4)
+        for i in range(n_total):
+            v = int(np.clip(sweep_signal[i, 0] * 32767, -32768, 32767))
+            struct.pack_into('<hh', pcm, i * 4, v, v)
+
+        enh = effi.create_enhancer(
+            cutoff_hz=fc, h2_amp=h2, h3_amp=h3,
+            release_secs=0.2, fs=fs, coeffs_q28=fitted_coeffs_q28,
+        )
+        effi.reset_enhancer(enh)
+        for i in range(0, len(pcm), 4):
+            l = struct.unpack_from('<h', pcm, i)[0]
+            r = struct.unpack_from('<h', pcm, i + 2)[0]
+            l_out, r_out = effi.process_stereo_frame(enh, l, r)
+            struct.pack_into('<hh', pcm, i, l_out, r_out)
+        effi.destroy_enhancer(enh)
+
+        # Unpack output back to float
+        out_float = np.array([
+            struct.unpack_from('<h', pcm, i * 4)[0] / 32768.0
+            for i in range(n_total)
+        ])
+
+        # Deconvolve → impulse response with harmonics separated in time
+        rir = deconvolve(out_float, invfilter, sweep_len)
+
+        # Extract harmonic IRs (10 ms Hann window) and compute responses
+        ir_h1, _ = harmonic_ir(rir, fs, SWEEP_F1, SWEEP_F2, SWEEP_DUR, 1)
+        ir_h2, _ = harmonic_ir(rir, fs, SWEEP_F1, SWEEP_F2, SWEEP_DUR, 2)
+        ir_h3, _ = harmonic_ir(rir, fs, SWEEP_F1, SWEEP_F2, SWEEP_DUR, 3)
+
+        db_h1 = harmonic_response(ir_h1, fs, eval_sweep_freqs)
+        db_h2 = harmonic_response(ir_h2, fs, eval_sweep_freqs)
+        db_h3 = harmonic_response(ir_h3, fs, eval_sweep_freqs)
+
+        # Normalize: subtract the sweep input level so traces represent
+        # output/input ratio (same reference as the old stepped-sine code)
+        input_db = 20.0 * np.log10(SWEEP_AMP)
+        pipeline_h1 = [{"freq": float(f), "db": float(d - input_db)}
+                       for f, d in zip(eval_sweep_freqs, db_h1)]
+        pipeline_h2 = [{"freq": float(f), "db": float(d - input_db)}
+                       for f, d in zip(eval_sweep_freqs, db_h2)]
+        pipeline_h3 = [{"freq": float(f), "db": float(d - input_db)}
+                       for f, d in zip(eval_sweep_freqs, db_h3)]
+
+    except (FileNotFoundError, RuntimeError, OSError):
+        pass
+
     # ── Normalize: align measurement to target in midrange (500-2000 Hz) ──
     raw_meas = detailed["raw_measurement"]
     raw_targ = detailed["raw_target"]
@@ -112,16 +196,6 @@ def gather_all(speaker_name=None, meas_paths=None, noise_path=None,
         if t_db is not None:
             error.append({"freq": p["freq"], "db": p["db"] - t_db})
 
-    # ── Predicted error: IIR fit + error → residual after correction ──
-    #    error = meas − target  (graph 2),  IIR_fit ≈ target − meas  (graph 4)
-    #    so adding them should cancel to ~0 dB.
-    iir_freqs = freqs
-    iir_dbs = fitted_db
-    predicted_error = []
-    for pt in error:
-        iir_val = float(np.interp(pt["freq"], iir_freqs, iir_dbs))
-        predicted_error.append({"freq": pt["freq"], "db": iir_val + pt["db"]})
-
     # ── Error metrics (computed from full-resolution error) ───────────
     err_arr = np.array([e["db"] for e in error])
     err_freqs = np.array([e["freq"] for e in error])
@@ -146,8 +220,10 @@ def gather_all(speaker_name=None, meas_paths=None, noise_path=None,
         "targ_smoothed": detailed["target_resampled"],
         "correction": correction,
         "error": error,
-        "predicted_error": predicted_error,
         "iir_fit": iir_fit,
+        "pipeline_h1": pipeline_h1,
+        "pipeline_h2": pipeline_h2,
+        "pipeline_h3": pipeline_h3,
     }
 
 
@@ -204,39 +280,38 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="metric"><div class="label">Biquad Bands</div><div class="value">__N_BANDS__</div></div>
 </div>
 
-<div class="chart"><h2>1. Raw Measurement vs Target</h2>
+<div class="chart"><h2>1. Raw Measurement vs Target (Welch FFT, 16K window, 50% overlap)</h2>
   <canvas id="c_raw"></canvas>
   <div class="legend"><span><i class="swatch" style="background:#58a6ff"></i> Measurement</span>
     <span><i class="swatch" style="background:#d2991d"></i> Target</span></div>
 </div>
 
-<div class="chart"><h2>2. Smoothed Curves (CV-weighted spline)</h2>
+<div class="chart"><h2>2. Smoothed Curves (measurement: CV-weighted kernel smoother + spectral subtraction)</h2>
   <canvas id="c_smooth"></canvas>
   <div class="legend"><span><i class="swatch" style="background:#58a6ff"></i> Measurement (after smoothing + subtraction)</span>
     <span><i class="swatch" style="background:#d2991d"></i> Target (after smoothing + rolloffs)</span></div>
 </div>
 
-<div class="chart"><h2>3. Error (Measurement &minus; Target)</h2>
+<div class="chart"><h2>3. Error — Measurement minus Target (from smoothed curves)</h2>
   <canvas id="c_error"></canvas>
   <div class="legend"><span><i class="swatch" style="background:#f85149"></i> Error dB</span>
     <span><i class="swatch" style="background:rgba(255,255,255,0.1);border:1px dashed #30363d;height:0"></i> 0 dB line</span></div>
 </div>
 
-<div class="chart"><h2>4. CV (coefficient of variation)</h2>
+<div class="chart"><h2>4. CV — Coefficient of Variation (measurement: per-bin noise estimate)</h2>
   <canvas id="c_noise"></canvas>
   <div class="legend"><span><i class="swatch" style="background:#8b949e"></i> CV (merged + noise-floor inflated)</span></div>
 </div>
 
-<div class="chart"><h2>5. IIR Fit vs Ideal Correction</h2>
+<div class="chart"><h2>5. IIR Fit vs Ideal Correction (computational: greedy biquad design)</h2>
   <canvas id="c_iir_fit"></canvas>
-  <div class="legend"><span><i class="swatch" style="background:#3fb950"></i> Ideal correction</span>
-    <span><i class="swatch" style="background:#bc8cff;height:1px;border:1px dashed #bc8cff"></i> IIR biquad fit</span></div>
+  <div class="legend"><span><i class="swatch" style="background:#3fb950"></i> Ideal correction (from measurement)</span>
+    <span><i class="swatch" style="background:#bc8cff;height:1px;border:1px dashed #bc8cff"></i> IIR biquad fit (computational design)</span></div>
 </div>
 
-<div class="chart"><h2>6. Predicted Error (corrected output &minus; target)</h2>
-  <canvas id="c_predicted"></canvas>
-  <div class="legend"><span><i class="swatch" style="background:#58a6ff"></i> Predicted output</span>
-    <span><i class="swatch" style="background:rgba(255,255,255,0.12);border:1px dashed #30363d;height:0"></i> 0 dB (flat)</span></div>
+<div class="chart"><h2>6. __PIPELINE_HEADER__</h2>
+  <canvas id="c_pipeline"></canvas>
+  __PIPELINE_LEGEND__
 </div>
 
 <div class="tooltip" id="tooltip"></div>
@@ -268,11 +343,13 @@ function initChart(id, traces, yLabel, opts) {
   // value ranges
   let yMin = opts.yMin !== undefined ? opts.yMin : Infinity;
   let yMax = opts.yMax !== undefined ? opts.yMax : -Infinity;
-  let xMin = Infinity, xMax = -Infinity;
+  let xMin = opts.xMin !== undefined ? opts.xMin : Infinity;
+  let xMax = opts.xMax !== undefined ? opts.xMax : -Infinity;
   traces.forEach(t => {
     t.data.forEach(p => {
-      if (p.freq < xMin) xMin = p.freq;
-      if (p.freq > xMax) xMax = p.freq;
+      if (opts.xMin === undefined && p.freq < xMin) xMin = p.freq;
+      if (opts.xMax === undefined && p.freq > xMax) xMax = p.freq;
+      if (p.freq < (opts.xMin || 0)) return;
       const v = p.db !== undefined ? p.db : p.cv;
       if (opts.yMin === undefined && v < yMin) yMin = v;
       if (opts.yMax === undefined && v > yMax) yMax = v;
@@ -412,8 +489,10 @@ initChart('c_iir_fit', [
   {name:'IIR fit', data:DATA.iir_fit, color:COLORS[4], dash:[6,3], width:1.4},
 ], 'dB');
 
-initChart('c_predicted', [
-  {name:'Predicted', data:DATA.predicted_error, color:COLORS[0]},
+initChart('c_pipeline', [
+  {name:'Fundamental H1', data:DATA.pipeline_h1, color:COLORS[1]},
+  {name:'H2', data:DATA.pipeline_h2, color:COLORS[5], dash:[4,2], width:1.2},
+  {name:'H3', data:DATA.pipeline_h3, color:COLORS[6]||'#79c0ff', dash:[2,2], width:1.0},
 ], 'dB');
 </script>
 </body>
@@ -444,6 +523,36 @@ def generate_html(data: dict) -> str:
         v = m[key]
         html = html.replace(f"__{key.upper()}__", f"{v:.1f}")
         html = html.replace(f"__{key.upper()}_CLS__", _err_cls(v))
+
+    # ── Dynamic pipeline graph header / legend ──
+    has_sweep = bool(data.get("pipeline_h1"))
+    n_pts = len(data.get("pipeline_h1", []))
+    if has_sweep:
+        html = html.replace(
+            "__PIPELINE_HEADER__",
+            f"Simulated Response — C DSP pipeline ({n_pts} pts, EQ + enhancer, fc={m['fc']} h2={m['h2']} h3={m['h3']})"
+        )
+        html = html.replace(
+            "__PIPELINE_LEGEND__",
+            '<div class="legend">'
+            '<span><i class="swatch" style="background:#3fb950"></i> Fundamental H1</span>'
+            '<span><i class="swatch" style="background:#ff7b72"></i> H2 harmonic</span>'
+            '<span><i class="swatch" style="background:#79c0ff"></i> H3 harmonic</span>'
+            '</div>'
+        )
+    else:
+        html = html.replace(
+            "__PIPELINE_HEADER__",
+            "Simulated Response — not available"
+        )
+        html = html.replace(
+            "__PIPELINE_LEGEND__",
+            '<div class="legend">'
+            '<span style="color:var(--muted);font-size:11px">'
+            '&#9432; Build enhancer.so first: <code>make -C src</code>'
+            '</span>'
+            '</div>'
+        )
     return html
 
 

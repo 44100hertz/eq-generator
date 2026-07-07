@@ -130,14 +130,10 @@ def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
     print(f"\n── EQ pipeline (Welch + adaptive points + model)...")
     eq_freqs, target_db, fs = run_pipeline(
         meas_paths, target_path, noise_path,
-        bass_enhancer_cutoff=fc, h2=h2, h3=h3,
     )
 
-    offset_db = float(np.mean(target_db))
-    target_db = target_db - offset_db
     print(f"  {len(eq_freqs)} adaptive EQ points, "
-          f"{eq_freqs[0]:.0f}–{eq_freqs[-1]:.0f} Hz  "
-          f"(offset {offset_db:+.1f} dB)")
+          f"{eq_freqs[0]:.0f}–{eq_freqs[-1]:.0f} Hz")
 
     design_fs = float(target_fs) if target_fs else fs
     print(f"\n── Fitting IIR biquads at {design_fs:.0f} Hz (max {max_bands} bands)...")

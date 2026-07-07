@@ -19,6 +19,7 @@ struct EnhancerHandle {
     BassEnhancer      enh;
     BiquadQ28        *eq_bqs_left;
     BiquadQ28        *eq_bqs_right;
+    ReciprocalLUT     lut;  /* stored in handle so env pointers stay valid */
 };
 
 /* ── Create / destroy ───────────────────────────────────────────────── */
@@ -46,10 +47,9 @@ EnhancerHandle *enhancer_create(const EnhancerParams *p) {
                          p->limiter_release_secs,
                          p->eq_n_biquads, p->eq_coeffs_q28);
 
-    ReciprocalLUT lut;
-    ReciprocalLUT_init(&lut);
+    ReciprocalLUT_init(&h->lut);
 
-    BassEnhancer_init(&h->enh, &cfg, &lut, h->eq_bqs_left, h->eq_bqs_right);
+    BassEnhancer_init(&h->enh, &cfg, &h->lut, h->eq_bqs_left, h->eq_bqs_right);
 
     return h;
 }
