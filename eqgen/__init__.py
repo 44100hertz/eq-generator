@@ -9,3 +9,5 @@
 #   sweep        — Sweep-based analysis through the C enhancer
 #   enhancer_ffi — ctypes wrapper for src/enhancer.so
 #   io           — WAV I/O and measurement loading
+#   presets      — Preset system for bundling measurements + parameters
+#   server       — Web UI server for preset management and visualization

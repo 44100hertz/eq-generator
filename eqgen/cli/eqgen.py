@@ -20,13 +20,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from eqgen.pipeline import run_pipeline, curve_to_json, db_to_ratio, ratio_to_db
-
-
-def parse_rolloff(spec: str):
-    """Parse a 'FREQ,DB_OCTAVE' rolloff spec."""
-    parts = spec.split(",")
-    return float(parts[0]), float(parts[1])
+from eqgen.pipeline import run_pipeline, curve_to_json
 
 
 def main():
@@ -37,7 +31,7 @@ def main():
 Examples:
     python -m eqgen.cli.eqgen -m meas1.wav meas2.wav -t target.wav -o eq.json
     python -m eqgen.cli.eqgen -m meas.wav -t target.wav --noise noise.wav \\
-        --bass-enhancer-cutoff 50.0 --low-rolloff 220,2 --low-rolloff 50,-2
+        --bass-enhancer-cutoff 50.0
 """,
     )
 
@@ -49,12 +43,6 @@ Examples:
                     help="Background noise WAV for spectral subtraction")
     ap.add_argument("-o", "--output", default=None,
                     help="Output JSON file (default: stdout)")
-    ap.add_argument("--high-rolloff", action="append", default=[],
-                    metavar="FREQ,DB_OCTAVE",
-                    help="High-frequency rolloff (e.g. 4000,-6). Repeatable.")
-    ap.add_argument("--low-rolloff", action="append", default=[],
-                    metavar="FREQ,DB_OCTAVE",
-                    help="Low-frequency rolloff (e.g. 100,-12). Repeatable.")
     ap.add_argument("--bass-enhancer-cutoff", "--fc", type=float, default=None,
                     dest="fc", help="Bass enhancer cutoff Hz")
     ap.add_argument("--h2", type=float, default=1.0,
@@ -66,16 +54,11 @@ Examples:
 
     args = ap.parse_args()
 
-    high_rolloffs = [parse_rolloff(s) for s in args.high_rolloff]
-    low_rolloffs = [parse_rolloff(s) for s in args.low_rolloff]
-
     freqs, gains_db, sample_rate, max_gain_db = run_pipeline(
         args.measurement, args.target, args.noise,
         bass_enhancer_cutoff=args.fc,
         h2=args.h2, h3=args.h3,
         smooth_exponent=args.smooth_exponent,
-        high_rolloffs=high_rolloffs,
-        low_rolloffs=low_rolloffs,
     )
 
     output = {

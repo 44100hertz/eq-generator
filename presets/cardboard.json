@@ -1,0 +1,18 @@
+{
+  "name": "cardboard",
+  "description": "Cardboard-box speaker prototype",
+  "measurements": [
+    "measurements/cardboard/response.wav"
+  ],
+  "target": "measurements/cardboard/target.wav",
+  "noise": "measurements/cardboard/noise.wav",
+  "fc": 45,
+  "h2": 0.7,
+  "h3": 0.7,
+  "max_bands": 40,
+  "smooth_exponent": 1,
+  "release": 0.2,
+  "limiter_release": 0.049,
+  "high_rolloffs": [],
+  "low_rolloffs": []
+}

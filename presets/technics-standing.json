@@ -1,0 +1,18 @@
+{
+  "name": "technics-standing",
+  "description": "Technics speakers, standing mic position",
+  "measurements": [
+    "measurements/technics/standing/measurement2.wav"
+  ],
+  "target": "measurements/technics/standing/target.wav",
+  "noise": "measurements/technics/standing/noise2.wav",
+  "fc": 50,
+  "h2": 0.5,
+  "h3": 1,
+  "max_bands": 24,
+  "smooth_exponent": 1,
+  "release": 0.2,
+  "limiter_release": 0.049,
+  "high_rolloffs": [],
+  "low_rolloffs": []
+}

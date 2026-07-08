@@ -18,6 +18,11 @@ eqgen-audition = "eqgen.cli.audition:main"
 eqgen-enhance = "eqgen.cli.enhance:main"
 eqgen-wire = "eqgen.cli.wire:main"
 eqgen-export = "eqgen.cli.export:main"
+eqgen-server = "eqgen.server:main"
+eqgen-preset = "eqgen.cli.preset:main"
+
+[project.optional-dependencies]
+server = ["fastapi", "uvicorn"]
 
 [tool.setuptools]
 packages = ["eqgen", "eqgen.cli", "eqgen.tests"]

@@ -11,8 +11,9 @@
 #   make wire-setup       live PipeWire system-wide EQ
 #   make wire-teardown    remove PipeWire wiring
 #   make export           export coeffs for ESP32
+#   make server           start web UI server (preset management)
 
-.PHONY: all clean test graph-check eqgen audition wire-setup wire-teardown export
+.PHONY: all clean test graph-check eqgen audition wire-setup wire-teardown export server
 
 # -- C DSP build -------------------------------------------------------
 
@@ -47,3 +48,12 @@ wire-teardown:
 
 export:
 	python -m eqgen.cli.export $(ARGS)
+
+server:
+	@PID_FILE=output/server.pid; \
+	if [ -f "$$PID_FILE" ]; then \
+		kill $$(cat "$$PID_FILE") 2>/dev/null || true; \
+		rm -f "$$PID_FILE"; \
+		sleep 0.5; \
+	fi
+	python -m eqgen.server $(ARGS)

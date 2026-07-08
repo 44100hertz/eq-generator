@@ -20,6 +20,8 @@
               numpy
               scipy
               matplotlib
+              fastapi
+              uvicorn
             ]))
             pkgs.gdb
           ];

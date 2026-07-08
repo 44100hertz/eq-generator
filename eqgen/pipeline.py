@@ -239,8 +239,6 @@ def run_pipeline(
     bass_enhancer_cutoff: Optional[float] = None,
     h2: float = 1.0,
     h3: float = 1.0,
-    high_rolloffs: Optional[List[Tuple[float, float]]] = None,
-    low_rolloffs: Optional[List[Tuple[float, float]]] = None,
     sample_rate_override: Optional[float] = None,
     smooth_exponent: float = 1.0,
     detailed: bool = False,
@@ -256,16 +254,12 @@ def run_pipeline(
       2. Welch FFT on each input
       3. Pool per-bin stats across measurement files
       4. Merge noise-floor CV + inflate CV in noise-dominated bins
-      5. Build CV-weighted smoothing splines (measurement, target, noise)
-      6. Evaluate on uniform log-spaced grid + spectral subtraction
-      7. Apply rolloffs to target
-      8. Correction = target / measurement
-      9. Bass enhancer preprocessing (if cutoff provided)
+      5. CV-weighted kernel smoothing on measurement + spectral subtraction
+      6. Target = linear fit of raw target (dB vs log-freq),
+         shifted to measurement midrange level
+      7. Correction = target / measurement
+      8. Bass enhancer preprocessing (if cutoff provided)
     """
-    if high_rolloffs is None:
-        high_rolloffs = []
-    if low_rolloffs is None:
-        low_rolloffs = []
 
     # 1. Read & validate
     wavs = []
@@ -322,15 +316,15 @@ def run_pipeline(
             noise_ratio = min(0.99, effective_noise / P_meas)
             pooled[i]["cv"] = pooled[i]["cv"] / np.sqrt(max(0.01, 1.0 - noise_ratio))
 
-    # 5. Extract arrays for kernel smoothing
+    # 5. CV-weighted kernel smoothing on measurement only.
+    # Bandwidth scales with local CV: at the Rayleigh floor (0.52) it
     meas_freqs = np.array([s["freq"] for s in pooled])
     meas_raw = np.array([s["mean"] for s in pooled])
     meas_cv = np.array([s["cv"] for s in pooled])
 
     target_stats = welch_stats(target_samples, sample_rate)
     targ_freqs = np.array([s["freq"] for s in target_stats])
-    targ_raw = np.array([s["mean"] for s in target_stats])
-    targ_cv = np.array([s["cv"] for s in target_stats])
+    targ_raw_db = ratio_to_db(np.array([s["mean"] for s in target_stats]))
 
     noise_freqs = None
     noise_raw = None
@@ -360,30 +354,23 @@ def run_pipeline(
         noise_vals = _smooth_kernel(noise_freqs, noise_raw, noise_cv, eval_freqs)
         meas_vals = np.maximum(meas_vals - noise_vals, meas_vals * 0.01)
 
-    # Target uses its own CV-scaled bandwidth
-    cv_targ = _smooth_kernel(targ_freqs, targ_cv, targ_cv, eval_freqs,
-                             bandwidth_oct=0.3)
-    bw_targ = np.maximum(BASE_BW * (cv_targ / MIN_CV) ** smooth_exponent, 0.01)
-    target_vals = _smooth_kernel(targ_freqs, targ_raw, targ_cv, eval_freqs,
-                                 bandwidth_oct=bw_targ)
+    # 6. Target = linear fit of raw target (dB vs log-freq),
+    #    shifted to measurement midrange level.
+    log10_f_targ = np.log10(targ_freqs)
+    slope, intercept = np.polyfit(log10_f_targ, targ_raw_db, 1)
+    eval_log10 = np.log10(eval_freqs)
+    targ_db_eval = slope * eval_log10 + intercept
+    mid = (eval_freqs >= 500) & (eval_freqs <= 2000)
+    meas_mid_db = float(np.mean(ratio_to_db(meas_vals[mid]))) if mid.any() else 0.0
+    targ_mid_db = float(np.mean(targ_db_eval[mid])) if mid.any() else 0.0
+    targ_db_eval += meas_mid_db - targ_mid_db
+    target_vals = 10.0 ** (targ_db_eval / 20.0)
 
-    # 7. Rolloffs
-    for freq, db in high_rolloffs:
-        atten = db_to_ratio(db)
-        mask = eval_freqs > freq
-        octaves = np.log2(np.maximum(eval_freqs[mask] / freq, 1.0))
-        target_vals[mask] *= atten ** octaves
-    for freq, db in low_rolloffs:
-        atten = db_to_ratio(db)
-        mask = eval_freqs < freq
-        octaves = np.log2(np.maximum(freq / eval_freqs[mask], 1.0))
-        target_vals[mask] *= atten ** octaves
-
-    # 8. Correction
+    # 7. Correction
     with np.errstate(divide='ignore', invalid='ignore'):
         corr = np.where(meas_vals > 1e-20, target_vals / meas_vals, 1e6)
 
-    # 9. Bass enhancer preprocessing
+    # 8. Bass enhancer preprocessing
     if bass_enhancer_cutoff is not None:
         fc = bass_enhancer_cutoff
         from eqgen.model import model_gain_needed
@@ -410,7 +397,7 @@ def run_pipeline(
         # Hold correction flat at the model gain computed at fc/2.
         corr[:idx_fc2 + 1] = flat_val
 
-    # 10. Clamp correction flat outside the CV-defined viable range.
+    # 9. Clamp correction flat outside the CV-defined viable range.
     # CV shelves (sudden sustained increases) indicate frequencies where
     # the measurement is too unreliable to correct — hold the correction
     # constant beyond those boundaries.
@@ -460,9 +447,9 @@ def run_pipeline(
         # Subtracted measurement (eval grid)
         meas_sub = [{"freq": float(f), "db": ratio_to_db(v)}
                     for f, v in zip(eval_freqs, meas_vals)]
-        # Target after rolloffs (eval grid)
-        targ_sub = [{"freq": float(f), "db": ratio_to_db(v)}
-                    for f, v in zip(eval_freqs, target_vals)]
+        # Target = linear fit (eval grid, dB)
+        targ_sub = [{"freq": float(f), "db": float(d)}
+                    for f, d in zip(eval_freqs, targ_db_eval)]
 
         return {
             "freqs": freqs.tolist(),
