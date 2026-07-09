@@ -188,7 +188,7 @@ def _apply_preset_to_system(preset_dict: dict, task_id: str):
 
     try:
         from eqgen.cli.wire import (
-            run_full_pipeline, generate_eq_header,
+            run_full_pipeline, generate_eq_header, generate_sfx_header,
             setup_wiring, SRC_DIR,
         )
 
