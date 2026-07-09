@@ -17,10 +17,12 @@
 #include "freertos/task.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_bt_device.h"
+#include "esp_gap_bt_api.h"
 #include "esp_a2dp_api.h"
 #include "esp_avrc_api.h"
 
@@ -98,15 +100,15 @@ static void bt_a2dp_event_cb(esp_a2d_cb_event_t event,
 
     case ESP_A2D_CONNECTION_STATE_EVT: {
         bool is_connected =
-            (param->conn_state.state == ESP_A2D_CONNECTION_STATE_CONNECTED);
+            (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED);
         ESP_LOGI(TAG, "%s (remote: %02x:%02x:%02x:%02x:%02x:%02x)",
                  is_connected ? "Connected" : "Disconnected",
-                 param->conn_state.remote_bda[0],
-                 param->conn_state.remote_bda[1],
-                 param->conn_state.remote_bda[2],
-                 param->conn_state.remote_bda[3],
-                 param->conn_state.remote_bda[4],
-                 param->conn_state.remote_bda[5]);
+                 param->conn_stat.remote_bda[0],
+                 param->conn_stat.remote_bda[1],
+                 param->conn_stat.remote_bda[2],
+                 param->conn_stat.remote_bda[3],
+                 param->conn_stat.remote_bda[4],
+                 param->conn_stat.remote_bda[5]);
 
         if (!is_connected) {
             audio_running = false;
@@ -118,7 +120,7 @@ static void bt_a2dp_event_cb(esp_a2d_cb_event_t event,
     }
 
     case ESP_A2D_AUDIO_STATE_EVT:
-        audio_running = (param->audio_state.state == ESP_A2D_AUDIO_STATE_STARTED);
+        audio_running = (param->audio_stat.state == ESP_A2D_AUDIO_STATE_STARTED);
         ESP_LOGI(TAG, "Audio %s", audio_running ? "started" : "stopped");
         if (!audio_running) {
             xStreamBufferReset(pcm_stream);
@@ -126,22 +128,19 @@ static void bt_a2dp_event_cb(esp_a2d_cb_event_t event,
         break;
 
     case ESP_A2D_AUDIO_CFG_EVT: {
-        esp_a2d_audio_cfg_t *a = &param->audio_cfg;
-        ESP_LOGI(TAG, "Codec=%s rate=%u ch=%u bits=%u",
-                 (a->mcc.type == ESP_A2D_MCT_SBC) ? "SBC" : "?",
-                 (unsigned)a->mcc.cie.sbc.sample_freq,
-                 (unsigned)a->mcc.cie.sbc.ch_mode,
-                 (unsigned)a->mcc.cie.sbc.alloc);
-
-        /* Map SBC sample_freq enum to Hz.
-         * 0=16k, 1=32k, 2=44.1k, 3=48k */
-        switch (a->mcc.cie.sbc.sample_freq) {
-            case 0:  current_sample_rate = 16000; break;
-            case 1:  current_sample_rate = 32000; break;
-            case 2:  current_sample_rate = 44100; break;
-            case 3:  current_sample_rate = 48000; break;
-            default: current_sample_rate = 44100; break;
-        }
+        esp_a2d_mcc_t *mcc = &param->audio_cfg.mcc;
+        /* samp_freq is a bitmask, not a sequential enum.
+         * The source picks a single rate during config,
+         * so exactly one bit is set.
+         * Priority: prefer higher rates. */
+        uint8_t sf = mcc->cie.sbc_info.samp_freq;
+        if      (sf & ESP_A2D_SBC_CIE_SF_48K) current_sample_rate = 48000;
+        else if (sf & ESP_A2D_SBC_CIE_SF_44K) current_sample_rate = 44100;
+        else if (sf & ESP_A2D_SBC_CIE_SF_32K) current_sample_rate = 32000;
+        else if (sf & ESP_A2D_SBC_CIE_SF_16K) current_sample_rate = 16000;
+        else                                  current_sample_rate = 44100;
+        ESP_LOGI(TAG, "Audio cfg: SBC rate=%d Hz (samp_freq=0x%02x)",
+                 current_sample_rate, sf);
         break;
     }
 
@@ -158,19 +157,17 @@ static void bt_a2dp_data_cb(const uint8_t *data, uint32_t len)
 {
     if (!audio_running || len == 0) return;
 
-    /* Push raw PCM bytes into the stream buffer (non-blocking).
-     * If the DSP task is falling behind, we skip this frame — no
-     * point buffering old audio. The stream buffer is sized to
-     * handle normal scheduling jitter.                                  */
+    /* Push raw PCM bytes into the stream buffer. */
     size_t sent = xStreamBufferSend(pcm_stream, data, (size_t)len, 0);
     if (sent < len) {
-        /* DSP task is overloaded — drop silently.  We'll catch up
-         * once the buffer drains.                                       */
         static uint32_t drop_count;
-        if (++drop_count < 10 || (drop_count % 100) == 0) {
-            ESP_LOGW(TAG, "Drop: %u/%u bytes (total drops: %lu)",
+        drop_count++;
+        if (drop_count < 10 || (drop_count % 100) == 0) {
+            size_t avail = xStreamBufferBytesAvailable(pcm_stream);
+            ESP_LOGW(TAG, "Drop #%lu: %u/%u bytes sent (buf avail=%u/%u)",
+                     (unsigned long)drop_count,
                      (unsigned)len - (unsigned)sent, (unsigned)len,
-                     drop_count);
+                     (unsigned)avail, (unsigned)PCM_STREAM_BUF_SIZE);
         }
         /* Reset the buffer to recover. */
         xStreamBufferReset(pcm_stream);
@@ -192,8 +189,7 @@ static void dsp_i2s_task(void *arg)
     while (1) {
         /* Wait for at least one stereo frame (4 bytes).
          * On first connect, or after a disconnect, block until
-         * audio arrives.  If audio is already streaming, this
-         * returns immediately.                                            */
+         * audio arrives. */
         size_t got = xStreamBufferReceive(pcm_stream, buf, PCM_CHUNK,
                                           portMAX_DELAY);
 
@@ -201,9 +197,6 @@ static void dsp_i2s_task(void *arg)
         if (current_sample_rate != rate) {
             rate = current_sample_rate;
             ESP_LOGI(TAG, "Sample rate changed to %d — re-initializing I2S", rate);
-            /* Re-init I2S handled by calling i2s_out_init again.
-             * We call it via the user callback's first invocation
-             * with the new rate.                                          */
         }
 
         if (user_data_cb) {

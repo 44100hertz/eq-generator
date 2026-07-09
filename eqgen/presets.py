@@ -22,6 +22,9 @@ from typing import Dict, List, Optional, Tuple
 ROOT = Path(__file__).resolve().parent.parent
 PRESETS_DIR = ROOT / "presets"
 
+# ── Global limit: maximum IIR biquad bands across the entire program ──
+MAX_IIR_BANDS = 12
+
 
 @dataclass
 class Preset:
@@ -37,7 +40,7 @@ class Preset:
     fc: Optional[float] = None          # bass enhancer cutoff Hz
     h2: float = 0.5                      # 2nd harmonic amplitude
     h3: float = 1.0                      # 3rd harmonic amplitude
-    max_bands: int = 24                  # max IIR biquad bands
+    max_bands: int = MAX_IIR_BANDS       # max IIR biquad bands
     smooth_exponent: float = 1.0         # CV smoothing aggressiveness
     release: float = 0.2                 # envelope release (s)
     limiter_release: float = 0.049       # harmonic limiter release (s)

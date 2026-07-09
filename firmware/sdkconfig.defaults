@@ -27,3 +27,8 @@ CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 # ── Reduce bloat ──────────────────────────────────────────────
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 CONFIG_BTDM_CTRL_BR_EDR_SCO_DATA_PATH_EFF=0
+
+# ── BT Controller mode (Classic only, no BLE) ─────────────────
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
+CONFIG_BTDM_CTRL_MODE_BLE_ONLY=n
+CONFIG_BTDM_CTRL_MODE_BTDM=n

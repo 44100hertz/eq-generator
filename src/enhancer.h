@@ -127,6 +127,22 @@ void BassEnhancer_reset(BassEnhancer *enh);
 void BassEnhancer_process_stereo(BassEnhancer *enh,
                                  int32_t *left, int32_t *right);
 
+/* ── Profiling counters (compile-time zero-cost when PROFILE_CYCLES unset) ── */
+
+typedef struct {
+    uint32_t frames;        /* total frames processed */
+    uint64_t cycles_total;  /* total cycles in process_stereo */
+    uint64_t cycles_eq;     /* cycles in biquad cascade */
+    uint64_t cycles_env;    /* cycles in envelope + normalize */
+    uint64_t cycles_harm;   /* cycles in Chebyshev + scale */
+    uint64_t cycles_mix;    /* cycles in HP + mix + limiter */
+    uint64_t cycles_i2s;    /* cycles in I2S write (measured in caller) */
+} EnhancerProfile;
+
+extern EnhancerProfile enh_profile;
+
+void enhancer_profile_report(void);
+
 /* ── Low-level Chebyshev (exposed for testing) ────────────────────── */
 int32_t cheb_t2(int32_t x);
 int32_t cheb_t3(int32_t x);

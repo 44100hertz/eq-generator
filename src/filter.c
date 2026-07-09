@@ -44,7 +44,8 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, sig_handler);
     signal(SIGPIPE, sig_handler);
 
-    /* Allocate enhancer with baked-in EQ coefficients */
+    /* Allocate enhancer with baked-in EQ coefficients.
+     * Select the coefficient array matching the runtime sample rate. */
     int n_bq             = EQGEN_N_BIQUADS;
     BiquadQ28 *eq_bqs_l  = calloc((size_t)n_bq, sizeof(BiquadQ28));
     BiquadQ28 *eq_bqs_r  = calloc((size_t)n_bq, sizeof(BiquadQ28));
@@ -52,6 +53,8 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "filter: out of memory\n");
         return 1;
     }
+
+    const int32_t *coeffs = eqgen_get_coeffs((int)fs);
 
     BassEnhancer enh;
     BassEnhancerCfg cfg;
@@ -70,7 +73,7 @@ int main(int argc, char *argv[]) {
                          1.0f,
 #endif
                          n_bq,
-                         eqgen_coeffs_q28);
+                         coeffs);
     ReciprocalLUT_init(&lut);
     BassEnhancer_init(&enh, &cfg, &lut, eq_bqs_l, eq_bqs_r);
 

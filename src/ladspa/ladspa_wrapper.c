@@ -109,7 +109,10 @@ static void *eqgen_instantiate(const void *desc,
         return NULL;
     }
 
-    /* Init enhancer with baked-in coefficients */
+    /* Init enhancer with baked-in coefficients.
+     * Select the coefficient array matching the host sample rate. */
+    const int32_t *coeffs = eqgen_get_coeffs((int)fs);
+
     BassEnhancerCfg cfg;
     BassEnhancerCfg_init(&cfg,
                          EQGEN_CUTOFF_HZ,
@@ -124,7 +127,7 @@ static void *eqgen_instantiate(const void *desc,
                          1.0f,
 #endif
                          EQGEN_N_BIQUADS,
-                         eqgen_coeffs_q28);
+                         coeffs);
     ReciprocalLUT_init(&inst->lut);
     BassEnhancer_init(&inst->enh, &cfg, &inst->lut,
                       inst->eq_bqs_left, inst->eq_bqs_right);
@@ -208,6 +211,7 @@ static void eqgen_run(void *handle, unsigned long nframes)
         first_run = 0;
         last_release = release;
         /* Re-init with new release time */
+        const int32_t *r_coeffs = eqgen_get_coeffs((int)inst->fs);
         BassEnhancerCfg cfg;
         BassEnhancerCfg_init(&cfg,
                              EQGEN_CUTOFF_HZ,
@@ -222,7 +226,7 @@ static void eqgen_run(void *handle, unsigned long nframes)
                              1.0f,
 #endif
                              EQGEN_N_BIQUADS,
-                             eqgen_coeffs_q28);
+                             r_coeffs);
         BassEnhancer_init(&inst->enh, &cfg, &inst->lut,
                           inst->eq_bqs_left, inst->eq_bqs_right);
     }

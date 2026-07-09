@@ -59,7 +59,7 @@ static int test_biquad_dc_gain(void) {
     int32_t dc_input = float_to_q16(0.5f);
     int32_t out = 0;
     for (int i = 0; i < 200000; i++) {
-        out = BiquadQ28_tick(&bq, dc_input);
+        out = BiquadQ28_tick_q44(&bq, dc_input);
     }
 
     float dc_out = q16_to_float(out);
@@ -78,7 +78,7 @@ static int test_biquad_dc_gain(void) {
 
     int32_t chain_out = 0;
     for (int i = 0; i < 200000; i++) {
-        chain_out = BiquadQ28_tick(&bq, DCBlocker_tick(&dcb, float_to_q16(0.5f)));
+        chain_out = BiquadQ28_tick_q44(&bq, DCBlocker_tick(&dcb, float_to_q16(0.5f)));
     }
     float chain_val = q16_to_float(chain_out);
     printf("  DC blocker + HP after 200k: %.6f (expect < 0.01)\n", chain_val);

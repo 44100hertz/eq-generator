@@ -23,13 +23,14 @@ sys.path.insert(0, str(ROOT))
 from eqgen.pipeline import (
     run_pipeline, design_eq, process_track, db_to_ratio,
 )
+from eqgen.presets import MAX_IIR_BANDS
 
 MEAS_DIR = ROOT / "measurements"
 
 
 def run_speaker(speaker_name: str, out_dir: str, music_dir: str = None,
                 fc: float = 60.0, h2: float = 0.5, h3: float = 1.0,
-                max_bands: int = 40, smooth_exponent: float = 1.0,
+                max_bands: int = MAX_IIR_BANDS, smooth_exponent: float = 1.0,
                  tracks: list = None):
     """Design EQ for a speaker and process music tracks through it."""
     meas_dir = MEAS_DIR / speaker_name
@@ -137,7 +138,7 @@ def main():
                     help="3rd harmonic amplitude [1.0]")
     ap.add_argument("--smooth-exponent", type=float, default=1.0,
                     help="CV smoothing aggressiveness [1.0]")
-    ap.add_argument("--max-bands", type=int, default=40,
+    ap.add_argument("--max-bands", type=int, default=MAX_IIR_BANDS,
                     help="Max IIR biquad bands [40]")
     args = ap.parse_args()
 

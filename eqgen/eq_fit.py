@@ -17,6 +17,8 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Optional
 
+from eqgen.presets import MAX_IIR_BANDS
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Biquad design (float precision) — Audio EQ Cookbook
@@ -171,7 +173,7 @@ def fit_eq_curve(
     freqs: np.ndarray,
     target_db: np.ndarray,
     fs: float,
-    max_bands: int = 40,
+    max_bands: int = MAX_IIR_BANDS,
     min_freq: float = 20.0,
     max_freq: float = 20000.0,
     min_peaking_freq: float = 40.0,
@@ -264,7 +266,7 @@ def fit_eq_curve(
 def fit_from_dict(
     eq_curve: Dict[float, float],  # {freq_hz: gain_linear}
     fs: float,
-    max_bands: int = 40,
+    max_bands: int = MAX_IIR_BANDS,
     **kwargs,
 ) -> FitResult:
     """Fit a dict-based EQ curve (from model) to cascaded biquads."""

@@ -13,7 +13,7 @@
 #   make export           export coeffs for ESP32
 #   make server           start web UI server (preset management)
 
-.PHONY: all clean test graph-check eqgen audition wire-setup wire-teardown export server
+.PHONY: all clean test graph-check eqgen audition wire-setup wire-teardown export server flash
 
 # -- C DSP build -------------------------------------------------------
 
@@ -57,3 +57,9 @@ server:
 		sleep 0.5; \
 	fi
 	python -m eqgen.server $(ARGS)
+
+# -- ESP32 firmware ----------------------------------------------------
+# Usage: make flash ARGS="technics/standing"
+flash:
+	python -m eqgen.cli.wire build $(ARGS)
+	cd firmware && idf.py build flash

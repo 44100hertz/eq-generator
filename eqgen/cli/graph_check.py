@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 from eqgen.pipeline import run_pipeline
 from eqgen.eq_fit import cascade_response_db, BiquadCoeffs, fit_eq_curve
 from eqgen.quantize import q28_to_float, quantize_biquads_q28
+from eqgen.presets import MAX_IIR_BANDS
 
 MEAS_DIR = ROOT / "measurements"
 
@@ -33,7 +34,7 @@ MEAS_DIR = ROOT / "measurements"
 
 def gather_all(speaker_name=None, meas_paths=None, noise_path=None,
                target_path=None, fc=60.0, h2=0.5, h3=1.0, smooth_exponent=1.0,
-               max_bands=40):
+               max_bands=MAX_IIR_BANDS):
     """Run pipeline + IIR fit + harmonic model; return everything as a dict for JSON."""
     if speaker_name:
         meas_dir = MEAS_DIR / speaker_name
@@ -453,7 +454,7 @@ def main():
     ap.add_argument("--h3", type=float, default=1.0, help="3rd harmonic amplitude")
     ap.add_argument("--smooth-exponent", type=float, default=1.0,
                     help="CV smoothing aggressiveness [1.0]")
-    ap.add_argument("--max-bands", type=int, default=40)
+    ap.add_argument("--max-bands", type=int, default=MAX_IIR_BANDS)
     ap.add_argument("--no-open", action="store_true", help="Don't open in browser")
     args = ap.parse_args()
 

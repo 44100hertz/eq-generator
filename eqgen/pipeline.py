@@ -23,6 +23,7 @@ import numpy as np
 
 from eqgen.eq_fit import BiquadCoeffs, cascade_response_db, fit_eq_curve
 from eqgen.quantize import BiquadQ28, q28_to_float, quantize_biquads_q28
+from eqgen.presets import MAX_IIR_BANDS
 from eqgen import enhancer_ffi
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -488,7 +489,7 @@ def design_eq(
     freqs: np.ndarray,
     target_db: np.ndarray,
     fs: float,
-    max_bands: int = 40,
+    max_bands: int = MAX_IIR_BANDS,
     pre_gain_db: float = 0.0,
 ) -> Tuple[List[int], List[dict], np.ndarray, np.ndarray, np.ndarray]:
     """Design a quantized IIR EQ to match the target curve.

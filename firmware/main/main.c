@@ -14,6 +14,7 @@
 
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 
 #include "enhancer.h"
 #include "eq_coeffs.h"
@@ -31,16 +32,20 @@ static BiquadQ28         eq_bqs_left[EQGEN_N_BIQUADS];
 static BiquadQ28         eq_bqs_right[EQGEN_N_BIQUADS];
 static ReciprocalLUT     rec_lut;
 
-/* ── Track the last I2S sample rate ───────────────────────────── */
+/* ── Track the last I2S/DSP sample rate ───────────────────────── */
 
 static int i2s_rate = 0;
+static int dsp_rate = 0;
 
 /* ────────────────────────────────────────────────────────────────
  *  DSP init
  * ──────────────────────────────────────────────────────────────── */
 
-static void dsp_init(void)
+static void dsp_init(int rate)
 {
+    const int32_t *coeffs = eqgen_get_coeffs(rate);
+    float fs = (float)eqgen_get_fs(rate);
+
     ReciprocalLUT_init(&rec_lut);
 
     /* Set up DSP configuration from eq_coeffs.h defines */
@@ -50,7 +55,7 @@ static void dsp_init(void)
                          EQGEN_H2_AMP,
                          EQGEN_H3_AMP,
                          EQGEN_RELEASE_SECS,
-                         (float)EQGEN_FS,
+                         fs,
                          EQGEN_LIMITER_RELEASE_SECS,
 #ifdef EQGEN_PRE_GAIN_Q16
                          (float)EQGEN_PRE_GAIN_Q16 / 65536.0f,
@@ -58,13 +63,15 @@ static void dsp_init(void)
                          1.0f,
 #endif
                          EQGEN_N_BIQUADS,
-                         eqgen_coeffs_q28);
+                         coeffs);
 
     BassEnhancer_init(&enhancer, &cfg, &rec_lut,
                       eq_bqs_left, eq_bqs_right);
 
-    ESP_LOGI(TAG, "DSP ready: %d biquads, fc=%.0f Hz, h2=%.2f h3=%.2f",
-             EQGEN_N_BIQUADS, (double)EQGEN_CUTOFF_HZ,
+    dsp_rate = rate;
+
+    ESP_LOGI(TAG, "DSP ready @ %d Hz: %d biquads, fc=%.0f Hz, h2=%.2f h3=%.2f",
+             rate, EQGEN_N_BIQUADS, (double)EQGEN_CUTOFF_HZ,
              (double)EQGEN_H2_AMP, (double)EQGEN_H3_AMP);
 }
 
@@ -74,12 +81,20 @@ static void dsp_init(void)
 
 static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
 {
-    /* Re-init I2S if sample rate changed (e.g. first connect, or
+    /* Re-init I2S and DSP if sample rate changed (e.g. first connect, or
      * phone negotiated a different rate than expected). */
     if (rate != i2s_rate) {
         i2s_out_init(rate);
         i2s_rate = rate;
     }
+    if (rate != dsp_rate) {
+        dsp_init(rate);
+    }
+
+    /* ── DSP processing ── */
+#ifdef EQGEN_PROFILE
+    int64_t t0 = esp_timer_get_time();
+#endif
 
     /* Process each stereo frame through the DSP */
     const int16_t *in = (const int16_t *)data;
@@ -102,6 +117,22 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
 
         i2s_out_write_stereo((int16_t)l, (int16_t)r);
     }
+
+#ifdef EQGEN_PROFILE
+    int64_t elapsed_us = esp_timer_get_time() - t0;
+    static int64_t total_us = 0, total_frames = 0;
+    total_us += elapsed_us;
+    total_frames += frames;
+    if (total_frames >= 44100) {
+        float load_pct = (float)total_us / 10000.0f;
+        float us_per_frame = (float)total_us / (float)total_frames;
+        ESP_LOGI(TAG, "DSP: %.1f%% CPU, %.1f us/frame (%lu frames)",
+                 load_pct, us_per_frame, (unsigned long)total_frames);
+        enhancer_profile_report();
+        total_us = 0;
+        total_frames = 0;
+    }
+#endif
 }
 
 /* ────────────────────────────────────────────────────────────────
@@ -112,8 +143,10 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "eqgen firmware starting");
 
-    /* Initialize DSP (uses baked-in eq_coeffs.h) */
-    dsp_init();
+    /* DSP is initialized lazily when the first audio frame
+     * arrives (so we know the negotiated sample rate).
+     * This ensures the correct biquad coefficients (44.1k or 48k)
+     * and HP/LP filter tuning are selected at runtime. */
 
     /* Start Bluetooth A2DP sink.
      * This also starts the DSP+I2S task internally.

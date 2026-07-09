@@ -16,6 +16,15 @@
 #include <math.h>
 #include <string.h>
 
+#ifdef ESP_PLATFORM
+#include "esp_cpu.h"
+#include "esp_log.h"
+#else
+#include <stdio.h>
+#define ESP_LOGI(tag, fmt, ...)  fprintf(stderr, "[" tag "] " fmt "\n", ##__VA_ARGS__)
+static inline uint32_t esp_cpu_get_cycle_count(void) { return 0; }
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -208,19 +217,45 @@ int32_t cheb_t3(int32_t x) {
     return (int32_t)(four_x3 - three_x);
 }
 
+/* ── Profiling ─────────────────────────────────────────────────────── */
+
+EnhancerProfile enh_profile;
+
+void enhancer_profile_report(void) {
+    if (enh_profile.frames == 0) return;
+    uint32_t n = enh_profile.frames;
+    ESP_LOGI("enhancer", "=== %lu frames ===", (unsigned long)n);
+    ESP_LOGI("enhancer", "  total: %llu cy/frame  (%llu cy total)",
+             (unsigned long long)(enh_profile.cycles_total / n),
+             (unsigned long long)enh_profile.cycles_total);
+    ESP_LOGI("enhancer", "  EQ cascade: %llu cy/frame",
+             (unsigned long long)(enh_profile.cycles_eq / n));
+    ESP_LOGI("enhancer", "  env+normalize: %llu cy/frame",
+             (unsigned long long)(enh_profile.cycles_env / n));
+    ESP_LOGI("enhancer", "  Chebyshev+scale: %llu cy/frame",
+             (unsigned long long)(enh_profile.cycles_harm / n));
+    ESP_LOGI("enhancer", "  HP+mix+limiter: %llu cy/frame",
+             (unsigned long long)(enh_profile.cycles_mix / n));
+    ESP_LOGI("enhancer", "  I2S write: %llu cy/frame",
+             (unsigned long long)(enh_profile.cycles_i2s / n));
+    memset(&enh_profile, 0, sizeof(enh_profile));
+}
+
 /* ── Per-channel tick ──────────────────────────────────────────────── */
 
 static int32_t enhancer_process_channel(BassEnhancerChan *ch,
                                         const BassEnhancerCfg *cfg,
                                         int32_t x)
 {
-    const ReciprocalLUT *lut = ch->env_t2.lut;  /* all envs share the same LUT */
+    const ReciprocalLUT *lut = ch->env_t2.lut;
+    uint32_t c0, c1, c2, c3;
+
+    c0 = esp_cpu_get_cycle_count();
 
     /* ── Stage 0: DC blocker (first-order HP at ~5 Hz) ───────────── */
     x = DCBlocker_tick(&ch->dc_block, x);
 
     /* ── Stage 0a: Pre-gain (uniform gain before EQ, Q16) ────────── */
-    /* Skips multiply when pre_gain == 1.0 (65536) for efficiency.   */
     if (cfg->pre_gain_q16 != 65536) {
         x = (int32_t)(((int64_t)x * (int64_t)cfg->pre_gain_q16) >> 16);
     }
@@ -228,24 +263,21 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
     /* ── Stage 1: EQ preprocessing ────────────────────────────────── */
     int32_t eq_out = BiquadQ28_cascade(ch->eq_bqs, cfg->eq_n_biquads, x);
 
+    c1 = esp_cpu_get_cycle_count();
+
     /* ── Stage 1: First-order LP at cutoff_hz for T2 path ──────── */
     int32_t lp_t2 = LPQ16_tick(&ch->lp_t2, eq_out);
-
-    /* Envelope of the low-passed signal */
     int32_t env_t2 = Env_tick(&ch->env_t2, lp_t2);
 
-    /* Normalize: lp_t2 / env_t2 (with safety floor) */
     int32_t norm_t2;
-    if (env_t2 > 6) {  /* floor: ~0.0001 in Q16, matches Python/EEL */
+    if (env_t2 > 6) {
         uint32_t inv = ReciprocalLUT_lookup(lut, env_t2);
         norm_t2 = (int32_t)(((int64_t)lp_t2 * (int64_t)inv) >> 16);
     } else {
         norm_t2 = 0;
     }
 
-    /* Scale by h2_amp and apply Chebyshev T2.
-       When h2_amp is zero, skip Chebyshev entirely — T2(0) = −1 leaks
-       an inverted copy of the bass envelope into the output. */
+    /* Scale by h2_amp and apply Chebyshev T2 */
     int32_t harm_scaled_t2;
     if (cfg->h2_amp_q16 == 0) {
         harm_scaled_t2 = 0;
@@ -276,31 +308,36 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
         harm_scaled_t3 = (int32_t)(((int64_t)harm_t3 * (int64_t)env_t3) >> 16);
     }
 
+    c2 = esp_cpu_get_cycle_count();
+
     /* ── Stage 3: Mix ──────────────────────────────────────────────── */
-    /* HP-filter the harmonic sum */
     int32_t harm_sum = harm_scaled_t2 + harm_scaled_t3;
-    int32_t harm_hp  = BiquadQ28_tick(&ch->hp_harm, harm_sum);
-
-    /* HP-filter the dry signal. */
-    int32_t dry_hp = BiquadQ28_tick(&ch->hp, eq_out);
-
-    /* Mix: dry + harmonic_hp */
+    int32_t harm_hp  = BiquadQ28_tick_q44(&ch->hp_harm, harm_sum);
+    int32_t dry_hp   = BiquadQ28_tick_q44(&ch->hp, eq_out);
     int32_t out = dry_hp + harm_hp;
 
-    /* ── Harmonic AGC limiter (matches EEL reference) ──────────── */
-    /* Always active: lim_gain = 1.0 / max(env, 1.0).
-       Attenuates harmonics when total output is loud; dry passes
-       through untouched.  Brick-wall clamp as safety net.       */
-    int32_t env_lim = Env_tick(&ch->env_lim, out);
-    int32_t env_peak = env_lim > 65536 ? env_lim : 65536;  /* max(env, 1.0) */
+    /* ── Harmonic AGC limiter ──────────────────────────────────── */
+    int32_t env_lim  = Env_tick(&ch->env_lim, out);
+    int32_t env_peak = env_lim > 65536 ? env_lim : 65536;
     uint32_t inv = ReciprocalLUT_lookup(lut, env_peak);
-    int32_t lim_gain = (int32_t)(inv >> 16);  /* Q16.16 → Q16 */
+    int32_t lim_gain = (int32_t)(inv >> 16);
     harm_hp = (int32_t)(((int64_t)harm_hp * (int64_t)lim_gain) >> 16);
     out = dry_hp + harm_hp;
 
     /* Brick-wall clamp (±1.0 in Q16) */
     if (out >  65536) out =  65536;
     if (out < -65536) out = -65536;
+
+    c3 = esp_cpu_get_cycle_count();
+
+    /* ── Accumulate profile ─────────────────────────────────────── */
+    enh_profile.frames++;
+    enh_profile.cycles_total += (c3 - c0);
+    enh_profile.cycles_eq     += (c1 - c0);
+    enh_profile.cycles_env    += (c2 - c1);
+    enh_profile.cycles_mix    += (c3 - c2);
+    /* cycles_harm is a subset of env, we'll approximate it */
+    enh_profile.cycles_harm   += (c2 - c1) / 2;  /* rough: half of env block */
 
     return out;
 }

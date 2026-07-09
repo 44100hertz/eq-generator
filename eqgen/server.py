@@ -47,7 +47,7 @@ except ImportError:
 
 sys.path.insert(0, str(ROOT))
 
-from eqgen.presets import Preset, PresetManager, PRESETS_DIR
+from eqgen.presets import Preset, PresetManager, PRESETS_DIR, MAX_IIR_BANDS
 from eqgen.pipeline import run_pipeline
 from eqgen.eq_fit import cascade_response_db, BiquadCoeffs, fit_eq_curve
 from eqgen.quantize import q28_to_float, quantize_biquads_q28
@@ -260,6 +260,86 @@ def _apply_preset_to_system(preset_dict: dict, task_id: str):
         _pipeline_results[task_id] = result
 
 
+# ── Flash ESP32 ───────────────────────────────────────────────────────
+
+FIRMWARE_DIR = ROOT / "firmware"
+
+
+def _flash_esp32(preset_dict: dict, task_id: str):
+    """Run pipeline, generate eq_coeffs.h, idf.py build flash."""
+    with _pipeline_lock:
+        _pipeline_results[task_id] = {"status": "running", "started": time.time()}
+
+    try:
+        from eqgen.cli.wire import run_full_pipeline, generate_eq_header, SRC_DIR
+
+        preset = Preset.from_dict(preset_dict)
+        meas_paths = preset.resolve_measurements()
+        target_path = preset.resolve_target()
+        noise_path = preset.resolve_noise()
+
+        if not meas_paths or not target_path:
+            raise ValueError("Missing measurement or target paths")
+
+        # 1. Run pipeline + IIR fit
+        eq_freqs, bq_q28, bands, cfg, coeffs_flat = run_full_pipeline(
+            meas_paths=meas_paths,
+            target_path=target_path,
+            noise_path=noise_path,
+            fc=preset.fc or 60.0,
+            h2=preset.h2,
+            h3=preset.h3,
+            max_bands=preset.max_bands,
+            smooth_exponent=preset.smooth_exponent,
+        )
+        cfg["release_secs"] = preset.release
+        cfg["limiter_release_secs"] = preset.limiter_release
+
+        # 2. Generate eq_coeffs.h
+        generate_eq_header(bq_q28, bands, cfg)
+        logger.info("Wrote eq_coeffs.h (%d biquads)", len(bands))
+
+        # 3. idf.py build
+        r = subprocess.run(
+            ["idf.py", "build"],
+            cwd=str(FIRMWARE_DIR),
+            capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            raise RuntimeError(f"idf.py build failed:\n{r.stderr[-1000:]}")
+        logger.info("ESP32 firmware built")
+
+        # 4. idf.py flash
+        r = subprocess.run(
+            ["idf.py", "flash"],
+            cwd=str(FIRMWARE_DIR),
+            capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            raise RuntimeError(f"idf.py flash failed:\n{r.stderr[-1000:]}")
+
+        result = {
+            "status": "complete",
+            "task_id": task_id,
+            "message": f"Flashed — {len(bands)} bands",
+            "output": {
+                "n_bands": len(bands),
+                "pre_gain": round(cfg["pre_gain"], 3),
+                "pre_gain_db": round(20.0 * np.log10(cfg["pre_gain"]), 1),
+                "fs": float(cfg["fs"]),
+            },
+        }
+
+    except Exception as e:
+        result = {
+            "status": "error",
+            "task_id": task_id,
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        }
+
+    with _pipeline_lock:
+        _pipeline_results[task_id] = result
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # API helpers
 # ═══════════════════════════════════════════════════════════════════════════
@@ -339,6 +419,21 @@ def api_apply_pipeline(data: dict):
     return {"task_id": task_id, "status": "queued"}
 
 
+def api_flash_esp32(data: dict):
+    """Start an ESP32 flash (pipeline + header + idf.py build flash)."""
+    import uuid
+    task_id = data.get("task_id") or str(uuid.uuid4())[:8]
+    preset_dict = data.get("preset", data)
+
+    thread = threading.Thread(
+        target=_flash_esp32,
+        args=(preset_dict, task_id),
+        daemon=True,
+    )
+    thread.start()
+    return {"task_id": task_id, "status": "queued"}
+
+
 def api_pipeline_status(task_id: str):
     """Get pipeline run status/results."""
     with _pipeline_lock:
@@ -403,6 +498,11 @@ if HAS_FASTAPI:
     async def apply_pipeline_ep(request: Request):
         data = await request.json()
         return api_apply_pipeline(data)
+
+    @app.post("/api/flash")
+    async def flash_esp32_ep(request: Request):
+        data = await request.json()
+        return api_flash_esp32(data)
 
     @app.get("/api/status/{task_id}")
     async def pipeline_status(task_id: str):
@@ -484,6 +584,9 @@ if not HAS_FASTAPI:
                 elif p == "/api/apply" and method == "POST":
                     data = self._read_json()
                     self._send_json(api_apply_pipeline(data))
+                elif p == "/api/flash" and method == "POST":
+                    data = self._read_json()
+                    self._send_json(api_flash_esp32(data))
                 elif p.startswith("/api/status/") and method == "GET":
                     task_id = p.split("/api/status/", 1)[1]
                     self._send_json(api_pipeline_status(task_id))
@@ -610,6 +713,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     <h2 id="mainTitle">Select a preset or create a new one</h2>
     <div style="display:flex;gap:6px">
       <button class="primary" id="btnApply" onclick="applyToSystem()" disabled>&#x26A1; Apply to System</button>
+      <button id="btnFlash" onclick="flashESP32()" disabled>&#x1F4E1; Flash ESP32</button>
       <button id="btnSave" onclick="savePreset()" disabled>&#x1F4BE; Save</button>
     </div>
   </div>
@@ -784,6 +888,69 @@ async function applyToSystem() {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Flash ESP32
+// ═══════════════════════════════════════════════════════════════════════
+
+async function flashESP32() {
+  const p = readForm();
+  if (!p || !p.name) { setStatus('Preset name is required', 'error'); return; }
+  if (!p.measurements || p.measurements.length === 0 || !p.target) {
+    setStatus('Measurement and target paths required', 'error'); return;
+  }
+
+  if (!confirm('Flash ESP32 with this EQ curve? This will rebuild the firmware and flash via USB.')) return;
+
+  const btn = document.getElementById('btnFlash');
+  btn.disabled = true;
+  btn.textContent = '\u1F4E1 Flashing...';
+  setStatus('Building firmware and flashing ESP32...', 'running');
+
+  try {
+    const resp = await api('/api/flash', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({preset: p})
+    });
+    state.flashTaskId = resp.task_id;
+    pollFlashStatus();
+  } catch(e) {
+    setStatus(`Flash failed: ${e.message}`, 'error');
+    btn.disabled = false;
+    btn.textContent = '\u1F4E1 Flash ESP32';
+  }
+}
+
+async function pollFlashStatus() {
+  const tid = state.flashTaskId;
+  if (!tid) return;
+  const btn = document.getElementById('btnFlash');
+  try {
+    const result = await api(`/api/status/${tid}`);
+    if (result.status === 'complete') {
+      btn.disabled = false;
+      btn.textContent = '\u1F4E1 Flash ESP32';
+      const m = result.output || {};
+      setStatus(`\u2705 Flashed — ${m.n_bands||'?'} bands, ${result.message||''}`);
+      state.flashTaskId = null;
+    } else if (result.status === 'error') {
+      btn.disabled = false;
+      btn.textContent = '\u1F4E1 Flash ESP32';
+      setStatus(`Flash error: ${result.error}`, 'error');
+      state.flashTaskId = null;
+    } else {
+      const elapsed = result.started ? ((Date.now() / 1000 - result.started)).toFixed(0) : '?';
+      setStatus(`Building / flashing... ${elapsed}s`, 'running');
+      setTimeout(pollFlashStatus, 2000);
+    }
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '\u1F4E1 Flash ESP32';
+    setStatus(`Flash poll error: ${e.message}`, 'error');
+    state.flashTaskId = null;
+  }
+}
+
 async function pollApplyStatus() {
   const tid = state.applyTaskId;
   if (!tid) return;
@@ -857,7 +1024,7 @@ function readForm() {
     fc: numVal('fFc'),
     h2: numVal('fH2', 0.5),
     h3: numVal('fH3', 1.0),
-    max_bands: intVal('fMaxBands', 24),
+    max_bands: intVal('fMaxBands', __MAX_IIR_BANDS__),
     smooth_exponent: numVal('fSmooth', 1.0),
     release: numVal('fRelease', 0.2),
     limiter_release: numVal('fLimiter', 0.049),
@@ -885,11 +1052,13 @@ function renderEditor() {
   const title = document.getElementById('mainTitle');
   const btnSave = document.getElementById('btnSave');
   const btnApply = document.getElementById('btnApply');
+  const btnFlash = document.getElementById('btnFlash');
 
   if (!p) {
     title.textContent = 'Select a preset or create a new one';
     btnSave.disabled = true;
     btnApply.disabled = true;
+    btnFlash.disabled = true;
     editor.innerHTML = `<div class="empty">
       <h3>Welcome to EQGen</h3>
       <p>Load a preset to see EQ curves. Tweak parameters — charts update automatically. Click "Apply to System" to push the EQ to your live PipeWire chain.</p>
@@ -902,6 +1071,7 @@ function renderEditor() {
   title.textContent = `Preset: ${esc(p.name)}`;
   btnSave.disabled = false;
   btnApply.disabled = false;
+  btnFlash.disabled = false;
   document.getElementById('presetList').querySelectorAll('.active').forEach(el => el.classList.remove('active'));
   document.querySelector(`.preset-item[onclick*="${p.name}"]`)?.classList.add('active');
 
@@ -921,7 +1091,7 @@ function renderEditor() {
       <div class="form-group"><label>Cutoff fc (Hz)</label><input id="fFc" type="number" step="1" min="20" max="200" value="${p.fc ?? ''}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>H2 Amp</label><input id="fH2" type="number" step="0.01" min="0" max="2" value="${p.h2 ?? 0.5}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>H3 Amp</label><input id="fH3" type="number" step="0.01" min="0" max="2" value="${p.h3 ?? 1.0}" oninput="scheduleAnalyze()"></div>
-      <div class="form-group"><label>Max Bands</label><input id="fMaxBands" type="number" step="1" min="1" max="80" value="${p.max_bands ?? 24}" oninput="scheduleAnalyze()"></div>
+      <div class="form-group"><label>Max Bands</label><input id="fMaxBands" type="number" step="1" min="1" max="80" value="${p.max_bands ?? __MAX_IIR_BANDS__}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Smooth Exponent</label><input id="fSmooth" type="number" step="0.1" min="0" max="4" value="${p.smooth_exponent ?? 1.0}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Release (s)</label><input id="fRelease" type="number" step="0.01" min="0.01" max="2" value="${p.release ?? 0.2}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Limiter Release (s)</label><input id="fLimiter" type="number" step="0.001" min="0.01" max="0.5" value="${p.limiter_release ?? 0.049}" oninput="scheduleAnalyze()"></div>
@@ -952,7 +1122,7 @@ window.fillFromDir = function(dir) {
 };
 
 function newPreset() {
-  state.activePreset = { name: 'new-preset', measurements: [], target: '', fc: 60, h2: 0.5, h3: 1.0, max_bands: 24, smooth_exponent: 1.0, release: 0.2, limiter_release: 0.049 };
+  state.activePreset = { name: 'new-preset', measurements: [], target: '', fc: 60, h2: 0.5, h3: 1.0, max_bands: __MAX_IIR_BANDS__, smooth_exponent: 1.0, release: 0.2, limiter_release: 0.049 };
   state.pipelineResult = null;
   document.getElementById('results').innerHTML = '';
   document.getElementById('presetList').querySelectorAll('.active').forEach(el => el.classList.remove('active'));
@@ -1159,6 +1329,9 @@ scanMeasurements().catch(e => setStatus('Failed to scan measurements: ' + e.mess
 </html>
 
 """
+
+# Inject single-source-of-truth constants into the embedded JS
+WEB_UI_HTML = WEB_UI_HTML.replace("__MAX_IIR_BANDS__", str(MAX_IIR_BANDS))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
