@@ -7,10 +7,9 @@ ESP32 Bluetooth A2DP sink with DSP (harmonic bass enhancer + EQ biquads).
 Requires ESP-IDF v4.4 or later.
 
 ```bash
-# 1. Generate EQ coefficients from the desktop tuning tools
+# 1. Generate EQ coefficients from measurements
 cd ..
-python -m eqgen.cli.export --speaker small --fc 60 --h2 0.33 --h3 0.33 \
-    -o src/eq_coeffs.h
+python -m eqgen.cli.wire build technics/standing   # or your speaker name
 
 # 2. Build and flash
 cd firmware
@@ -37,7 +36,9 @@ No MCLK, no mute pins needed — the DAC auto-starts on the first BCK edge.
 ## Changing the EQ
 
 1. Tune on desktop with the PipeWire plugin or offline audition tools
-2. Re-run `python -m eqgen.cli.export -o src/eq_coeffs.h`
+2. Re-run `python -m eqgen.cli.wire build <speaker>` to regenerate the coefficients
 3. `idf.py build flash` — done
 
 The DSP code never changes. Only the coefficients header gets regenerated.
+
+If you forget step 2, the build fails immediately with a clear error.
