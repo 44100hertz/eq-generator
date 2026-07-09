@@ -1,0 +1,18 @@
+{
+  "name": "technics-1",
+  "description": "",
+  "measurements": [
+    "measurements/technics/standing/measurement.wav"
+  ],
+  "target": "measurements/technics/standing/target.wav",
+  "noise": "measurements/technics/standing/noise.wav",
+  "fc": 60,
+  "h2": 0.5,
+  "h3": 1,
+  "max_bands": 24,
+  "smooth_exponent": 1,
+  "release": 0.2,
+  "limiter_release": 0.049,
+  "high_rolloffs": [],
+  "low_rolloffs": []
+}
