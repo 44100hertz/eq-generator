@@ -243,12 +243,17 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
         norm_t2 = 0;
     }
 
-    /* Scale by h2_amp and apply Chebyshev T2 */
-    int32_t cheb_in_t2 = (int32_t)(((int64_t)norm_t2 * (int64_t)cfg->h2_amp_q16) >> 16);
-    int32_t harm_t2 = cheb_t2(cheb_in_t2);
-
-    /* Scale back by envelope */
-    int32_t harm_scaled_t2 = (int32_t)(((int64_t)harm_t2 * (int64_t)env_t2) >> 16);
+    /* Scale by h2_amp and apply Chebyshev T2.
+       When h2_amp is zero, skip Chebyshev entirely — T2(0) = −1 leaks
+       an inverted copy of the bass envelope into the output. */
+    int32_t harm_scaled_t2;
+    if (cfg->h2_amp_q16 == 0) {
+        harm_scaled_t2 = 0;
+    } else {
+        int32_t cheb_in_t2 = (int32_t)(((int64_t)norm_t2 * (int64_t)cfg->h2_amp_q16) >> 16);
+        int32_t harm_t2 = cheb_t2(cheb_in_t2);
+        harm_scaled_t2 = (int32_t)(((int64_t)harm_t2 * (int64_t)env_t2) >> 16);
+    }
 
     /* ── Stage 2: First-order LP at cutoff_hz/2 for T3 path ─────── */
     int32_t lp_t3 = LPQ16_tick(&ch->lp_t3, eq_out);
@@ -262,9 +267,14 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
         norm_t3 = 0;
     }
 
-    int32_t cheb_in_t3 = (int32_t)(((int64_t)norm_t3 * (int64_t)cfg->h3_amp_q16) >> 16);
-    int32_t harm_t3 = cheb_t3(cheb_in_t3);
-    int32_t harm_scaled_t3 = (int32_t)(((int64_t)harm_t3 * (int64_t)env_t3) >> 16);
+    int32_t harm_scaled_t3;
+    if (cfg->h3_amp_q16 == 0) {
+        harm_scaled_t3 = 0;
+    } else {
+        int32_t cheb_in_t3 = (int32_t)(((int64_t)norm_t3 * (int64_t)cfg->h3_amp_q16) >> 16);
+        int32_t harm_t3 = cheb_t3(cheb_in_t3);
+        harm_scaled_t3 = (int32_t)(((int64_t)harm_t3 * (int64_t)env_t3) >> 16);
+    }
 
     /* ── Stage 3: Mix ──────────────────────────────────────────────── */
     /* HP-filter the harmonic sum */
