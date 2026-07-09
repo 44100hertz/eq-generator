@@ -31,22 +31,15 @@ typedef struct {
 /** Initialize reciprocal LUT. Call once at startup. */
 void ReciprocalLUT_init(ReciprocalLUT *lut);
 
-/** Look up 1/x in Q16.16 using the high 8 bits of x.
+/** Look up 1/x in Q16.16 using the high 8 fractional bits of x.
  *  x must be > 0 (positive int32_t in Q16). */
 static inline uint32_t ReciprocalLUT_lookup(const ReciprocalLUT *lut, int32_t x) {
     if (x <= 0) return 0xFFFFFFFF;  /* clamp */
-    /* Use top 8 bits of x as index into 256-entry table */
+    /* x is Q16: bits 15..8 are the top 8 fractional bits.
+       Values >= 65536 (≥1.0) clamp to max index 255. */
     uint32_t ux = (uint32_t)x;
-    /* Count leading zeros to normalize */
-    int clz = __builtin_clz(ux);
-    int shift = 8 - clz;
-    uint32_t idx;
-    if (shift >= 0) {
-        idx = ux >> shift;
-    } else {
-        idx = ux << (-shift);
-    }
-    if (idx >= ENV_LUT_SIZE) idx = ENV_LUT_SIZE - 1;
+    if (ux >= 65536) return lut->entries[255];
+    uint32_t idx = (ux >> 8) & 0xFF;
     return lut->entries[idx];
 }
 

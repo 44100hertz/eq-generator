@@ -3,11 +3,13 @@
  *
  * Pipeline per channel:
  *   1. EQ preprocessing (cascaded BiquadQ28 from eq_coeffs.h)
- *   2. LP(fc) → envelope → T2 → scale
- *   3. LP(fc/2) → envelope → T3 → scale
+ *   2. LP(fc) → envelope → T2 → scale     (LPQ16, no Q28 truncation)
+ *   3. LP(fc/2) → envelope → T3 → scale   (LPQ16, no Q28 truncation)
  *   4. HP(fc) dry + HP(fc) harmonics → mix
  *
- * Coefficients for LP/HP are Butterworth, designed offline at Q4.28 precision.
+ * LP filters use first-order Q16 (lp_q16.h) to avoid Q28 biquad
+ * truncation at the tiny fc/fs ratios used for bass extraction.
+ * HP coefficients are Butterworth, designed offline at Q4.28 precision.
  *
  * Usage:
  *   BassEnhancer enh;
@@ -21,6 +23,7 @@
 #pragma once
 #include <stdint.h>
 #include "biquad_q28.h"
+#include "lp_q16.h"
 #include "envelope.h"
 #include "dc_blocker.h"
 
@@ -44,11 +47,13 @@ typedef struct {
     int32_t limiter_release_coeff_q16; /* exp(-1/(fs*lim_rel)) in Q16  */
     int32_t pre_gain_q16;       /* pre-gain before EQ (Q16, 1.0=65536)*/
 
-    /* Butterworth LP/HP coefficients in Q4.28 */
-    int32_t lp_t2_coeffs[5];    /* LP at cutoff_hz  (for T2 path)     */
-    int32_t lp_t3_coeffs[5];    /* LP at cutoff_hz/2 (for T3 path)    */
+    /* Butterworth HP coefficients in Q4.28 */
     int32_t hp_coeffs[5];       /* HP at cutoff_hz  (dry path)        */
     int32_t hp_harm_coeffs[5];  /* HP at cutoff_hz  (harmonics path)  */
+
+    /* First-order LP coefficients in Q16 (no Q28 truncation) */
+    int32_t lp_t2_alpha_q16;   /* LP at cutoff_hz  (for T2 path)     */
+    int32_t lp_t3_alpha_q16;   /* LP at cutoff_hz/2 (for T3 path)    */
 
     /* ── EQ settings ─────────────────────────────────────────────── */
     int     eq_n_biquads;       /* number of EQ biquads               */
@@ -63,11 +68,11 @@ typedef struct {
     /* EQ biquads */
     BiquadQ28 *eq_bqs;          /* array of eq_n_biquads BiquadQ28    */
 
-    /* Enhancer biquads (4 total per channel) */
-    BiquadQ28 lp_t2;            /* LP filter for T2 path              */
-    BiquadQ28 lp_t3;            /* LP filter for T3 path              */
-    BiquadQ28 hp;               /* HP filter for dry path             */
-    BiquadQ28 hp_harm;          /* HP filter for harmonics path       */
+    /* Enhancer filters */
+    LPQ16      lp_t2;            /* LP filter for T2 path              */
+    LPQ16      lp_t3;            /* LP filter for T3 path              */
+    BiquadQ28  hp;               /* HP filter for dry path             */
+    BiquadQ28  hp_harm;          /* HP filter for harmonics path       */
 
     /* Envelopes */
     Env env_t2;                 /* envelope for T2 path               */
@@ -84,13 +89,10 @@ typedef struct {
 
 /* ── Initialization ────────────────────────────────────────────────── */
 
-/** Compute Butterworth LP coefficients in Q4.28.
+/** Compute Butterworth HP coefficients in Q4.28.
  *  Designed offline; this is a runtime convenience using tan().
  *  coeffs_out[5] = {b0, b1, b2, a1, a2} in Q4.28.
  */
-void bass_design_butter_lp_q28(float fc, float fs, int32_t coeffs_out[5]);
-
-/** Compute Butterworth HP coefficients in Q4.28. */
 void bass_design_butter_hp_q28(float fc, float fs, int32_t coeffs_out[5]);
 
 /** Initialize BassEnhancerCfg from user-friendly float parameters.

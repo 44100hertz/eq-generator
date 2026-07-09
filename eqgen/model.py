@@ -1,17 +1,19 @@
 """
-Psychoacoustic model for the harmonic bass enhancer.
+Frequency-domain model for the harmonic bass enhancer.
 
-The production gain solver (src/main.rs) uses a frequency-domain model
-to predict how the enhancer transforms a sine at frequency f with gain G:
+Predicts the enhancer's RMS output for a sine at frequency f with EQ gain G.
+The harmonic terms use h2⁴ / h3⁶ to match the Chebyshev polynomial generator:
+  T₂(x) = 2x² − 1  →  2nd harmonic amplitude ∝ h2_amp²  (power ∝ h2⁴)
+  T₃(x) = 4x³ − 3x →  3rd harmonic amplitude ∝ h3_amp³  (power ∝ h3⁶)
 
   A(f, G) = G · √[ HP(f,fc)² · S(f)²
-                   + h2² · LP(f,fc)²  · HP(2f,fc)² · S(2f)²
-                   + h3² · LP(f,fc/2)² · HP(3f,fc)² · S(3f)² ]
+                   + h2⁴ · LP(f,fc)²  · HP(2f,fc)² · S(2f)²
+                   + h3⁶ · LP(f,fc/2)² · HP(3f,fc)² · S(3f)² ]
 
 Where S(f) is the speaker's frequency response.
 
 Solving A(f, G) = target(f) for G gives the EQ gain that, after the
-enhancer, produces the desired perceived level.
+enhancer, produces the desired output level.
 """
 
 import numpy as np
@@ -50,8 +52,8 @@ def model_perceived_amplitude(
     lp_f2 = butterworth_lp_mag(f, fc / 2.0)
 
     a = (hp_f * S)**2
-    b = h2**2 * lp_f**2  * hp_2f**2 * S2**2
-    c = h3**2 * lp_f2**2 * hp_3f**2 * S3**2
+    b = h2**4 * lp_f**2  * hp_2f**2 * S2**2
+    c = h3**6 * lp_f2**2 * hp_3f**2 * S3**2
 
     return G * np.sqrt(a + EAR_W2 * b + EAR_W2 * c)
 
@@ -77,8 +79,8 @@ def model_gain_needed(
     S3 = speaker_response(3*f) if speaker_response else 1.0
 
     a = (hp_f * S)**2
-    b = h2**2 * lp_f**2  * hp_2f**2 * S2**2
-    c = h3**2 * lp_f2**2 * hp_3f**2 * S3**2
+    b = h2**4 * lp_f**2  * hp_2f**2 * S2**2
+    c = h3**6 * lp_f2**2 * hp_3f**2 * S3**2
 
     denom = np.sqrt(a + EAR_W2 * b + EAR_W2 * c)
     if denom < 1e-12:
@@ -98,8 +100,8 @@ def model_gain(f, fc, h2, h3, S, weighted=False):
     lp = butterworth_lp_mag
 
     a = hp(f, fc)**2 * Sf**2
-    b = h2**2 * lp(f, fc)**2 * hp(2 * f, fc)**2 * S2f**2
-    c = h3**2 * lp(f, fc / 2.0)**2 * hp(3 * f, fc)**2 * S3f**2
+    b = h2**4 * lp(f, fc)**2 * hp(2 * f, fc)**2 * S2f**2
+    c = h3**6 * lp(f, fc / 2.0)**2 * hp(3 * f, fc)**2 * S3f**2
 
     if weighted:
         sf = ear_sensitivity(f)
@@ -274,8 +276,8 @@ def run_model_gain_analysis():
             hp = butterworth_hp_mag
             lp = butterworth_lp_mag
             a = hp(f,fc)**2 * Sf**2
-            b = h2**2 * lp(f,fc)**2 * hp(2*f,fc)**2 * S2f**2
-            c = h3**2 * lp(f,fc/2)**2 * hp(3*f,fc)**2 * S3f**2
+            b = h2**4 * lp(f,fc)**2 * hp(2*f,fc)**2 * S2f**2
+            c = h3**6 * lp(f,fc/2)**2 * hp(3*f,fc)**2 * S3f**2
             G = 1.0 / np.sqrt(a+b+c) if a+b+c>1e-12 else 1.0
             return min(G, 1.0/Sf if Sf>1e-12 else 1.0)
 
@@ -303,8 +305,8 @@ def run_model_gain_analysis():
             hp = butterworth_hp_mag
             lp = butterworth_lp_mag
             a = hp(f,fc)**2 * Sf**2
-            b = h2**2 * lp(f,fc)**2 * hp(2*f,fc)**2 * S2f**2
-            c = h3**2 * lp(f,fc/2)**2 * hp(3*f,fc)**2 * S3f**2
+            b = h2**4 * lp(f,fc)**2 * hp(2*f,fc)**2 * S2f**2
+            c = h3**6 * lp(f,fc/2)**2 * hp(3*f,fc)**2 * S3f**2
             G = 1.0 / np.sqrt(a+b+c) if a+b+c>1e-12 else 1.0
             return min(G, 1.0/Sf if Sf>1e-12 else 1.0)
 

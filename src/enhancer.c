@@ -20,8 +20,6 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-/* ── Butterworth design in Q4.28 ───────────────────────────────────── */
-
 /* Q4.28 scale: 2^28 = 268435456 */
 #define Q28 (268435456.0)
 #define Q16 (65536.0)
@@ -30,23 +28,6 @@ static int32_t float2q28(float v) {
     if (v >= 7.999999f) return 0x7FFFFFFF;
     if (v <= -8.0f)     return (int32_t)0x80000000;
     return (int32_t)(v * Q28 + (v >= 0.0f ? 0.5f : -0.5f));
-}
-
-void bass_design_butter_lp_q28(float fc, float fs, int32_t coeffs_out[5]) {
-    float omega = (float)tan((double)M_PI * fc / fs);
-    float c = 1.0f + 1.41421356237f * omega + omega * omega;
-
-    float b0 = (omega * omega) / c;
-    float b1 = (2.0f * omega * omega) / c;
-    float b2 = (omega * omega) / c;
-    float a1 = (2.0f * (omega * omega - 1.0f)) / c;
-    float a2 = (1.0f - 1.41421356237f * omega + omega * omega) / c;
-
-    coeffs_out[0] = float2q28(b0);
-    coeffs_out[1] = float2q28(b1);
-    coeffs_out[2] = float2q28(b2);
-    coeffs_out[3] = float2q28(a1);
-    coeffs_out[4] = float2q28(a2);
 }
 
 void bass_design_butter_hp_q28(float fc, float fs, int32_t coeffs_out[5]) {
@@ -111,9 +92,11 @@ void BassEnhancerCfg_init(BassEnhancerCfg *cfg,
     cfg->limiter_release_coeff_q16 = (int32_t)(
         exp(-1.0 / (fs * limiter_release_secs)) * Q16 + 0.5);
 
-    /* Design LP/HP filters at Q4.28 precision */
-    bass_design_butter_lp_q28(cutoff_hz, fs, cfg->lp_t2_coeffs);
-    bass_design_butter_lp_q28(cutoff_hz / 2.0f, fs, cfg->lp_t3_coeffs);
+    /* Design LP/HP filters */
+    /* LP filters use first-order Q16 (lp_q16.h) to avoid Q28 biquad
+       truncation at the tiny fc/fs ratios used for bass extraction. */
+    cfg->lp_t2_alpha_q16 = (int32_t)((1.0f - expf(-2.0f * (float)M_PI * cutoff_hz / fs)) * Q16 + 0.5f);
+    cfg->lp_t3_alpha_q16 = (int32_t)((1.0f - expf(-2.0f * (float)M_PI * cutoff_hz * 0.5f / fs)) * Q16 + 0.5f);
     bass_design_butter_hp_q28(cutoff_hz, fs, cfg->hp_coeffs);
     bass_design_butter_hp_q28(cutoff_hz, fs, cfg->hp_harm_coeffs);
 
@@ -141,16 +124,17 @@ void BassEnhancer_init(BassEnhancer *enh,
         BiquadQ28_init(&eq_bqs_right[i], &cfg->eq_coeffs[i * 5]);
     }
 
-    /* Initialize enhancer biquads */
-    BiquadQ28_init(&enh->left.lp_t2,   cfg->lp_t2_coeffs);
-    BiquadQ28_init(&enh->left.lp_t3,   cfg->lp_t3_coeffs);
-    BiquadQ28_init(&enh->left.hp,      cfg->hp_coeffs);
-    BiquadQ28_init(&enh->left.hp_harm, cfg->hp_harm_coeffs);
+    /* Initialize LP filters (first-order Q16) */
+    LPQ16_init(&enh->left.lp_t2,   enh->cfg.lp_t2_alpha_q16);
+    LPQ16_init(&enh->left.lp_t3,   enh->cfg.lp_t3_alpha_q16);
+    LPQ16_init(&enh->right.lp_t2,  enh->cfg.lp_t2_alpha_q16);
+    LPQ16_init(&enh->right.lp_t3,  enh->cfg.lp_t3_alpha_q16);
 
-    BiquadQ28_init(&enh->right.lp_t2,   cfg->lp_t2_coeffs);
-    BiquadQ28_init(&enh->right.lp_t3,   cfg->lp_t3_coeffs);
-    BiquadQ28_init(&enh->right.hp,      cfg->hp_coeffs);
-    BiquadQ28_init(&enh->right.hp_harm, cfg->hp_harm_coeffs);
+    /* Initialize HP biquads */
+    BiquadQ28_init(&enh->left.hp,      enh->cfg.hp_coeffs);
+    BiquadQ28_init(&enh->left.hp_harm, enh->cfg.hp_harm_coeffs);
+    BiquadQ28_init(&enh->right.hp,      enh->cfg.hp_coeffs);
+    BiquadQ28_init(&enh->right.hp_harm, enh->cfg.hp_harm_coeffs);
 
     /* Initialize DC blockers (5 Hz cutoff) */
     float dc_R = (float)exp(-2.0 * M_PI * 5.0 / cfg->fs);
@@ -176,12 +160,12 @@ void BassEnhancer_reset(BassEnhancer *enh) {
         BiquadQ28_reset(&enh->right.eq_bqs[i]);
     }
 
-    BiquadQ28_reset(&enh->left.lp_t2);
-    BiquadQ28_reset(&enh->left.lp_t3);
+    LPQ16_reset(&enh->left.lp_t2);
+    LPQ16_reset(&enh->left.lp_t3);
+    LPQ16_reset(&enh->right.lp_t2);
+    LPQ16_reset(&enh->right.lp_t3);
     BiquadQ28_reset(&enh->left.hp);
     BiquadQ28_reset(&enh->left.hp_harm);
-    BiquadQ28_reset(&enh->right.lp_t2);
-    BiquadQ28_reset(&enh->right.lp_t3);
     BiquadQ28_reset(&enh->right.hp);
     BiquadQ28_reset(&enh->right.hp_harm);
 
@@ -244,8 +228,8 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
     /* ── Stage 1: EQ preprocessing ────────────────────────────────── */
     int32_t eq_out = BiquadQ28_cascade(ch->eq_bqs, cfg->eq_n_biquads, x);
 
-    /* ── Stage 1: LP filter at cutoff_hz for T2 path ─────────────── */
-    int32_t lp_t2 = BiquadQ28_tick(&ch->lp_t2, eq_out);
+    /* ── Stage 1: First-order LP at cutoff_hz for T2 path ──────── */
+    int32_t lp_t2 = LPQ16_tick(&ch->lp_t2, eq_out);
 
     /* Envelope of the low-passed signal */
     int32_t env_t2 = Env_tick(&ch->env_t2, lp_t2);
@@ -266,8 +250,8 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
     /* Scale back by envelope */
     int32_t harm_scaled_t2 = (int32_t)(((int64_t)harm_t2 * (int64_t)env_t2) >> 16);
 
-    /* ── Stage 2: LP filter at cutoff_hz/2 for T3 path ────────────── */
-    int32_t lp_t3 = BiquadQ28_tick(&ch->lp_t3, eq_out);
+    /* ── Stage 2: First-order LP at cutoff_hz/2 for T3 path ─────── */
+    int32_t lp_t3 = LPQ16_tick(&ch->lp_t3, eq_out);
     int32_t env_t3 = Env_tick(&ch->env_t3, lp_t3);
 
     int32_t norm_t3;
