@@ -17,6 +17,7 @@ idf_component_register(
         "main.c"
         "i2s_out.c"
         "bt_a2dp.c"
+        "sfx_player.c"
         "../../src/enhancer.c"
     INCLUDE_DIRS
         "."

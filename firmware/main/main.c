@@ -22,6 +22,8 @@
 
 #include "bt_a2dp.h"
 #include "i2s_out.h"
+#include "sfx_data.h"
+#include "rom/ets_sys.h"
 
 static const char *TAG = "eqgen";
 
@@ -36,6 +38,11 @@ static ReciprocalLUT     rec_lut;
 
 static int i2s_rate = 0;
 static int dsp_rate = 0;
+
+/* ── SFX event flags (set by Bluedroid task, cleared by DSP task) ── */
+
+static volatile int sfx_pending = 0;  /* 1=connected, 2=disconnected */
+static volatile uint32_t sfx_event_ms = 0;  /* last event timestamp (ms) */
 
 /* ────────────────────────────────────────────────────────────────
  *  DSP init
@@ -75,14 +82,94 @@ static void dsp_init(int rate)
              (double)EQGEN_H2_AMP, (double)EQGEN_H3_AMP);
 }
 
+/* ── SFX playback helper — batch-write to avoid per-sample DMA overhead ── */
+
+#define SFX_BATCH 256  /* stereo frames per DMA write */
+#define SFX_FADE   200  /* samples to fade in/out */
+
+static void play_sfx(const int16_t *mono, uint32_t n_samples, int rate)
+{
+    int16_t stereo[SFX_BATCH * 2];
+
+    for (uint32_t off = 0; off < n_samples; off += SFX_BATCH) {
+        uint32_t chunk = SFX_BATCH;
+        if (off + chunk > n_samples) chunk = n_samples - off;
+
+        for (uint32_t i = 0; i < chunk; i++) {
+            int32_t s = mono[off + i];
+            s = s >> 2;  /* −12 dB */
+
+            /* Fade in/out to avoid amplitude discontinuity */
+            uint32_t pos = off + i;
+            if (pos < SFX_FADE) {
+                s = (s * (int32_t)pos) / SFX_FADE;
+            } else if (pos >= n_samples - SFX_FADE) {
+                s = (s * (int32_t)(n_samples - 1 - pos)) / SFX_FADE;
+            }
+
+            stereo[i * 2]     = (int16_t)s;
+            stereo[i * 2 + 1] = (int16_t)s;
+        }
+        /* DMA backpressure (portMAX_DELAY) paces writes at the I2S rate.
+         * No busy-wait needed — the DMA buffer acts as a FIFO. */
+        i2s_out_write(stereo, chunk, NULL);
+    }
+    (void)rate;
+}
+
 /* ────────────────────────────────────────────────────────────────
  *  Audio data callback — called from the dsp_i2s task
  * ──────────────────────────────────────────────────────────────── */
 
+static void bt_event_handler(bt_event_t event)
+{
+    if (event == BT_EVENT_CONNECTED) {
+        sfx_pending = 1;
+    } else if (event == BT_EVENT_DISCONNECTED) {
+        sfx_pending = 2;
+    }
+    sfx_event_ms = (uint32_t)(esp_timer_get_time() / 1000);
+}
+
 static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
 {
-    /* Re-init I2S and DSP if sample rate changed (e.g. first connect, or
-     * phone negotiated a different rate than expected). */
+    /* ── Play pending SFX before anything else ── */
+    if (sfx_pending) {
+        /* Debounce: wait 200ms after last event for rapid-fire
+         * connect/disconnect cycles to settle (common in A2DP init).
+         * Audio data is NOT discarded during the wait — it flows through
+         * normally.  The SFX is simply deferred until the debounce
+         * timer expires. */
+        int64_t age_ms = ((int64_t)esp_timer_get_time() / 1000) - (int64_t)sfx_event_ms;
+        if (age_ms >= 200) {
+            int pending = sfx_pending;
+            sfx_pending = 0;
+
+            /* On connect (audio may start soon): init I2S at BT rate.
+             * On disconnect (audio already stopped): use last known rate. */
+            int play_rate = (i2s_rate > 0) ? i2s_rate : rate;
+            if (play_rate != i2s_rate) {
+                i2s_out_init(play_rate);
+                i2s_rate = play_rate;
+            }
+
+#ifdef SFX_CONNECTED_SAMPLES
+            if (pending & 1) {
+                play_sfx(sfx_connected, SFX_CONNECTED_SAMPLES, play_rate);
+            }
+#endif
+#ifdef SFX_DISCONNECTED_SAMPLES
+            if (pending & 2) {
+                play_sfx(sfx_disconnected, SFX_DISCONNECTED_SAMPLES, play_rate);
+            }
+#endif
+        }
+    }
+
+    /* No audio data — 50ms poll tick for events */
+    if (len == 0) return;
+
+    /* Re-init I2S and DSP if sample rate changed */
     if (rate != i2s_rate) {
         i2s_out_init(rate);
         i2s_rate = rate;
@@ -152,7 +239,8 @@ void app_main(void)
      * This also starts the DSP+I2S task internally.
      * I2S is initialized lazily when the first audio frame
      * arrives (so we know the negotiated sample rate). */
-    bt_a2dp_sink_init("eqgen", audio_data_handler);
+    bt_a2dp_set_event_callback(bt_event_handler);
+    bt_a2dp_sink_init(EQGEN_BT_DEVICE_NAME, audio_data_handler);
 
     /* Nothing else — FreeRTOS scheduler runs the BT stack
      * and the dsp_i2s task.  app_main returns and the idle

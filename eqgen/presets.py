@@ -44,6 +44,7 @@ class Preset:
     smooth_exponent: float = 1.0         # CV smoothing aggressiveness
     release: float = 0.2                 # envelope release (s)
     limiter_release: float = 0.049       # harmonic limiter release (s)
+    bluetooth_id: str = ""               # Bluetooth device ID for speaker identity
     high_rolloffs: List[List[float]] = field(default_factory=list)
     low_rolloffs: List[List[float]] = field(default_factory=list)
     pre_gain: Optional[float] = None     # computed pre-gain override

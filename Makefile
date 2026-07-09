@@ -59,7 +59,7 @@ server:
 	python -m eqgen.server $(ARGS)
 
 # -- ESP32 firmware ----------------------------------------------------
-# Usage: make flash ARGS="technics/standing"
+# Usage: make flash ARGS=cardboard
 flash:
 	python -m eqgen.cli.wire build $(ARGS)
 	cd firmware && idf.py build flash

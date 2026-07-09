@@ -36,6 +36,7 @@ static const char *TAG = "bt_a2dp";
 
 static StreamBufferHandle_t pcm_stream;
 static bt_a2dp_data_cb_t    user_data_cb;
+static bt_event_cb_t        user_event_cb;
 static int                  current_sample_rate = 44100;
 static bool                 audio_running = false;
 
@@ -89,6 +90,11 @@ void bt_a2dp_sink_init(const char *device_name, bt_a2dp_data_cb_t data_cb)
     ESP_LOGI(TAG, "Ready as \"%s\". Waiting for connection…", device_name);
 }
 
+void bt_a2dp_set_event_callback(bt_event_cb_t cb)
+{
+    user_event_cb = cb;
+}
+
 /* ───────────────────────────────────────────────────────────────────
  *  A2DP event handler
  * ─────────────────────────────────────────────────────────────────── */
@@ -110,8 +116,15 @@ static void bt_a2dp_event_cb(esp_a2d_cb_event_t event,
                  param->conn_stat.remote_bda[4],
                  param->conn_stat.remote_bda[5]);
 
+        if (is_connected && user_event_cb) {
+            user_event_cb(BT_EVENT_CONNECTED);
+        }
+
         if (!is_connected) {
             audio_running = false;
+            if (user_event_cb) {
+                user_event_cb(BT_EVENT_DISCONNECTED);
+            }
             /* Re-enter discoverable mode so the next phone can connect. */
             esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE,
                                      ESP_BT_GENERAL_DISCOVERABLE);
@@ -187,20 +200,22 @@ static void dsp_i2s_task(void *arg)
     int rate = 44100;
 
     while (1) {
-        /* Wait for at least one stereo frame (4 bytes).
-         * On first connect, or after a disconnect, block until
-         * audio arrives. */
+        /* Wait for audio data with a short timeout so we can
+         * periodically check for BT event-driven SFX. */
         size_t got = xStreamBufferReceive(pcm_stream, buf, PCM_CHUNK,
-                                          portMAX_DELAY);
+                                          pdMS_TO_TICKS(50));
 
-        /* Re-init I2S if the sample rate changed. */
+        /* Track sample rate changes negotiated by the BT source.
+         * This must stay in sync with current_sample_rate so the
+         * handler receives the correct rate for I2S/DSP init. */
         if (current_sample_rate != rate) {
             rate = current_sample_rate;
-            ESP_LOGI(TAG, "Sample rate changed to %d — re-initializing I2S", rate);
         }
 
+        /* Let the user callback check for pending events (SFX, etc.)
+         * even when no audio data arrived. */
         if (user_data_cb) {
-            user_data_cb(buf, (uint32_t)got, rate);
+            user_data_cb(got > 0 ? buf : NULL, (uint32_t)got, rate);
         }
     }
 }

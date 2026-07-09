@@ -201,7 +201,8 @@ def _apply_preset_to_system(preset_dict: dict, task_id: str):
             raise ValueError("Missing measurement or target paths")
 
         # 1-2. Run pipeline + IIR fit (delegates to wire.py)
-        eq_freqs, bq_q28, bands, cfg, coeffs_flat = run_full_pipeline(
+        (eq_freqs, bq_q28_44, bq_q28_48, bands_44, bands_48,
+         cfg, coeffs_flat) = run_full_pipeline(
             meas_paths=meas_paths,
             target_path=target_path,
             noise_path=noise_path,
@@ -210,13 +211,16 @@ def _apply_preset_to_system(preset_dict: dict, task_id: str):
             h3=preset.h3,
             max_bands=preset.max_bands,
             smooth_exponent=preset.smooth_exponent,
+            bluetooth_id=preset.bluetooth_id or None,
         )
         cfg["release_secs"] = preset.release
         cfg["limiter_release_secs"] = preset.limiter_release
 
-        # 3. Generate eq_coeffs.h (delegates to wire.py)
-        generate_eq_header(bq_q28, bands, cfg)
-        logger.info("Wrote eq_coeffs.h (%d biquads)", len(bands))
+        # 3. Generate eq_coeffs.h + sfx_data.h (delegates to wire.py)
+        generate_eq_header(bq_q28_44, bq_q28_48, bands_44, bands_48, cfg,
+                          bluetooth_id=preset.bluetooth_id or None)
+        generate_sfx_header()
+        logger.info("Wrote eq_coeffs.h (%d biquads)", len(bands_44))
 
         # 4. Rebuild filter binary
         for f in ["filter.c", "ladspa/ladspa_wrapper.c"]:
@@ -239,9 +243,9 @@ def _apply_preset_to_system(preset_dict: dict, task_id: str):
         result = {
             "status": "complete",
             "task_id": task_id,
-            "message": f"Applied — {len(bands)} bands wired to PipeWire",
+            "message": f"Applied — {len(bands_44)} bands wired to PipeWire",
             "output": {
-                "n_bands": len(bands),
+                "n_bands": len(bands_44),
                 "pre_gain": round(cfg["pre_gain"], 3),
                 "pre_gain_db": round(20.0 * np.log10(cfg["pre_gain"]), 1),
                 "fs": float(cfg["fs"]),
@@ -265,13 +269,31 @@ def _apply_preset_to_system(preset_dict: dict, task_id: str):
 FIRMWARE_DIR = ROOT / "firmware"
 
 
+def _find_esp32_port() -> Optional[str]:
+    """Auto-detect ESP32 USB-serial port.  Returns device path or None."""
+    # Prefer stable by-id symlinks (survive replug port renumbering)
+    by_id = Path("/dev/serial/by-id")
+    if by_id.exists():
+        for p in by_id.iterdir():
+            name = p.name.lower()
+            if any(chip in name for chip in ("cp210", "ch340", "ch341", "ft232")):
+                return str(p.resolve())  # resolve symlink
+    # Fallback: glob /dev/ttyUSB* or /dev/ttyACM*
+    import glob
+    for pattern in ("/dev/ttyUSB*", "/dev/ttyACM*"):
+        ports = sorted(glob.glob(pattern))
+        if ports:
+            return ports[0]
+    return None
+
+
 def _flash_esp32(preset_dict: dict, task_id: str):
     """Run pipeline, generate eq_coeffs.h, idf.py build flash."""
     with _pipeline_lock:
         _pipeline_results[task_id] = {"status": "running", "started": time.time()}
 
     try:
-        from eqgen.cli.wire import run_full_pipeline, generate_eq_header, SRC_DIR
+        from eqgen.cli.wire import run_full_pipeline, generate_eq_header, generate_sfx_header, SRC_DIR
 
         preset = Preset.from_dict(preset_dict)
         meas_paths = preset.resolve_measurements()
@@ -282,7 +304,8 @@ def _flash_esp32(preset_dict: dict, task_id: str):
             raise ValueError("Missing measurement or target paths")
 
         # 1. Run pipeline + IIR fit
-        eq_freqs, bq_q28, bands, cfg, coeffs_flat = run_full_pipeline(
+        (eq_freqs, bq_q28_44, bq_q28_48, bands_44, bands_48,
+         cfg, coeffs_flat) = run_full_pipeline(
             meas_paths=meas_paths,
             target_path=target_path,
             noise_path=noise_path,
@@ -291,13 +314,16 @@ def _flash_esp32(preset_dict: dict, task_id: str):
             h3=preset.h3,
             max_bands=preset.max_bands,
             smooth_exponent=preset.smooth_exponent,
+            bluetooth_id=preset.bluetooth_id or None,
         )
         cfg["release_secs"] = preset.release
         cfg["limiter_release_secs"] = preset.limiter_release
 
-        # 2. Generate eq_coeffs.h
-        generate_eq_header(bq_q28, bands, cfg)
-        logger.info("Wrote eq_coeffs.h (%d biquads)", len(bands))
+        # 2. Generate eq_coeffs.h + sfx_data.h
+        generate_eq_header(bq_q28_44, bq_q28_48, bands_44, bands_48, cfg,
+                          bluetooth_id=preset.bluetooth_id or None)
+        generate_sfx_header()
+        logger.info("Wrote eq_coeffs.h (%d biquads)", len(bands_44))
 
         # 3. idf.py build
         r = subprocess.run(
@@ -309,19 +335,32 @@ def _flash_esp32(preset_dict: dict, task_id: str):
         logger.info("ESP32 firmware built")
 
         # 4. idf.py flash
+        flash_cmd = ["idf.py", "flash"]
+        port = _find_esp32_port()
+        if port:
+            flash_cmd.extend(["-p", port])
+            logger.info("Flashing on %s", port)
+        else:
+            logger.warning("No ESP32 port auto-detected — using idf.py default")
         r = subprocess.run(
-            ["idf.py", "flash"],
+            flash_cmd,
             cwd=str(FIRMWARE_DIR),
             capture_output=True, text=True, timeout=120)
         if r.returncode != 0:
-            raise RuntimeError(f"idf.py flash failed:\n{r.stderr[-1000:]}")
+            err = r.stderr[-500:] if r.stderr else "unknown error"
+            if "Permission denied" in err or "not readable" in err:
+                raise RuntimeError(
+                    f"Serial port permission denied. "
+                    f"Use 'make flash ARGS={preset.name}' from a terminal, "
+                    f"or add yourself to the dialout group.")
+            raise RuntimeError(f"idf.py flash failed:\n{err}")
 
         result = {
             "status": "complete",
             "task_id": task_id,
-            "message": f"Flashed — {len(bands)} bands",
+            "message": f"Flashed — {len(bands_44)} bands",
             "output": {
-                "n_bands": len(bands),
+                "n_bands": len(bands_44),
                 "pre_gain": round(cfg["pre_gain"], 3),
                 "pre_gain_db": round(20.0 * np.log10(cfg["pre_gain"]), 1),
                 "fs": float(cfg["fs"]),
@@ -1028,6 +1067,7 @@ function readForm() {
     smooth_exponent: numVal('fSmooth', 1.0),
     release: numVal('fRelease', 0.2),
     limiter_release: numVal('fLimiter', 0.049),
+    bluetooth_id: document.getElementById('fBtId')?.value || '',
     high_rolloffs: [],
     low_rolloffs: [],
   };
@@ -1095,6 +1135,7 @@ function renderEditor() {
       <div class="form-group"><label>Smooth Exponent</label><input id="fSmooth" type="number" step="0.1" min="0" max="4" value="${p.smooth_exponent ?? 1.0}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Release (s)</label><input id="fRelease" type="number" step="0.01" min="0.01" max="2" value="${p.release ?? 0.2}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Limiter Release (s)</label><input id="fLimiter" type="number" step="0.001" min="0.01" max="0.5" value="${p.limiter_release ?? 0.049}" oninput="scheduleAnalyze()"></div>
+      <div class="form-group"><label>Bluetooth ID</label><input id="fBtId" value="${esc(p.bluetooth_id || '')}" placeholder="e.g. Living Room Speaker" oninput="scheduleAnalyze()"></div>
     </div>
   `;
 }
@@ -1122,7 +1163,7 @@ window.fillFromDir = function(dir) {
 };
 
 function newPreset() {
-  state.activePreset = { name: 'new-preset', measurements: [], target: '', fc: 60, h2: 0.5, h3: 1.0, max_bands: __MAX_IIR_BANDS__, smooth_exponent: 1.0, release: 0.2, limiter_release: 0.049 };
+  state.activePreset = { name: 'new-preset', measurements: [], target: '', fc: 60, h2: 0.5, h3: 1.0, max_bands: __MAX_IIR_BANDS__, smooth_exponent: 1.0, release: 0.2, limiter_release: 0.049, bluetooth_id: '' };
   state.pipelineResult = null;
   document.getElementById('results').innerHTML = '';
   document.getElementById('presetList').querySelectorAll('.active').forEach(el => el.classList.remove('active'));
