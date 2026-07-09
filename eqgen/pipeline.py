@@ -38,7 +38,7 @@ WELCH_OVERLAP = 0.5
 
 # Evaluation grid for the output curve — matches the IIR fitter's internal
 # log-spaced grid so no re-interpolation is needed downstream.
-N_EVAL = 256
+N_EVAL = 512
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -242,6 +242,7 @@ def run_pipeline(
     sample_rate_override: Optional[float] = None,
     smooth_exponent: float = 1.0,
     detailed: bool = False,
+    n_eval: int = 512,
 ):
     """Run the full EQ correction pipeline.
 
@@ -340,7 +341,7 @@ def run_pipeline(
     MIN_CV = 0.52   # Rayleigh CV — the noise floor for stationary signals
     BASE_BW = 0.08  # octaves at MIN_CV (~3 FFT bins at 400 Hz)
 
-    eval_freqs = np.logspace(np.log10(BOTTOM_F), np.log10(TOP_F), N_EVAL)
+    eval_freqs = np.logspace(np.log10(BOTTOM_F), np.log10(TOP_F), n_eval)
 
     # Estimate local CV at each eval point to scale bandwidth
     cv_at_eval = _smooth_kernel(meas_freqs, meas_cv, meas_cv, eval_freqs,

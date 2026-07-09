@@ -983,7 +983,7 @@ function renderResults() {
 
   resultsDiv.innerHTML = `
     <div class="chart"><h3>1. Measurement &amp; Target</h3><canvas id="cMeas"></canvas>
-      <div class="legend"><span><i class="swatch" style="background:#58a6ff"></i> Measurement (Welch FFT)</span><span><i class="swatch" style="background:#d2991d"></i> Target</span><span><i class="swatch" style="background:#58a6ff;height:0;border-bottom:1px dashed #58a6ff"></i> Meas. smoothed</span><span><i class="swatch" style="background:#d2991d;height:0;border-bottom:1px dashed #d2991d"></i> Targ. smoothed</span></div></div>
+      <div class="legend"><span><i class="swatch" style="background:#58a6ff"></i> Measurement (Welch FFT)</span><span><i class="swatch" style="background:#58a6ff;height:0;border-bottom:1px dashed #58a6ff"></i> Meas. smoothed</span><span><i class="swatch" style="background:#d2991d"></i> Target (fit)</span></div></div>
     <div class="chart"><h3>2. IIR Fit vs Ideal Correction (${n_bands} bands, greedy biquad design)</h3><canvas id="cIir"></canvas>
       <div class="legend"><span><i class="swatch" style="background:#3fb950"></i> Ideal correction (from measurement)</span><span><i class="swatch" style="background:#bc8cff;height:1px;border:1px dashed #bc8cff"></i> IIR biquad fit (computational design)</span></div></div>
   `;
@@ -992,9 +992,8 @@ function renderResults() {
     requestAnimationFrame(() => {
       drawChart('cMeas', [
         {name:'Raw meas',data:r.raw_measurement,color:'#58a6ff',width:1.8},
-        {name:'Raw target',data:r.raw_target,color:'#d2991d',width:1.8},
-        {name:'Smoothed meas',data:r.meas_smoothed,color:'#58a6ff',dash:[4,2],width:1.2},
-        {name:'Smoothed target',data:r.targ_smoothed,color:'#d2991d',dash:[4,2],width:1.2},
+        {name:'Meas. smoothed',data:r.meas_smoothed,color:'#58a6ff',dash:[4,2],width:1.2},
+        {name:'Target (fit)',data:r.targ_smoothed,color:'#d2991d',width:1.8},
       ], 'dB');
       drawChart('cIir', [{name:'Ideal',data:r.correction,color:COLORS[1]},{name:'IIR fit',data:r.iir_fit,color:COLORS[4],dash:[6,3],width:1.4}], 'dB');
     });

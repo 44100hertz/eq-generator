@@ -178,6 +178,7 @@ def fit_eq_curve(
     gain_range: Tuple[float, float] = (-60.0, 60.0),
     q_range: Tuple[float, float] = (0.3, 32.0),
     stop_db: float = 0.3,
+    n_eval: int = 512,
 ) -> FitResult:
     """Fit a target gain curve (dB) to cascaded peaking biquads.
 
@@ -210,12 +211,11 @@ def fit_eq_curve(
 
     # Evaluate on a uniform log-spaced grid so residual search isn't
     # biased by the adaptive measurement grid's point density.
-    N_EVAL = 256
-    eval_freqs = np.logspace(np.log10(min_freq), np.log10(max_freq), N_EVAL)
+    eval_freqs = np.logspace(np.log10(min_freq), np.log10(max_freq), n_eval)
     eval_target = np.interp(eval_freqs, freqs, target_db)
-    eval_mask = np.ones(N_EVAL, dtype=bool)  # all points already in [min,max]
+    eval_mask = np.ones(n_eval, dtype=bool)  # all points already in [min,max]
 
-    cascade_db = np.zeros(N_EVAL)
+    cascade_db = np.zeros(n_eval)
     residual = eval_target.copy()
 
     for i in range(max_bands):
