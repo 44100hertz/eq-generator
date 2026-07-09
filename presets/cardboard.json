@@ -14,6 +14,7 @@
   "release": 0.2,
   "limiter_release": 0.049,
   "bluetooth_id": "KEN\u00b7RAD LongBoom",
+  "default_volume": 32,
   "high_rolloffs": [],
   "low_rolloffs": []
 }

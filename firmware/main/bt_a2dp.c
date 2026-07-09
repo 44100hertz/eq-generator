@@ -10,6 +10,7 @@
  */
 
 #include "bt_a2dp.h"
+#include "eq_coeffs.h"
 
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -40,8 +41,14 @@ static bt_event_cb_t        user_event_cb;
 static int                  current_sample_rate = 44100;
 static bool                 audio_running = false;
 
+/* ── AVRCP absolute volume (phone → sink) ─────────────────────── */
+
+static volatile uint8_t s_volume = EQGEN_DEFAULT_VOLUME;  /* 0=mute, 127=max */
+
 /* ── Forward declarations ──────────────────────────────────────────── */
 
+static void bt_avrc_tg_cb(esp_avrc_tg_cb_event_t event,
+                          esp_avrc_tg_cb_param_t *param);
 static void bt_a2dp_event_cb(esp_a2d_cb_event_t event,
                              esp_a2d_cb_param_t *param);
 static void bt_a2dp_data_cb(const uint8_t *data, uint32_t len);
@@ -73,6 +80,12 @@ void bt_a2dp_sink_init(const char *device_name, bt_a2dp_data_cb_t data_cb)
     /* ── Device name ──────────────────────────────────────────── */
     esp_bt_dev_set_device_name(device_name);
 
+    /* ── AVRCP target (volume sync) ──────────────────────────── */
+    /* Must be initialized before A2DP so the SDP record
+     * advertises absolute volume support during pairing. */
+    ESP_ERROR_CHECK(esp_avrc_tg_init());
+    ESP_ERROR_CHECK(esp_avrc_tg_register_callback(bt_avrc_tg_cb));
+
     /* ── A2DP sink ────────────────────────────────────────────── */
     ESP_ERROR_CHECK(esp_a2d_register_callback(bt_a2dp_event_cb));
     ESP_ERROR_CHECK(esp_a2d_sink_register_data_callback(bt_a2dp_data_cb));
@@ -93,6 +106,43 @@ void bt_a2dp_sink_init(const char *device_name, bt_a2dp_data_cb_t data_cb)
 void bt_a2dp_set_event_callback(bt_event_cb_t cb)
 {
     user_event_cb = cb;
+}
+
+uint8_t bt_a2dp_get_volume(void)
+{
+    return s_volume;
+}
+
+/* ───────────────────────────────────────────────────────────────────
+ *  AVRCP target callback — runs in Bluedroid task context
+ * ─────────────────────────────────────────────────────────────────── */
+
+static void bt_avrc_tg_cb(esp_avrc_tg_cb_event_t event,
+                          esp_avrc_tg_cb_param_t *param)
+{
+    switch (event) {
+    case ESP_AVRC_TG_SET_ABSOLUTE_VOLUME_CMD_EVT:
+        s_volume = param->set_abs_vol.volume;
+        ESP_LOGI(TAG, "Volume set to %u/127 (%.0f%%)",
+                 (unsigned)s_volume,
+                 (double)s_volume * 100.0 / 127.0);
+        break;
+
+    case ESP_AVRC_TG_REGISTER_NOTIFICATION_EVT:
+        /* Phone asks to be notified when our volume changes.
+         * Respond immediately with our current volume so the
+         * phone's slider matches on connect.  INTERIM means
+         * "here's the current value, I'll tell you if it changes." */
+        if (param->reg_ntf.event_id == ESP_AVRC_RN_VOLUME_CHANGE) {
+            esp_avrc_rn_param_t rn = { .volume = s_volume };
+            esp_avrc_tg_send_rn_rsp(ESP_AVRC_RN_VOLUME_CHANGE,
+                                    ESP_AVRC_RN_RSP_INTERIM, &rn);
+        }
+        break;
+
+    default:
+        break;
+    }
 }
 
 /* ───────────────────────────────────────────────────────────────────

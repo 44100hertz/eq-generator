@@ -25,6 +25,12 @@ typedef enum {
     BT_EVENT_AUDIO_STOPPED,
 } bt_event_t;
 
+/** Read the current AVRCP absolute volume (0–127, 127 = max).
+ *
+ *  Safe to call from any task.  Returns 127 until the first
+ *  SetAbsoluteVolume command arrives from the phone. */
+uint8_t bt_a2dp_get_volume(void);
+
 /** BT event callback type.
  *
  *  Called from the Bluedroid task context — keep it short.

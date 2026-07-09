@@ -91,6 +91,11 @@ static void play_sfx(const int16_t *mono, uint32_t n_samples, int rate)
 {
     int16_t stereo[SFX_BATCH * 2];
 
+    /* Read AVRCP absolute volume once for the SFX duration.
+     * Q16 gain: 0=mute, 65536=unity (vol 127). */
+    uint8_t vol = bt_a2dp_get_volume();
+    int32_t vol_q16 = vol ? ((int32_t)vol << 16) / 127 : 0;
+
     for (uint32_t off = 0; off < n_samples; off += SFX_BATCH) {
         uint32_t chunk = SFX_BATCH;
         if (off + chunk > n_samples) chunk = n_samples - off;
@@ -106,6 +111,9 @@ static void play_sfx(const int16_t *mono, uint32_t n_samples, int rate)
             } else if (pos >= n_samples - SFX_FADE) {
                 s = (s * (int32_t)(n_samples - 1 - pos)) / SFX_FADE;
             }
+
+            /* Apply BT system volume */
+            s = (s * vol_q16) >> 16;
 
             stereo[i * 2]     = (int16_t)s;
             stereo[i * 2 + 1] = (int16_t)s;
@@ -187,12 +195,21 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
     const int16_t *in = (const int16_t *)data;
     uint32_t frames = len / 4;   /* 2 channels × 2 bytes */
 
+    /* Read AVRCP absolute volume once per chunk.
+     * Q16 gain: 0=mute, 65536=unity (vol 127). */
+    uint8_t vol = bt_a2dp_get_volume();
+    int32_t vol_q16 = vol ? ((int32_t)vol << 16) / 127 : 0;
+
     for (uint32_t i = 0; i < frames; i++) {
         /* int16 → Q16 (left-shift by 1) */
         int32_t l = ((int32_t)in[i * 2])     << 1;
         int32_t r = ((int32_t)in[i * 2 + 1]) << 1;
 
         BassEnhancer_process_stereo(&enhancer, &l, &r);
+
+        /* Apply BT system volume while still in Q16 for precision */
+        l = (l * vol_q16) >> 16;
+        r = (r * vol_q16) >> 16;
 
         /* Q16 → int16 (right-shift by 1, clamp) */
         l >>= 1;
