@@ -49,9 +49,9 @@ static void dsp_init(void)
                          EQGEN_CUTOFF_HZ,
                          EQGEN_H2_AMP,
                          EQGEN_H3_AMP,
-                         0.2f,     /* release_secs */
+                         EQGEN_RELEASE_SECS,
                          (float)EQGEN_FS,
-                         0.049f,   /* limiter_release_secs */
+                         EQGEN_LIMITER_RELEASE_SECS,
 #ifdef EQGEN_PRE_GAIN_Q16
                          (float)EQGEN_PRE_GAIN_Q16 / 65536.0f,
 #else
