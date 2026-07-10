@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 PRESETS_DIR = ROOT / "presets"
+HOUSE_CURVES_PATH = PRESETS_DIR / "house_curves.json"
 
 # ── Global limit: maximum IIR biquad bands across the entire program ──
 MAX_IIR_BANDS = 8
@@ -36,6 +37,7 @@ class Preset:
     description: str = ""
     measurements: List[str] = field(default_factory=list)
     target: str = ""
+    house_curve: str = ""           # house curve name (from house_curves.json), added on top of target
     noise: Optional[str] = None
     fc: Optional[float] = None          # bass enhancer cutoff Hz
     h2: float = 0.5                      # 2nd harmonic amplitude
@@ -205,3 +207,28 @@ class PresetManager:
             h2=0.5,
             h3=1.0,
         )
+
+
+# ── House curves (preferred-response adjustments applied on top of the target) ─
+
+def load_house_curves() -> Dict[str, list]:
+    """Load house curves from the JSON file.
+
+    Returns a dict of {name: [[freq_hz, db], ...]}.
+    """
+    if not HOUSE_CURVES_PATH.exists():
+        return {}
+    with open(HOUSE_CURVES_PATH, "r") as f:
+        return json.load(f)
+
+
+def list_house_curve_names() -> list:
+    """Return sorted list of available house curve names."""
+    curves = load_house_curves()
+    return sorted(curves.keys())
+
+
+def get_house_curve(name: str) -> Optional[list]:
+    """Get a single house curve by name. Returns [[freq_hz, db], ...] or None."""
+    curves = load_house_curves()
+    return curves.get(name)

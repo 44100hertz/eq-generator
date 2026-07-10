@@ -256,7 +256,8 @@ def generate_sfx_header():
 def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
                        target_path=None, fc=60.0, h2=0.5, h3=1.0,
                        max_bands=MAX_IIR_BANDS, smooth_exponent=1.0,
-                       target_fs=None, bluetooth_id=None):
+                       target_fs=None, bluetooth_id=None,
+                       house_curve=None):
     """Run pipeline + IIR fit at both 44100 and 48000, return biquads and config."""
     if speaker_name:
         meas_dir = MEAS_DIR / speaker_name
@@ -284,6 +285,7 @@ def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
     eq_freqs, target_db, fs, max_gain_db = run_pipeline(
         meas_paths, target_path, noise_path,
         bass_enhancer_cutoff=fc, h2=h2, h3=h3,
+        house_curve=house_curve,
     )
 
     print(f"  {len(eq_freqs)} adaptive EQ points, "

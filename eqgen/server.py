@@ -47,7 +47,7 @@ except ImportError:
 
 sys.path.insert(0, str(ROOT))
 
-from eqgen.presets import Preset, PresetManager, PRESETS_DIR, MAX_IIR_BANDS
+from eqgen.presets import Preset, PresetManager, PRESETS_DIR, MAX_IIR_BANDS, load_house_curves, list_house_curve_names, get_house_curve
 from eqgen.pipeline import run_pipeline, compute_fft_residual, FFT_N
 from eqgen.eq_fit import cascade_response_db, BiquadCoeffs, fit_eq_curve
 from eqgen.quantize import q28_to_float, quantize_biquads_q28
@@ -76,15 +76,21 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
         target_path = preset.resolve_target()
         noise_path = preset.resolve_noise()
 
-        if not meas_paths or not target_path:
+        if not meas_paths or (not target_path and not preset.house_curve):
             raise ValueError("Missing measurement or target paths")
 
+        # Resolve house curve adjustment if specified
+        curve_data = None
+        if preset.house_curve:
+            curve_data = get_house_curve(preset.house_curve)
+
         detailed = run_pipeline(
-            meas_paths, target_path, noise_path,
+            meas_paths, target_path or "", noise_path,
             bass_enhancer_cutoff=preset.fc,
             h2=preset.h2, h3=preset.h3,
             smooth_exponent=preset.smooth_exponent,
             detailed=True,
+            house_curve=curve_data,
         )
 
         freqs = np.array(detailed["freqs"])
@@ -213,14 +219,18 @@ def _apply_preset_to_system(preset_dict: dict, task_id: str):
         target_path = preset.resolve_target()
         noise_path = preset.resolve_noise()
 
-        if not meas_paths or not target_path:
+        if not meas_paths or (not target_path and not preset.house_curve):
             raise ValueError("Missing measurement or target paths")
+
+        curve_data = None
+        if preset.house_curve:
+            curve_data = get_house_curve(preset.house_curve)
 
         # 1-2. Run pipeline + IIR fit (delegates to wire.py)
         (eq_freqs, bq_q28_44, bq_q28_48, bands_44, bands_48,
          cfg, coeffs_flat, fft_gains_44, fft_gains_48) = run_full_pipeline(
             meas_paths=meas_paths,
-            target_path=target_path,
+            target_path=target_path or "",
             noise_path=noise_path,
             fc=preset.fc or 60.0,
             h2=preset.h2,
@@ -228,6 +238,7 @@ def _apply_preset_to_system(preset_dict: dict, task_id: str):
             max_bands=preset.max_bands,
             smooth_exponent=preset.smooth_exponent,
             bluetooth_id=preset.bluetooth_id or None,
+            house_curve=curve_data,
         )
         cfg["release_secs"] = preset.release
         cfg["limiter_release_secs"] = preset.limiter_release
@@ -318,14 +329,18 @@ def _flash_esp32(preset_dict: dict, task_id: str):
         target_path = preset.resolve_target()
         noise_path = preset.resolve_noise()
 
-        if not meas_paths or not target_path:
+        if not meas_paths or (not target_path and not preset.house_curve):
             raise ValueError("Missing measurement or target paths")
+
+        curve_data = None
+        if preset.house_curve:
+            curve_data = get_house_curve(preset.house_curve)
 
         # 1. Run pipeline + IIR fit
         (eq_freqs, bq_q28_44, bq_q28_48, bands_44, bands_48,
          cfg, coeffs_flat, fft_gains_44, fft_gains_48) = run_full_pipeline(
             meas_paths=meas_paths,
-            target_path=target_path,
+            target_path=target_path or "",
             noise_path=noise_path,
             fc=preset.fc or 60.0,
             h2=preset.h2,
@@ -333,6 +348,7 @@ def _flash_esp32(preset_dict: dict, task_id: str):
             max_bands=preset.max_bands,
             smooth_exponent=preset.smooth_exponent,
             bluetooth_id=preset.bluetooth_id or None,
+            house_curve=curve_data,
         )
         cfg["release_secs"] = preset.release
         cfg["limiter_release_secs"] = preset.limiter_release
@@ -563,6 +579,11 @@ if HAS_FASTAPI:
         data = await request.json()
         return api_flash_esp32(data)
 
+    @app.get("/api/house_curves")
+    async def list_house_curves_ep():
+        curves = load_house_curves()
+        return {"curves": curves, "names": list_house_curve_names()}
+
     @app.get("/api/status/{task_id}")
     async def pipeline_status(task_id: str):
         return api_pipeline_status(task_id)
@@ -634,6 +655,9 @@ if not HAS_FASTAPI:
                     self._send_json(api_delete_preset(name))
                 elif p == "/api/measurements" and method == "GET":
                     self._send_json(api_scan_measurements())
+                elif p == "/api/house_curves" and method == "GET":
+                    curves = load_house_curves()
+                    self._send_json({"curves": curves, "names": list_house_curve_names()})
                 elif p == "/api/run" and method == "POST":
                     data = self._read_json()
                     self._send_json(api_run_pipeline(data))
@@ -795,6 +819,7 @@ let state = {
   applyTaskId: null,
   analyzePending: null,
   measurements: [],
+  houseCurves: null,
 };
 
 const COLORS = ['#58a6ff','#3fb950','#f85149','#d2991d','#bc8cff','#ff7b72','#79c0ff','#a5d6ff'];
@@ -870,7 +895,7 @@ async function doAnalyze() {
   state.analyzePending = null;
   const p = readForm();
   if (!p || !p.name) return;
-  if (!p.measurements || p.measurements.length === 0 || !p.target) {
+  if (!p.measurements || p.measurements.length === 0 || (!p.target && !p.house_curve)) {
     document.getElementById('results').innerHTML = '';
     return;
   }
@@ -923,7 +948,7 @@ async function pollAnalyzeStatus() {
 async function applyToSystem() {
   const p = readForm();
   if (!p || !p.name) { setStatus('Preset name is required', 'error'); return; }
-  if (!p.measurements || p.measurements.length === 0 || !p.target) {
+  if (!p.measurements || p.measurements.length === 0 || (!p.target && !p.house_curve)) {
     setStatus('Measurement and target paths required', 'error'); return;
   }
 
@@ -954,7 +979,7 @@ async function applyToSystem() {
 async function flashESP32() {
   const p = readForm();
   if (!p || !p.name) { setStatus('Preset name is required', 'error'); return; }
-  if (!p.measurements || p.measurements.length === 0 || !p.target) {
+  if (!p.measurements || p.measurements.length === 0 || (!p.target && !p.house_curve)) {
     setStatus('Measurement and target paths required', 'error'); return;
   }
 
@@ -1079,6 +1104,7 @@ function readForm() {
     description: document.getElementById('fDesc')?.value || '',
     measurements: (document.getElementById('fMeas')?.value || '').split('\n').map(s=>s.trim()).filter(Boolean),
     target: document.getElementById('fTarget')?.value || '',
+    house_curve: document.getElementById('fHouseCurve')?.value || '',
     noise: document.getElementById('fNoise')?.value || null,
     fc: numVal('fFc'),
     h2: numVal('fH2', 0.5),
@@ -1147,6 +1173,7 @@ function renderEditor() {
         <textarea id="fMeas" rows="3" oninput="scheduleAnalyze()">${esc(measStr)}</textarea>
         ${measOpts}
       </div>
+      <div class="form-group"><label>House Curve</label><select id="fHouseCurve" onchange="onHouseCurveChange()">${buildHouseCurveOptions(p.house_curve || 'flat')}</select></div>
       <div class="form-group"><label>Target WAV</label><input id="fTarget" value="${esc(p.target || '')}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Noise WAV (optional)</label><input id="fNoise" value="${esc(p.noise || '')}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Cutoff fc (Hz)</label><input id="fFc" type="number" step="1" min="20" max="200" value="${p.fc ?? ''}" oninput="scheduleAnalyze()"></div>
@@ -1184,8 +1211,31 @@ window.fillFromDir = function(dir) {
   scheduleAnalyze();
 };
 
+async function loadHouseCurves() {
+  try {
+    const resp = await api('/api/house_curves');
+    state.houseCurves = resp;
+    if (state.activePreset) renderEditor();
+  } catch(e) {
+    console.error('Failed to load house curves:', e);
+  }
+}
+
+function buildHouseCurveOptions(selected) {
+  if (!state.houseCurves || !state.houseCurves.names) {
+    return '<option value="">(loading...)</option>';
+  }
+  return state.houseCurves.names.map(n =>
+    `<option value="${esc(n)}" ${n === selected ? 'selected' : ''}>${esc(n)}</option>`
+  ).join('');
+}
+
+function onHouseCurveChange() {
+  scheduleAnalyze();
+}
+
 function newPreset() {
-  state.activePreset = { name: 'new-preset', measurements: [], target: '', fc: 60, h2: 0.5, h3: 1.0, max_bands: __MAX_IIR_BANDS__, smooth_exponent: 1.0, release: 0.2, limiter_release: 0.049, bluetooth_id: '', default_volume: 32 };
+  state.activePreset = { name: 'new-preset', measurements: [], target: '', house_curve: 'flat', fc: 60, h2: 0.5, h3: 1.0, max_bands: __MAX_IIR_BANDS__, smooth_exponent: 1.0, release: 0.2, limiter_release: 0.049, bluetooth_id: '', default_volume: 32 };
   state.pipelineResult = null;
   document.getElementById('results').innerHTML = '';
   document.getElementById('presetList').querySelectorAll('.active').forEach(el => el.classList.remove('active'));
@@ -1397,6 +1447,7 @@ window.onerror = function(msg, url, line, col, err) {
 renderEditor();
 loadPresets().catch(e => setStatus('Failed to load presets: ' + e.message, 'error'));
 scanMeasurements().catch(e => setStatus('Failed to scan measurements: ' + e.message, 'error'));
+loadHouseCurves().catch(e => setStatus('Failed to load house curves: ' + e.message, 'error'));
 </script>
 <div class="tooltip" id="tooltip"></div>
 </body>

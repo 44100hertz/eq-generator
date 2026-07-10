@@ -245,6 +245,7 @@ def run_pipeline(
     smooth_exponent: float = 1.0,
     detailed: bool = False,
     n_eval: int = 512,
+    house_curve: Optional[list] = None,
 ):
     """Run the full EQ correction pipeline.
 
@@ -270,12 +271,16 @@ def run_pipeline(
         samples, rate = read_wav(path)
         wavs.append((samples, rate, path))
 
-    target_samples, target_rate = read_wav(target_path)
     sample_rate = sample_rate_override or wavs[0][1]
     for s, r, p in wavs[1:]:
         assert r == sample_rate, f"Sample rate mismatch in {p}: {r} vs {sample_rate}"
-    assert target_rate == sample_rate, \
-        f"Target sample rate mismatch: {target_rate} vs {sample_rate}"
+
+    if target_path:
+        target_samples, target_rate = read_wav(target_path)
+        assert target_rate == sample_rate, \
+            f"Target sample rate mismatch: {target_rate} vs {sample_rate}"
+    else:
+        target_samples = None
 
     # 2. Welch FFT
     all_stats = [welch_stats(s, sample_rate) for s, _, _ in wavs]
@@ -325,9 +330,15 @@ def run_pipeline(
     meas_raw = np.array([s["mean"] for s in pooled])
     meas_cv = np.array([s["cv"] for s in pooled])
 
-    target_stats = welch_stats(target_samples, sample_rate)
-    targ_freqs = np.array([s["freq"] for s in target_stats])
-    targ_raw_db = ratio_to_db(np.array([s["mean"] for s in target_stats]))
+    if target_path:
+        target_stats = welch_stats(target_samples, sample_rate)
+        targ_freqs = np.array([s["freq"] for s in target_stats])
+        targ_raw_db = ratio_to_db(np.array([s["mean"] for s in target_stats]))
+    else:
+        # No target WAV — use a flat 0 dB line spanning the measurement range
+        target_stats = None
+        targ_freqs = np.array([BOTTOM_F, TOP_F])
+        targ_raw_db = np.array([0.0, 0.0])
 
     noise_freqs = None
     noise_raw = None
@@ -357,13 +368,20 @@ def run_pipeline(
         noise_vals = _smooth_kernel(noise_freqs, noise_raw, noise_cv, eval_freqs)
         meas_vals = np.maximum(meas_vals - noise_vals, meas_vals * 0.01)
 
-    # 6. Target = linear fit of raw target (dB vs log-freq),
-    #    shifted to measurement midrange level.
+    # 6. Target from WAV (linear fit in dB vs log-freq) or flat 0 dB line.
+    #    House curve is an additive adjustment applied on top.
+    eval_log10 = np.log10(eval_freqs)
+    mid = (eval_freqs >= 500) & (eval_freqs <= 2000)
+
     log10_f_targ = np.log10(targ_freqs)
     slope, intercept = np.polyfit(log10_f_targ, targ_raw_db, 1)
-    eval_log10 = np.log10(eval_freqs)
     targ_db_eval = slope * eval_log10 + intercept
-    mid = (eval_freqs >= 500) & (eval_freqs <= 2000)
+
+    if house_curve is not None:
+        curve_freqs = np.array([p[0] for p in house_curve])
+        curve_db = np.array([p[1] for p in house_curve])
+        targ_db_eval = targ_db_eval + np.interp(eval_freqs, curve_freqs, curve_db)
+
     meas_mid_db = float(np.mean(ratio_to_db(meas_vals[mid]))) if mid.any() else 0.0
     targ_mid_db = float(np.mean(targ_db_eval[mid])) if mid.any() else 0.0
     targ_db_eval += meas_mid_db - targ_mid_db
@@ -438,9 +456,12 @@ def run_pipeline(
         # Raw measurement (Welch bins)
         raw_resp = [{"freq": float(s["freq"]), "db": ratio_to_db(s["mean"])}
                     for s in pooled]
-        # Raw target (Welch bins)
-        raw_target = [{"freq": float(s["freq"]), "db": ratio_to_db(s["mean"])}
-                      for s in target_stats]
+        # Raw target (Welch bins from WAV, or empty if no target WAV)
+        if target_stats is not None:
+            raw_target = [{"freq": float(s["freq"]), "db": ratio_to_db(s["mean"])}
+                          for s in target_stats]
+        else:
+            raw_target = []
         # CV per bin (after merge + inflation)
         cv_data = [{"freq": p["freq"], "cv": p["cv"]} for p in pooled]
         # Noise floor CV
