@@ -310,7 +310,8 @@ def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
         design_fs = float(rate)
         coeffs, bands, _, fit_target, fitted_db = design_eq(
             eq_freqs, target_db, design_fs,
-            max_bands=max_bands, fft_n=FFT_N)
+            max_bands=max_bands, fft_n=FFT_N,
+            min_peaking_freq=fc)
 
         # 3. Report error
         print(f"  {len(bands)} bands")

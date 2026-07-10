@@ -585,6 +585,7 @@ def design_eq(
     max_bands: int = MAX_IIR_BANDS,
     pre_gain_db: float = 0.0,
     fft_n: int = 0,
+    min_peaking_freq: float = 0.0,
 ) -> Tuple[List[int], List[dict], np.ndarray, np.ndarray, np.ndarray]:
     """Design a quantized IIR EQ to match a target curve.
 
@@ -615,7 +616,7 @@ def design_eq(
 
     fit = fit_eq_curve(freqs, shifted_db, fs, max_bands=max_bands,
                        min_freq=freqs[0], max_freq=freqs[-1],
-                       min_peaking_freq=freqs[0])
+                       min_peaking_freq=min_peaking_freq if min_peaking_freq > 0 else freqs[0])
 
     bq_q28 = quantize_biquads_q28(fit.biquads)
     coeffs = []

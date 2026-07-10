@@ -68,7 +68,8 @@ def run_speaker(speaker_name: str, out_dir: str, music_dir: str = None,
     # ── IIR fit ────────────────────────────────────────────────────
     print(f"\n── Fitting IIR biquads...")
     coeffs, bands, eq_freqs, target_db, fitted_db = design_eq(
-        eq_freqs, target_db, fs, max_bands=max_bands, pre_gain_db=max_gain_db)
+        eq_freqs, target_db, fs, max_bands=max_bands, pre_gain_db=max_gain_db,
+        min_peaking_freq=fc)
 
     print(f"  {len(bands)} bands")
     err = fitted_db - target_db

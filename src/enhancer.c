@@ -265,7 +265,7 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
 
     c1 = esp_cpu_get_cycle_count();
 
-    /* ── Stage 1: First-order LP at cutoff_hz for T2 path ──────── */
+/* ── Stage 1: First-order LP at cutoff_hz for T2 path ──────── */
     int32_t lp_t2 = LPQ16_tick(&ch->lp_t2, eq_out);
     int32_t env_t2 = Env_tick(&ch->env_t2, lp_t2);
 
@@ -273,6 +273,9 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
     if (env_t2 > 6) {
         uint32_t inv = ReciprocalLUT_lookup(lut, env_t2);
         norm_t2 = (int32_t)(((int64_t)lp_t2 * (int64_t)inv) >> 16);
+        /* Cap normalization gain at +12 dB — quiet signals amplify noise. */
+        if (norm_t2 >  262144) norm_t2 =  262144;  /* 4.0 in Q16 */
+        if (norm_t2 < -262144) norm_t2 = -262144;
     } else {
         norm_t2 = 0;
     }
@@ -295,6 +298,9 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
     if (env_t3 > 6) {
         uint32_t inv = ReciprocalLUT_lookup(lut, env_t3);
         norm_t3 = (int32_t)(((int64_t)lp_t3 * (int64_t)inv) >> 16);
+        /* Cap normalization gain at +12 dB — quiet signals amplify noise. */
+        if (norm_t3 >  262144) norm_t3 =  262144;
+        if (norm_t3 < -262144) norm_t3 = -262144;
     } else {
         norm_t3 = 0;
     }
@@ -319,8 +325,13 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
     /* ── Harmonic AGC limiter ──────────────────────────────────── */
     int32_t env_lim  = Env_tick(&ch->env_lim, out);
     int32_t env_peak = env_lim > 65536 ? env_lim : 65536;
-    uint32_t inv = ReciprocalLUT_lookup(lut, env_peak);
-    int32_t lim_gain = (int32_t)(inv >> 16);
+    int32_t lim_gain;
+    if (env_peak > 65536) {
+        /* ReciprocalLUT only handles [0, 1.0); compute direct for >1.0 */
+        lim_gain = (int32_t)((((int64_t)65536 << 16) / env_peak));
+    } else {
+        lim_gain = (int32_t)(ReciprocalLUT_lookup(lut, env_peak) >> 16);
+    }
     harm_hp = (int32_t)(((int64_t)harm_hp * (int64_t)lim_gain) >> 16);
     out = dry_hp + harm_hp;
 
