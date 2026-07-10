@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PRESETS_DIR = ROOT / "presets"
 
 # ── Global limit: maximum IIR biquad bands across the entire program ──
-MAX_IIR_BANDS = 12
+MAX_IIR_BANDS = 8
 
 
 @dataclass

@@ -28,3 +28,6 @@ firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/managed_components/
 src/test_enhancer
+src/bench_hybrid
+src/bench_sweep
+src/bench_sweep_*

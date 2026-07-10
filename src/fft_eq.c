@@ -1,7 +1,7 @@
 /**
  * fft_eq.c — Overlap-add FFT EQ implementation
  *
- * Uses a straightforward radix-2 DIT complex FFT (256-point).
+ * Uses a straightforward radix-2 DIT complex FFT (configurable via EQGEN_FFT_N).
  * For real input, imag parts are zeroed — this wastes ~2x vs a proper
  * real FFT, but gives a conservative performance bound.
  */
@@ -129,72 +129,64 @@ void fft_eq_reset(FftEq *eq) {
     memset(eq->olap_add_r, 0, (size_t)eq->hop * sizeof(float));
 }
 
-/* ── Per-channel tick ──────────────────────────────────────────────── */
-
-static void fft_eq_process_channel(const FftEq *eq,
-                                   const float *in, float *out,
-                                   float *overlap, float *olap_add,
-                                   float *work) {
-    int n   = eq->n;
-    int hop = eq->hop;
-    const float *window = eq->window;
-    const float *gains  = eq->gains;
-
-    /* 1. Shift overlap buffer left by hop */
-    memmove(overlap, overlap + hop, (size_t)(n - hop) * sizeof(float));
-
-    /* 2. Copy new samples into the right half */
-    memcpy(overlap + n - hop, in, (size_t)hop * sizeof(float));
-
-    /* 3. Apply Hann window → fft_work (real parts only, imag=0) */
-    for (int i = 0; i < n; i++) {
-        work[2*i]     = overlap[i] * window[i];
-        work[2*i + 1] = 0.0f;
-    }
-
-    /* 4. Forward FFT */
-    fft_cpx(work, n, 0);
-
-    /* 5. Multiply by per-bin gains (preserves conjugate symmetry) */
-    /* DC bin */
-    work[0] *= gains[0];
-    work[1] *= gains[0];
-    /* Bins 1..127 */
-    for (int k = 1; k < n/2; k++) {
-        float g = gains[k];
-        work[2*k]     *= g;
-        work[2*k + 1] *= g;
-        /* Mirror bin: same gain */
-        work[2*(n - k)]     *= g;
-        work[2*(n - k) + 1] *= g;
-    }
-    /* Nyquist bin */
-    work[2 * (n/2)]     *= gains[n/2];
-    work[2 * (n/2) + 1] *= gains[n/2];
-
-    /* 6. Inverse FFT */
-    fft_cpx(work, n, 1);
-
-    /* 7. Overlap-add: output[0..hop-1] = work_re[0..hop-1] + olap_add */
-    for (int i = 0; i < hop; i++) {
-        out[i] = work[2*i] + olap_add[i];
-    }
-
-    /* 8. Save second half of IFFT output as overlap for next frame */
-    for (int i = 0; i < hop; i++) {
-        olap_add[i] = work[2*(i + hop)];
-    }
-}
-
-/* ── Stereo processing ─────────────────────────────────────────────── */
+/* ── Stereo processing (L↦real, R↦imag packed into one complex FFT) ── */
 
 void fft_eq_process_frame(FftEq *eq,
                           const float *in_l, const float *in_r,
                           float *out_l, float *out_r) {
-    /* Left */
-    fft_eq_process_channel(eq, in_l, out_l,
-                           eq->overlap_l, eq->olap_add_l, eq->fft_work);
-    /* Right — reuse workspace */
-    fft_eq_process_channel(eq, in_r, out_r,
-                           eq->overlap_r, eq->olap_add_r, eq->fft_work);
+    int n   = eq->n;
+    int hop = eq->hop;
+    const float *window = eq->window;
+    const float *gains  = eq->gains;
+    float *work = eq->fft_work;
+
+    /* 1. Shift overlap buffers left by hop */
+    memmove(eq->overlap_l, eq->overlap_l + hop,
+            (size_t)(n - hop) * sizeof(float));
+    memmove(eq->overlap_r, eq->overlap_r + hop,
+            (size_t)(n - hop) * sizeof(float));
+
+    /* 2. Copy new samples into the right half */
+    memcpy(eq->overlap_l + n - hop, in_l, (size_t)hop * sizeof(float));
+    memcpy(eq->overlap_r + n - hop, in_r, (size_t)hop * sizeof(float));
+
+    /* 3. Pack L (real) + R (imag) into one complex buffer, apply window.
+     *    FFT is linear: FFT(L + jR) = FFT(L) + j·FFT(R).
+     *    Applying the same real gain g[k] to both preserves this. */
+    for (int i = 0; i < n; i++) {
+        float w = window[i];
+        work[2*i]     = eq->overlap_l[i] * w;
+        work[2*i + 1] = eq->overlap_r[i] * w;
+    }
+
+    /* 4. Forward FFT (one instead of two — ~2× speedup) */
+    fft_cpx(work, n, 0);
+
+    /* 5. Multiply by per-bin gains (real gains preserve linearity) */
+    work[0] *= gains[0];
+    work[1] *= gains[0];
+    for (int k = 1; k < n/2; k++) {
+        float g = gains[k];
+        work[2*k]         *= g;
+        work[2*k + 1]     *= g;
+        work[2*(n - k)]     *= g;
+        work[2*(n - k) + 1] *= g;
+    }
+    work[n]     *= gains[n/2];   /* Nyquist real */
+    work[n + 1] *= gains[n/2];   /* Nyquist imag */
+
+    /* 6. Inverse FFT (one instead of two) */
+    fft_cpx(work, n, 1);
+
+    /* 7. Extract: real→L, imag→R. Overlap-add each channel independently. */
+    for (int i = 0; i < hop; i++) {
+        out_l[i] = work[2*i]     + eq->olap_add_l[i];
+        out_r[i] = work[2*i + 1] + eq->olap_add_r[i];
+    }
+
+    /* 8. Save second half as overlap for next frame */
+    for (int i = 0; i < hop; i++) {
+        eq->olap_add_l[i] = work[2*(i + hop)];
+        eq->olap_add_r[i] = work[2*(i + hop) + 1];
+    }
 }

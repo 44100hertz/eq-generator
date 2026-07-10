@@ -1152,7 +1152,7 @@ function renderEditor() {
       <div class="form-group"><label>Cutoff fc (Hz)</label><input id="fFc" type="number" step="1" min="20" max="200" value="${p.fc ?? ''}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>H2 Amp</label><input id="fH2" type="number" step="0.01" min="0" max="2" value="${p.h2 ?? 0.5}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>H3 Amp</label><input id="fH3" type="number" step="0.01" min="0" max="2" value="${p.h3 ?? 1.0}" oninput="scheduleAnalyze()"></div>
-      <div class="form-group"><label>Max Bands</label><input id="fMaxBands" type="number" step="1" min="1" max="80" value="${p.max_bands ?? __MAX_IIR_BANDS__}" oninput="scheduleAnalyze()"></div>
+      <div class="form-group"><label>Max Bands</label><input id="fMaxBands" type="number" step="1" min="1" max="8" value="${p.max_bands ?? __MAX_IIR_BANDS__}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Smooth Exponent</label><input id="fSmooth" type="number" step="0.1" min="0" max="4" value="${p.smooth_exponent ?? 1.0}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Release (s)</label><input id="fRelease" type="number" step="0.01" min="0.01" max="2" value="${p.release ?? 0.2}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Limiter Release (s)</label><input id="fLimiter" type="number" step="0.001" min="0.01" max="0.5" value="${p.limiter_release ?? 0.049}" oninput="scheduleAnalyze()"></div>

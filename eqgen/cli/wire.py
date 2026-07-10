@@ -138,10 +138,14 @@ def generate_eq_header(bq_q28_44, bq_q28_48, bands_44, bands_48, cfg,
     # ── FFT hybrid EQ gains ───────────────────────────────────────
     if fft_gains_44 is not None and fft_gains_48 is not None:
         n_bins = len(fft_gains_44)
+        fft_n = (n_bins - 1) * 2  # bins = N/2 + 1, so N = (bins-1)*2
         lines.append("/* FFT hybrid EQ: per-bin scalar gains for overlap-add treble correction.")
         lines.append(" * EQGEN_FFT_BINS == 0  →  FFT path bypassed at runtime.")
+        lines.append(" * EQGEN_FFT_N is the window size (single source of truth for fft_eq.h).")
         lines.append(" */")
-        lines.append(f"#define EQGEN_FFT_BINS {n_bins}")
+        lines.append(f"#define EQGEN_FFT_N    {fft_n}")
+        lines.append(f"#define EQGEN_FFT_HOP  {fft_n // 2}    /* N/2 — samples per FFT frame */")
+        lines.append(f"#define EQGEN_FFT_BINS {n_bins}    /* N/2 + 1 — gains table entries */")
         lines.append("")
 
         def _fmt_float(val):

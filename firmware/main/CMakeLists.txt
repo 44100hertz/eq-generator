@@ -19,6 +19,7 @@ idf_component_register(
         "bt_a2dp.c"
         "sfx_player.c"
         "../../src/enhancer.c"
+        "../../src/fft_eq.c"
     INCLUDE_DIRS
         "."
         "../../src"

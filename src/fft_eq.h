@@ -1,19 +1,13 @@
 /**
- * fft_eq.h — Overlap-add FFT EQ (float, 256-point, 50% overlap)
+ * fft_eq.h — Overlap-add FFT EQ (configurable N, 50% overlap)
  *
  * Applies per-bin scalar gains via frequency-domain multiplication.
- * Input: 128 new float samples per tick (after IIR biquad pass).
+ * Input: N/2 new float samples per tick.
  * Hann window + 50% overlap-add for perfect reconstruction when
  * gains are unity.
  *
- * State (per instance, stereo):
- *   overlap_l[256], overlap_r[256]  — input history + window target
- *   olap_add_l[128], olap_add_r[128] — overlap-add accumulator
- *   window[256]                      — pre-computed Hann window
- *   gains[129]                       — per-bin gains (DC..Nyquist)
- *   fft_work[512]                    — FFT workspace (256 complex, reusable)
- *
- * RAM: ~4.5 KB (2×1024 + 2×512 + 1024 + 516 + 2048 bytes)
+ * FFT_EQ_N can be overridden at compile time (-DFFT_EQ_N=512).
+ * Default: 256-point FFT, 128-sample hop, 129 bins.
  */
 
 #pragma once
@@ -22,13 +16,19 @@
 extern "C" {
 #endif
 
-#define FFT_EQ_N    256
-#define FFT_EQ_HOP  128
-#define FFT_EQ_BINS 129   /* gains table: DC through Nyquist (n/2 + 1) */
+/** EQGEN_FFT_N is the single source of truth (defined in eq_coeffs.h).
+ *  Fall back to 256 if compiling without the generated header (e.g. bench). */
+#if defined(EQGEN_FFT_N)
+  #define FFT_EQ_N    EQGEN_FFT_N
+#elif !defined(FFT_EQ_N)
+  #define FFT_EQ_N    256
+#endif
+#define FFT_EQ_HOP  (FFT_EQ_N / 2)
+#define FFT_EQ_BINS (FFT_EQ_N / 2 + 1)   /* gains table: DC through Nyquist (n/2 + 1) */
 
 typedef struct {
-    int   n;          /* window size (256) */
-    int   hop;        /* hop size (128) */
+    int   n;          /* window size (FFT_EQ_N) */
+    int   hop;        /* hop size (FFT_EQ_HOP) */
 
     float *window;    /* pre-computed Hann window [n] */
     float *gains;     /* per-bin scalar gains [n/2 + 1] */
@@ -40,7 +40,7 @@ typedef struct {
     float *olap_add_r;    /* [hop] */
 
     /* Workspace (reused between channels) */
-    float *fft_work;  /* [2*n] = [512] complex interleaved */
+    float *fft_work;  /* [2*n] complex interleaved */
 } FftEq;
 
 /** Allocate and initialize an FftEq. gains must point to FFT_EQ_BINS+1 floats

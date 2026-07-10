@@ -20,6 +20,7 @@
 #include "enhancer.h"
 #include "eq_coeffs.h"
 #include "envelope.h"
+#include "fft_eq.h"
 
 #include "bt_a2dp.h"
 #include "i2s_out.h"
@@ -34,6 +35,11 @@ static BassEnhancer      enhancer;
 static BiquadQ28         eq_bqs_left[EQGEN_N_BIQUADS];
 static BiquadQ28         eq_bqs_right[EQGEN_N_BIQUADS];
 static ReciprocalLUT     rec_lut;
+
+#if EQGEN_FFT_BINS > 0
+static FftEq            *fft_eq;
+static float             fft_pre_gain;   /* pre-gain applied in float before Q16 */
+#endif
 
 /* ── Track the last I2S/DSP sample rate ───────────────────────── */
 
@@ -60,7 +66,28 @@ static void dsp_init(int rate)
 
     ReciprocalLUT_init(&rec_lut);
 
-    /* Set up DSP configuration from eq_coeffs.h defines */
+#if EQGEN_FFT_BINS > 0
+    /* Pre-gain computed from correction curve peak (eq_coeffs.h).
+     * When FFT EQ is active: apply in float BEFORE Q16 conversion
+     * to prevent clipping from FFT boost. Bypass it in the enhancer. */
+#ifdef EQGEN_PRE_GAIN_Q16
+    fft_pre_gain = (float)EQGEN_PRE_GAIN_Q16 / 65536.0f;
+#else
+    fft_pre_gain = 1.0f;
+#endif
+
+    /* Initialize FFT EQ with per-bin gains for this sample rate */
+    const float *fft_gains = eqgen_get_fft_gains(rate);
+    if (fft_eq) fft_eq_destroy(fft_eq);
+    fft_eq = fft_eq_create(fft_gains);
+    if (!fft_eq) {
+        ESP_LOGE(TAG, "FFT EQ allocation failed — bypassing FFT path");
+    }
+#endif
+
+    /* Set up DSP configuration from eq_coeffs.h defines.
+     * When FFT is active: pre_gain passed to enhancer is 1.0
+     * (the real pre-gain is applied in float before Q16 conversion). */
     BassEnhancerCfg cfg;
     BassEnhancerCfg_init(&cfg,
                          EQGEN_CUTOFF_HZ,
@@ -69,7 +96,7 @@ static void dsp_init(int rate)
                          EQGEN_RELEASE_SECS,
                          fs,
                          EQGEN_LIMITER_RELEASE_SECS,
-#ifdef EQGEN_PRE_GAIN_Q16
+#if defined(EQGEN_PRE_GAIN_Q16) && EQGEN_FFT_BINS == 0
                          (float)EQGEN_PRE_GAIN_Q16 / 65536.0f,
 #else
                          1.0f,
@@ -82,9 +109,15 @@ static void dsp_init(int rate)
 
     dsp_rate = rate;
 
+#if EQGEN_FFT_BINS > 0
+    ESP_LOGI(TAG, "DSP ready @ %d Hz: FFT=%d-pt + %d biquads, fc=%.0f Hz, h2=%.2f h3=%.2f",
+             rate, EQGEN_FFT_N, EQGEN_N_BIQUADS, (double)EQGEN_CUTOFF_HZ,
+             (double)EQGEN_H2_AMP, (double)EQGEN_H3_AMP);
+#else
     ESP_LOGI(TAG, "DSP ready @ %d Hz: %d biquads, fc=%.0f Hz, h2=%.2f h3=%.2f",
              rate, EQGEN_N_BIQUADS, (double)EQGEN_CUTOFF_HZ,
              (double)EQGEN_H2_AMP, (double)EQGEN_H3_AMP);
+#endif
 }
 
 /* ── SFX playback helper — batch-write to avoid per-sample DMA overhead ── */
@@ -191,12 +224,27 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
         dsp_init(rate);
     }
 
+#if EQGEN_FFT_BINS > 0
+    /* ── FFT hybrid path: accumulate → FFT EQ → IIR + enhancer ── */
+    static float  fft_buf_l[EQGEN_FFT_HOP];
+    static float  fft_buf_r[EQGEN_FFT_HOP];
+    static float  fft_out_l[EQGEN_FFT_HOP];
+    static float  fft_out_r[EQGEN_FFT_HOP];
+    static int    fft_buf_count = 0;
+    static int    fft_buf_rate = 0;  /* to detect rate changes */
+
+    /* On rate change: discard partial FFT buffer (stale rate data) */
+    if (rate != fft_buf_rate) {
+        fft_buf_count = 0;
+        fft_buf_rate = rate;
+    }
+#endif
+
     /* ── DSP processing ── */
 #ifdef EQGEN_PROFILE
     int64_t t0 = esp_timer_get_time();
 #endif
 
-    /* Process each stereo frame through the DSP */
     const int16_t *in = (const int16_t *)data;
     uint32_t frames = len / 4;   /* 2 channels × 2 bytes */
 
@@ -204,6 +252,66 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
     uint8_t vol = bt_a2dp_get_volume();
     int32_t vol_q16 = vol_lut[vol];
 
+#if EQGEN_FFT_BINS > 0
+    for (uint32_t i = 0; i < frames; i++) {
+        /* Accumulate: int16 → float normalized to [-1, 1] */
+        fft_buf_l[fft_buf_count] = (float)in[i * 2]     / 32768.0f;
+        fft_buf_r[fft_buf_count] = (float)in[i * 2 + 1] / 32768.0f;
+        fft_buf_count++;
+
+        if (fft_buf_count == EQGEN_FFT_HOP) {
+            /* Process the hop-sized buffer through FFT EQ */
+            if (fft_eq) {
+                fft_eq_process_frame(fft_eq, fft_buf_l, fft_buf_r,
+                                     fft_out_l, fft_out_r);
+            } else {
+                /* FFT alloc failed earlier — pass through */
+                for (int j = 0; j < EQGEN_FFT_HOP; j++) {
+                    fft_out_l[j] = fft_buf_l[j];
+                    fft_out_r[j] = fft_buf_r[j];
+                }
+            }
+
+            /* Apply pre-gain in float before Q16 conversion to
+             * prevent clipping from FFT boosts in biquad cascade. */
+            for (int j = 0; j < EQGEN_FFT_HOP; j++) {
+                fft_out_l[j] *= fft_pre_gain;
+                fft_out_r[j] *= fft_pre_gain;
+            }
+
+            /* Feed FFT output through IIR biquads + bass enhancer */
+            for (int j = 0; j < EQGEN_FFT_HOP; j++) {
+                int32_t ql = (int32_t)(fft_out_l[j] * 32768.0f) << 1;
+                int32_t qr = (int32_t)(fft_out_r[j] * 32768.0f) << 1;
+
+                /* Clamp to Q16 range */
+                if (ql >  65535) ql =  65535;
+                if (ql < -65536) ql = -65536;
+                if (qr >  65535) qr =  65535;
+                if (qr < -65536) qr = -65536;
+
+                BassEnhancer_process_stereo(&enhancer, &ql, &qr);
+
+                /* Apply BT system volume while still in Q16 */
+                ql = (ql * vol_q16) >> 16;
+                qr = (qr * vol_q16) >> 16;
+
+                /* Q16 → int16 (right-shift by 1, clamp) */
+                ql >>= 1;
+                qr >>= 1;
+                if (ql >  32767) ql =  32767;
+                if (ql < -32768) ql = -32768;
+                if (qr >  32767) qr =  32767;
+                if (qr < -32768) qr = -32768;
+
+                i2s_out_write_stereo((int16_t)ql, (int16_t)qr);
+            }
+
+            fft_buf_count = 0;
+        }
+    }
+#else
+    /* ── No-FFT path: sample-by-sample IIR + enhancer ── */
     for (uint32_t i = 0; i < frames; i++) {
         /* int16 → Q16 (left-shift by 1) */
         int32_t l = ((int32_t)in[i * 2])     << 1;
@@ -225,6 +333,7 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
 
         i2s_out_write_stereo((int16_t)l, (int16_t)r);
     }
+#endif
 
 #ifdef EQGEN_PROFILE
     int64_t elapsed_us = esp_timer_get_time() - t0;

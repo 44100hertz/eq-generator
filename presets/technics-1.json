@@ -9,7 +9,7 @@
   "fc": 60,
   "h2": 0.5,
   "h3": 1,
-  "max_bands": 24,
+  "max_bands": 8,
   "smooth_exponent": 1,
   "release": 0.2,
   "limiter_release": 0.049,
