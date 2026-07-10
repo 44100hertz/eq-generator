@@ -401,8 +401,8 @@ def run_pipeline(
     with np.errstate(divide='ignore', invalid='ignore'):
         corr = np.where(meas_vals > 1e-20, target_vals / meas_vals, 1e6)
 
-    # 8. Bass enhancer preprocessing
-    if bass_enhancer_cutoff is not None:
+    # 8. Bass enhancer preprocessing (skip if cutoff ≤ 0 — bypass)
+    if bass_enhancer_cutoff is not None and bass_enhancer_cutoff > 0:
         fc = bass_enhancer_cutoff
         from eqgen.model import model_gain_needed
 
@@ -563,6 +563,19 @@ def compute_fft_residual(
     target_at_bins = np.interp(fft_bin_freqs, freqs, target_db)
     target_at_bins[0] = 0.0  # 0 dB → linear gain = 1.0
     gains_linear = 10.0 ** (target_at_bins / 20.0)
+
+    # Ramp DC → first few bins to prevent time-domain aliasing in the
+    # FFT overlap-add.  A step from 0 dB (DC) to the first bin's gain
+    # creates an impulse response far longer than the 256-point window,
+    # causing wrap-around distortion on bass tones.
+    # The IIR picks up whatever the FFT ramp leaves behind.
+    ramp_end = 4  # ramp bins 0..3 linearly in dB toward bin 4
+    if ramp_end < len(gains_linear):
+        ramp_target_db = float(20.0 * np.log10(max(gains_linear[ramp_end], 1e-12)))
+        for i in range(1, ramp_end):
+            t = i / ramp_end
+            gains_linear[i] = 10.0 ** (t * ramp_target_db / 20.0)
+
     fft_gains_db = 20.0 * np.log10(np.maximum(gains_linear, 1e-12))
 
     # 3. Cubic spline interpolates the piecewise-constant bin gains back to

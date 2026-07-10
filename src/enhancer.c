@@ -260,6 +260,17 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
     /* ── Stage 1: EQ preprocessing ────────────────────────────────── */
     int32_t eq_out = BiquadQ28_cascade(ch->eq_bqs, cfg->eq_n_biquads, x);
 
+    /* Bypass enhancer when cutoff ≤ 0 — keeps DC blocker + pre-gain + EQ,
+       skips harmonic generation, HP filtering, mixing, and limiter. */
+    if (cfg->cutoff_hz <= 0.0f) {
+        c1 = esp_cpu_get_cycle_count();
+        c3 = c1;
+        enh_profile.frames++;
+        enh_profile.cycles_total += (c3 - c0);
+        enh_profile.cycles_eq     += (c1 - c0);
+        return eq_out;
+    }
+
     c1 = esp_cpu_get_cycle_count();
 
 /* ── Stage 1: First-order LP at cutoff_hz for T2 path ──────── */
@@ -326,7 +337,7 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
         /* ReciprocalLUT only handles [0, 1.0); compute direct for >1.0 */
         lim_gain = (int32_t)((((int64_t)65536 << 16) / env_peak));
     } else {
-        lim_gain = (int32_t)(ReciprocalLUT_lookup(lut, env_peak) >> 16);
+        lim_gain = (int32_t)ReciprocalLUT_lookup(lut, env_peak);
     }
     harm_hp = (int32_t)(((int64_t)harm_hp * (int64_t)lim_gain) >> 16);
     out = dry_hp + harm_hp;
