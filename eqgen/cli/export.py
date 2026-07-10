@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 from eqgen.eq_fit import fit_eq_curve
 from eqgen.quantize import BiquadQ28, quantize_biquads_q28
-from eqgen.pipeline import run_pipeline
+from eqgen.pipeline import run_pipeline, pre_gain_from_max_gain
 from eqgen.presets import MAX_IIR_BANDS
 
 
@@ -53,17 +53,15 @@ def generate_header(speaker_name: str, speaker_fn, fs: float, fc: float,
     target_linear = np.array([1.0 / max(speaker_fn(f), 1e-12) for f in freqs])
     target_db = np.clip(20.0 * np.log10(np.maximum(target_linear, 1e-12)), -24.0, 24.0)
 
-    # Pre-gain: shift the target down so the EQ only needs cuts.
     max_gain_db = max(0.0, float(np.max(target_db)))
-    pre_gain = 10.0 ** (max_gain_db / 20.0) if max_gain_db > 0.0 else 1.0
+    pre_gain = pre_gain_from_max_gain(max_gain_db)
     pre_gain_q16 = int(round(pre_gain * 65536.0))
-    shifted_db = target_db - max_gain_db if max_gain_db > 0.0 else target_db
 
     # Fit at both 44100 and 48000
     bq_q28_44, bands_44, n_bands_44 = _fit_header_bands(
-        freqs, shifted_db, 44100.0, max_bands, f_min, f_max)
+        freqs, target_db, 44100.0, max_bands, f_min, f_max)
     bq_q28_48, bands_48, n_bands_48 = _fit_header_bands(
-        freqs, shifted_db, 48000.0, max_bands, f_min, f_max)
+        freqs, target_db, 48000.0, max_bands, f_min, f_max)
 
     lines = []
     lines.append(f"// Auto-generated EQ coefficients for: {speaker_name}")
@@ -81,7 +79,7 @@ def generate_header(speaker_name: str, speaker_fn, fs: float, fc: float,
     lines.append(f"#define EQGEN_CUTOFF_HZ            {fc:.1f}f")
     lines.append(f"#define EQGEN_H2_AMP               {h2:.3f}f")
     lines.append(f"#define EQGEN_H3_AMP               {h3:.3f}f")
-    lines.append(f"#define EQGEN_PRE_GAIN_Q16          {pre_gain_q16}  // {pre_gain:.2f}x = {max_gain_db:+.1f} dB")
+    lines.append(f"#define EQGEN_PRE_GAIN_Q16          {pre_gain_q16}  // {pre_gain:.2f}x = {20*np.log10(pre_gain):+.1f} dB")
     lines.append(f"#define EQGEN_FS_44100              44100")
     lines.append(f"#define EQGEN_FS_48000              48000")
     lines.append(f"#define EQGEN_N_BIQUADS            {n_bands_44}")

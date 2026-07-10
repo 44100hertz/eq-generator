@@ -55,6 +55,16 @@ def ratio_to_db(ratio: float) -> float:
     return 20.0 * np.log10(np.maximum(ratio, 1e-20))
 
 
+def pre_gain_from_max_gain(max_gain_db: float) -> float:
+    """Attenuation factor that keeps biquad internal states below overflow.
+
+    Input is attenuated by this factor before the biquad cascade;
+    biquads fit the full (unshifted) correction curve and boost
+    back up to unity at peak-gain frequencies.
+    """
+    return 1.0 / max(1.0, db_to_ratio(max_gain_db))
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # WAV I/O
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -580,15 +590,10 @@ def design_eq(
     target_db: np.ndarray,
     fs: float,
     max_bands: int = MAX_IIR_BANDS,
-    pre_gain_db: float = 0.0,
     fft_n: int = 0,
     min_peaking_freq: float = 0.0,
 ) -> Tuple[List[int], List[dict], np.ndarray, np.ndarray, np.ndarray]:
     """Design a quantized IIR EQ to match a target curve.
-
-    If pre_gain_db > 0, the target curve is shifted down by that
-    amount — the EQ only cuts (never boosts), and the missing gain
-    is provided by a uniform pre-gain stage in the C hot path.
 
     When fft_n > 0 (FFT hybrid mode), the IIR biquads are fitted to
     the *residual* after subtracting the FFT's broad correction.
@@ -607,8 +612,7 @@ def design_eq(
         shifted_db = residual_db
         fit_target = residual_db
     else:
-        # Shift the target down so the EQ only needs cuts.
-        shifted_db = target_db - pre_gain_db if pre_gain_db > 0.0 else target_db
+        shifted_db = target_db
         fit_target = target_db
 
     fit = fit_eq_curve(freqs, shifted_db, fs, max_bands=max_bands,

@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from eqgen.pipeline import (
-    run_pipeline, design_eq, process_track, db_to_ratio,
+    run_pipeline, design_eq, process_track, pre_gain_from_max_gain,
 )
 from eqgen.presets import MAX_IIR_BANDS
 
@@ -60,15 +60,15 @@ def run_speaker(speaker_name: str, out_dir: str, music_dir: str = None,
         [meas_path], target,
         bass_enhancer_cutoff=fc, h2=h2, h3=h3)
 
-    pre_gain = db_to_ratio(max_gain_db)
     print(f"  {len(eq_freqs)} adaptive EQ points, {eq_freqs[0]:.0f}–{eq_freqs[-1]:.0f} Hz")
+    pre_gain = pre_gain_from_max_gain(max_gain_db)
     if max_gain_db > 0:
-        print(f"  Max correction gain: {max_gain_db:+.1f} dB → pre-gain: {pre_gain:.2f}x")
+        print(f"  Max correction gain: {max_gain_db:+.1f} dB → pre-gain: {20*np.log10(pre_gain):+.1f} dB")
 
     # ── IIR fit ────────────────────────────────────────────────────
     print(f"\n── Fitting IIR biquads...")
     coeffs, bands, eq_freqs, target_db, fitted_db = design_eq(
-        eq_freqs, target_db, fs, max_bands=max_bands, pre_gain_db=max_gain_db,
+        eq_freqs, target_db, fs, max_bands=max_bands,
         min_peaking_freq=fc)
 
     print(f"  {len(bands)} bands")

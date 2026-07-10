@@ -32,10 +32,10 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from eqgen.pipeline import run_pipeline, design_eq, compute_fft_residual, FFT_N
+from eqgen.pipeline import run_pipeline, design_eq, compute_fft_residual, FFT_N, pre_gain_from_max_gain
 from eqgen.quantize import BiquadQ28, q28_to_float
 from eqgen.eq_fit import cascade_response_db, BiquadCoeffs
-from eqgen.presets import MAX_IIR_BANDS
+from eqgen.presets import MAX_IIR_BANDS, get_house_curve
 
 MEAS_DIR = ROOT / "measurements"
 SRC_DIR = ROOT / "src"
@@ -327,7 +327,7 @@ def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
         # 4. Post-hoc pre-gain from the analytical correction curve.
         #    Attenuate before biquads so they never boost past unity.
         #    Close enough to the cascade response — avoids computing it.
-        pre_gain = 1.0 / max(1.0, 10.0 ** (max_gain_db / 20.0))
+        pre_gain = pre_gain_from_max_gain(max_gain_db)
 
         # 5. Store per-rate results for header generation
         all_bq_q28[rate] = [BiquadQ28(b0=coeffs[i*5], b1=coeffs[i*5+1],
@@ -621,25 +621,7 @@ def main():
 
     # setup
     p_setup = sub.add_parser("setup", help="Measure, build, wire")
-    p_setup.add_argument("speaker", nargs="?", default=None,
-                         help="Speaker name (under measurements/)")
-    p_setup.add_argument("-m", "--measurement", nargs="+", default=None,
-                         help="Measurement WAV file(s)")
-    p_setup.add_argument("-n", "--noise", default=None,
-                         help="Noise WAV file")
-    p_setup.add_argument("-t", "--target", default=None,
-                         help="Target WAV file")
-    p_setup.add_argument("--fc", type=float, default=60.0)
-    p_setup.add_argument("--h2", type=float, default=0.5)
-    p_setup.add_argument("--h3", type=float, default=1.0)
-    p_setup.add_argument("--smooth-exponent", type=float, default=1.0)
-    p_setup.add_argument("--release", type=float, default=0.2)
-    p_setup.add_argument("--limiter-release", type=float, default=0.049)
-    p_setup.add_argument("--max-bands", type=int, default=MAX_IIR_BANDS)
-    p_setup.add_argument("--bluetooth-id", default=None,
-                         help="Bluetooth device name for ESP32 firmware")
-    p_setup.add_argument("--preset", default=None,
-                         help="Load parameters from a preset JSON (overrides speaker/flags)")
+    p_setup.add_argument("preset", help="Preset name (from presets/ directory)")
     p_setup.add_argument("--no-wire", action="store_true",
                          help="Build plugin only, don't wire to output")
 
@@ -652,58 +634,37 @@ def main():
 
     args = ap.parse_args()
 
-    # ── Load preset (build always uses one; setup optionally) ───
-    if getattr(args, "preset", None):
-        from eqgen.presets import PresetManager
-        pm = PresetManager()
-        preset = pm.load(args.preset)
-        args.speaker = None
-        args.measurement = [str(ROOT / p) for p in preset.measurements] if preset.measurements else None
-        args.target = str(ROOT / preset.target) if preset.target else None
-        args.noise = str(ROOT / preset.noise) if preset.noise else None
-        args.fc = preset.fc if preset.fc is not None else args.fc
-        args.h2 = preset.h2 if preset.h2 is not None else args.h2
-        args.h3 = preset.h3 if preset.h3 is not None else args.h3
-        args.max_bands = preset.max_bands if preset.max_bands is not None else args.max_bands
-        args.smooth_exponent = preset.smooth_exponent if preset.smooth_exponent is not None else args.smooth_exponent
-        args.release = preset.release if preset.release is not None else args.release
-        args.limiter_release = preset.limiter_release if preset.limiter_release is not None else args.limiter_release
-        args.bluetooth_id = preset.bluetooth_id or args.bluetooth_id
-        args.default_volume = preset.default_volume
-        print(f"Loaded preset '{args.preset}'")
-
     if args.command == "teardown":
         teardown_wiring()
         return
 
     if args.command == "setup":
-        if args.speaker and not args.measurement:
-            result = run_full_pipeline(
-                speaker_name=args.speaker, fc=args.fc, h2=args.h2, h3=args.h3,
-                smooth_exponent=args.smooth_exponent,
-                max_bands=args.max_bands,
-                bluetooth_id=args.bluetooth_id,
-            )
-        elif args.measurement and args.target:
-            result = run_full_pipeline(
-                meas_paths=args.measurement, noise_path=args.noise,
-                target_path=args.target, fc=args.fc, h2=args.h2, h3=args.h3,
-                smooth_exponent=args.smooth_exponent, max_bands=args.max_bands,
-                bluetooth_id=args.bluetooth_id,
-            )
-        else:
-            ap.error("Need either speaker name, or -m/-t")
+        from eqgen.presets import PresetManager
+        pm = PresetManager()
+        preset = pm.load(args.preset)
+        print(f"Loaded preset '{args.preset}'")
+
+        result = run_full_pipeline(
+            meas_paths=[str(ROOT / p) for p in preset.measurements],
+            noise_path=str(ROOT / preset.noise) if preset.noise else None,
+            target_path=str(ROOT / preset.target) if preset.target else None,
+            fc=preset.fc or 60.0,
+            h2=preset.h2, h3=preset.h3,
+            smooth_exponent=preset.smooth_exponent,
+            max_bands=preset.max_bands,
+            bluetooth_id=preset.bluetooth_id or None,
+            house_curve=get_house_curve(preset.house_curve) if preset.house_curve else None,
+        )
 
         eq_freqs, bq_q28_44, bq_q28_48, bands_44, bands_48, cfg, coeffs_flat, fft_gains_44, fft_gains_48 = result
-        cfg["release_secs"] = args.release
-        cfg["limiter_release_secs"] = args.limiter_release
+        cfg["release_secs"] = preset.release
+        cfg["limiter_release_secs"] = preset.limiter_release
 
         print(f"\n── Generating headers...")
         generate_eq_header(bq_q28_44, bq_q28_48, bands_44, bands_48, cfg,
-                          speaker_name=args.speaker,
-                          meas_paths=args.measurement,
-                          bluetooth_id=args.bluetooth_id,
-                          default_volume=getattr(args, 'default_volume', 32),
+                          meas_paths=[str(ROOT / p) for p in preset.measurements],
+                          bluetooth_id=preset.bluetooth_id,
+                          default_volume=preset.default_volume,
                           fft_gains_44=fft_gains_44, fft_gains_48=fft_gains_48)
         generate_sfx_header()
 
@@ -714,18 +675,28 @@ def main():
             setup_wiring(cfg, coeffs_flat)
 
     elif args.command == "build":
+        from eqgen.presets import PresetManager
+        pm = PresetManager()
+        preset = pm.load(args.preset)
+        print(f"Loaded preset '{args.preset}'")
+
         result = run_full_pipeline(
-            meas_paths=args.measurement, noise_path=args.noise,
-            target_path=args.target, fc=args.fc, h2=args.h2, h3=args.h3,
-            smooth_exponent=args.smooth_exponent, max_bands=args.max_bands,
-            bluetooth_id=args.bluetooth_id,
+            meas_paths=[str(ROOT / p) for p in preset.measurements],
+            noise_path=str(ROOT / preset.noise) if preset.noise else None,
+            target_path=str(ROOT / preset.target) if preset.target else None,
+            fc=preset.fc or 60.0,
+            h2=preset.h2, h3=preset.h3,
+            smooth_exponent=preset.smooth_exponent,
+            max_bands=preset.max_bands,
+            bluetooth_id=preset.bluetooth_id or None,
+            house_curve=get_house_curve(preset.house_curve) if preset.house_curve else None,
         )
         eq_freqs, bq_q28_44, bq_q28_48, bands_44, bands_48, cfg, coeffs_flat, fft_gains_44, fft_gains_48 = result
-        cfg["release_secs"] = args.release
-        cfg["limiter_release_secs"] = args.limiter_release
+        cfg["release_secs"] = preset.release
+        cfg["limiter_release_secs"] = preset.limiter_release
         generate_eq_header(bq_q28_44, bq_q28_48, bands_44, bands_48, cfg,
-                          bluetooth_id=args.bluetooth_id,
-                          default_volume=getattr(args, 'default_volume', 32),
+                          bluetooth_id=preset.bluetooth_id,
+                          default_volume=preset.default_volume,
                           fft_gains_44=fft_gains_44, fft_gains_48=fft_gains_48)
         generate_sfx_header()
         build_and_install()
