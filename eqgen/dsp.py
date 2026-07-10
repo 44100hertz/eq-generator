@@ -98,6 +98,16 @@ class EnvFollower:
 # Butterworth filter magnitude responses (for analysis)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def first_order_lp_mag(f: float, fc: float) -> float:
+    """1st-order LP magnitude at frequency f.
+
+    Matches the first-order LP filters used in the C enhancer
+    (alpha = 1 - exp(-2π·fc/fs), approximated for fc ≪ fs/2).
+    """
+    w = f / fc
+    return 1.0 / np.sqrt(1.0 + w**2)
+
+
 def butterworth_lp_mag(f: float, fc: float) -> float:
     """2nd-order Butterworth LP magnitude at frequency f."""
     w = f / fc

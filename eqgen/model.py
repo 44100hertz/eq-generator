@@ -6,9 +6,16 @@ The harmonic terms use h2⁴ / h3⁶ to match the Chebyshev polynomial generator
   T₂(x) = 2x² − 1  →  2nd harmonic amplitude ∝ h2_amp²  (power ∝ h2⁴)
   T₃(x) = 4x³ − 3x →  3rd harmonic amplitude ∝ h3_amp³  (power ∝ h3⁶)
 
-  A(f, G) = G · √[ HP(f,fc)² · S(f)²
+  A(f, G) = G · √[ HP(f,fc)² · S(f)² · (1 + 3·h3·(h3²−1)·LP(f,fc/2))²
                    + h2⁴ · LP(f,fc)²  · HP(2f,fc)² · S(2f)²
                    + h3⁶ · LP(f,fc/2)² · HP(3f,fc)² · S(3f)² ]
+
+  The first term accounts for T₃ fundamental leakage: T₃(x) = 4x³−3x
+  produces a fundamental component 3h3(h3²−1)·sin(ωt) that is coherent
+  with the dry fundamental.  When h3 < 1 this reduces the perceived
+  fundamental level near the crossover.
+
+  LP filters are first-order (matching the C enhancer implementation).
 
 Where S(f) is the speaker's frequency response.
 
@@ -18,7 +25,7 @@ enhancer, produces the desired output level.
 
 import numpy as np
 
-from eqgen.dsp import butterworth_lp_mag, butterworth_hp_mag
+from eqgen.dsp import first_order_lp_mag, butterworth_hp_mag
 
 
 # ── Core model ────────────────────────────────────────────────────────
@@ -48,10 +55,14 @@ def model_perceived_amplitude(
     hp_f  = butterworth_hp_mag(f, fc)
     hp_2f = butterworth_hp_mag(2*f, fc)
     hp_3f = butterworth_hp_mag(3*f, fc)
-    lp_f  = butterworth_lp_mag(f, fc)
-    lp_f2 = butterworth_lp_mag(f, fc / 2.0)
+    lp_f  = first_order_lp_mag(f, fc)
+    lp_f2 = first_order_lp_mag(f, fc / 2.0)
 
-    a = (hp_f * S)**2
+    # T₃ fundamental leakage: 3h3(h3²−1) is negative for h3<1, so the
+    # coherent combination with the dry fundamental REDUCES the level.
+    fund_factor = 1.0 + 3.0 * h3 * (h3 * h3 - 1.0) * lp_f2
+
+    a = (hp_f * S * fund_factor)**2
     b = h2**4 * lp_f**2  * hp_2f**2 * S2**2
     c = h3**6 * lp_f2**2 * hp_3f**2 * S3**2
 
@@ -72,13 +83,15 @@ def model_gain_needed(
     hp_f  = butterworth_hp_mag(f, fc)
     hp_2f = butterworth_hp_mag(2*f, fc)
     hp_3f = butterworth_hp_mag(3*f, fc)
-    lp_f  = butterworth_lp_mag(f, fc)
-    lp_f2 = butterworth_lp_mag(f, fc / 2.0)
+    lp_f  = first_order_lp_mag(f, fc)
+    lp_f2 = first_order_lp_mag(f, fc / 2.0)
 
     S2 = speaker_response(2*f) if speaker_response else 1.0
     S3 = speaker_response(3*f) if speaker_response else 1.0
 
-    a = (hp_f * S)**2
+    fund_factor = 1.0 + 3.0 * h3 * (h3 * h3 - 1.0) * lp_f2
+
+    a = (hp_f * S * fund_factor)**2
     b = h2**4 * lp_f**2  * hp_2f**2 * S2**2
     c = h3**6 * lp_f2**2 * hp_3f**2 * S3**2
 
@@ -97,9 +110,11 @@ def model_gain(f, fc, h2, h3, S, weighted=False):
     S3f = S(3 * f)
 
     hp = butterworth_hp_mag
-    lp = butterworth_lp_mag
+    lp = first_order_lp_mag
 
-    a = hp(f, fc)**2 * Sf**2
+    fund_factor = 1.0 + 3.0 * h3 * (h3 * h3 - 1.0) * lp(f, fc / 2.0)
+
+    a = (hp(f, fc) * Sf * fund_factor)**2
     b = h2**4 * lp(f, fc)**2 * hp(2 * f, fc)**2 * S2f**2
     c = h3**6 * lp(f, fc / 2.0)**2 * hp(3 * f, fc)**2 * S3f**2
 
@@ -274,12 +289,13 @@ def run_model_gain_analysis():
 
         def _gain(h2, h3):
             hp = butterworth_hp_mag
-            lp = butterworth_lp_mag
-            a = hp(f,fc)**2 * Sf**2
-            b = h2**4 * lp(f,fc)**2 * hp(2*f,fc)**2 * S2f**2
-            c = h3**6 * lp(f,fc/2)**2 * hp(3*f,fc)**2 * S3f**2
-            G = 1.0 / np.sqrt(a+b+c) if a+b+c>1e-12 else 1.0
-            return min(G, 1.0/Sf if Sf>1e-12 else 1.0)
+            lp = first_order_lp_mag
+            fund_factor = 1.0 + 3.0 * h3 * (h3 * h3 - 1.0) * lp(f, fc / 2.0)
+            a = (hp(f, fc) * Sf * fund_factor)**2
+            b = h2**4 * lp(f, fc)**2 * hp(2 * f, fc)**2 * S2f**2
+            c = h3**6 * lp(f, fc / 2.0)**2 * hp(3 * f, fc)**2 * S3f**2
+            G = 1.0 / np.sqrt(a + b + c) if a + b + c > 1e-12 else 1.0
+            return min(G, 1.0 / Sf if Sf > 1e-12 else 1.0)
 
         G_old = _gain(1.0, 2.0)
         G_new = _gain(0.33, 0.33)
@@ -303,12 +319,13 @@ def run_model_gain_analysis():
 
         def _gain_h(h2, h3):
             hp = butterworth_hp_mag
-            lp = butterworth_lp_mag
-            a = hp(f,fc)**2 * Sf**2
-            b = h2**4 * lp(f,fc)**2 * hp(2*f,fc)**2 * S2f**2
-            c = h3**6 * lp(f,fc/2)**2 * hp(3*f,fc)**2 * S3f**2
-            G = 1.0 / np.sqrt(a+b+c) if a+b+c>1e-12 else 1.0
-            return min(G, 1.0/Sf if Sf>1e-12 else 1.0)
+            lp = first_order_lp_mag
+            fund_factor = 1.0 + 3.0 * h3 * (h3 * h3 - 1.0) * lp(f, fc / 2.0)
+            a = (hp(f, fc) * Sf * fund_factor)**2
+            b = h2**4 * lp(f, fc)**2 * hp(2 * f, fc)**2 * S2f**2
+            c = h3**6 * lp(f, fc / 2.0)**2 * hp(3 * f, fc)**2 * S3f**2
+            G = 1.0 / np.sqrt(a + b + c) if a + b + c > 1e-12 else 1.0
+            return min(G, 1.0 / Sf if Sf > 1e-12 else 1.0)
 
         G_old = _gain_h(1.0, 2.0)
         print(f"  {f:4.0f} Hz  {G_old:8.3f}  ", end="")

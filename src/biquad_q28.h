@@ -1,9 +1,11 @@
 /**
  * biquad_q28.h — Direct Form I biquad with Q4.28 coefficients
  *
- * State variables (x1, x2, y1, y2) are Q16 (int32_t).
+ * Input state (x1, x2) is Q16 (int32_t).
+ * Output state (y1, y2) is Q32 (int64_t) — 16 extra fractional bits
+ *   to preserve the slow decay of near-unity poles at low fc/fs.
  * Coefficients are Q4.28 (int32_t).
- * Accumulation: 64-bit Q44 sum, single truncation to Q16.
+ * Accumulation: 64-bit Q(4.60) sum, single truncation to Q16.
  *
  * Usage:
  *   BiquadQ28 bq[n];
@@ -22,7 +24,7 @@ extern "C" {
 typedef struct {
     const int32_t *coeffs;  /* pointer to 5 Q4.28 values: [b0, b1, b2, a1, a2] */
     int32_t x1, x2;         /* delay-line: input history (Q16) */
-    int32_t y1, y2;         /* delay-line: output history (Q16) */
+    int64_t y1, y2;         /* delay-line: output history (Q32) — 16 extra bits */
 } BiquadQ28;
 
 /* ── Initialization ────────────────────────────────────────────────── */
@@ -56,24 +58,35 @@ static inline void BiquadQ28_reset(BiquadQ28 *bq) {
  *  implementation on non-Xtensa platforms and for cancellation-
  *  sensitive HP filters on all platforms.
  */
+/** Q16→Q32 upscale for matching precision with y1/y2 state. */
+#define BQ28_Q16_TO_Q60(x)  (((int64_t)(x)) << 16)
+
 static inline int32_t BiquadQ28_tick_q44(BiquadQ28 *bq, int32_t x) {
     const int32_t *c = bq->coeffs;
     int64_t acc;
 
-    acc  = (int64_t)(x)       * (int64_t)(c[0]);  /* b0 * x  */
-    acc += (int64_t)(bq->x1)  * (int64_t)(c[1]);  /* b1 * x1 */
-    acc += (int64_t)(bq->x2)  * (int64_t)(c[2]);  /* b2 * x2 */
-    acc -= (int64_t)(bq->y1)  * (int64_t)(c[3]);  /* a1 * y1 */
-    acc -= (int64_t)(bq->y2)  * (int64_t)(c[4]);  /* a2 * y2 */
+    /* x-terms in Q60:  b(Q4.28) * x(Q16) * 2^16 = Q(4.60) */
+    acc  = (int64_t)(x)       * (int64_t)(c[0]);          /* Q(4.44) → scale below */
+    acc += (int64_t)(bq->x1)  * (int64_t)(c[1]);
+    acc += (int64_t)(bq->x2)  * (int64_t)(c[2]);
+    acc *= 65536LL;                                       /* Q(4.60) — avoid UB on signed << */
 
-    int32_t y = (int32_t)(acc >> 28);
+    /* y-terms already Q32:  coeff(Q4.28) * state(Q32) = Q(4.60)  */
+    acc -= (int64_t)(bq->y1)  * (int64_t)(c[3]);
+    acc -= (int64_t)(bq->y2)  * (int64_t)(c[4]);
+
+    /* Store full-precision state directly from the accumulator.
+     * acc is Q(4.60); >>28 gives Q32 (32 frac bits, preserving decay).
+     * The Q16 output is the top 16 bits of the Q32 state.           */
+    int64_t y_q32 = acc >> 28;       /* Q32: 16 frac extra over Q16 */
+    int32_t y_q16 = (int32_t)(y_q32 >> 16);
 
     bq->x2 = bq->x1;
     bq->x1 = x;
     bq->y2 = bq->y1;
-    bq->y1 = y;
+    bq->y1 = y_q32;
 
-    return y;
+    return y_q16;
 }
 
 /* ── Tick (default) ────────────────────────────────────────────────── */
