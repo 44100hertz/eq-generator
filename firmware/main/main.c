@@ -7,6 +7,7 @@
  * To change the EQ curve, re-run the desktop export tool and re-flash.
  */
 
+#include <math.h>
 #include <stdint.h>
 
 #include "freertos/FreeRTOS.h"
@@ -43,6 +44,10 @@ static int dsp_rate = 0;
 
 static volatile int sfx_pending = 0;  /* 1=connected, 2=disconnected */
 static volatile uint32_t sfx_event_ms = 0;  /* last event timestamp (ms) */
+
+/* ── Volume LUT: maps 0..127 → Q16 gain (dB-linear) ────────── */
+#define VOL_DB_FLOOR -60.0f  /* dB at vol=1 (0=mute) */
+static int32_t vol_lut[128];
 
 /* ────────────────────────────────────────────────────────────────
  *  DSP init
@@ -195,10 +200,9 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
     const int16_t *in = (const int16_t *)data;
     uint32_t frames = len / 4;   /* 2 channels × 2 bytes */
 
-    /* Read AVRCP absolute volume once per chunk.
-     * Q16 gain: 0=mute, 65536=unity (vol 127). */
+    /* Read AVRCP absolute volume once per chunk; map through dB LUT. */
     uint8_t vol = bt_a2dp_get_volume();
-    int32_t vol_q16 = vol ? ((int32_t)vol << 16) / 127 : 0;
+    int32_t vol_q16 = vol_lut[vol];
 
     for (uint32_t i = 0; i < frames; i++) {
         /* int16 → Q16 (left-shift by 1) */
@@ -262,5 +266,12 @@ void app_main(void)
     /* Nothing else — FreeRTOS scheduler runs the BT stack
      * and the dsp_i2s task.  app_main returns and the idle
      * task reclaims this stack. */
+    /* Build dB-linear volume LUT (0→mute, 1→-60 dB, 127→0 dB). */
+    for (int i = 1; i < 128; i++) {
+        float db = ((float)i / 127.0f) * (-VOL_DB_FLOOR) + VOL_DB_FLOOR;
+        vol_lut[i] = (int32_t)(powf(10.0f, db / 20.0f) * 65536.0f + 0.5f);
+    }
+    vol_lut[0] = 0;
+
     ESP_LOGI(TAG, "Firmware running — pair your phone now.");
 }

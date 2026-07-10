@@ -86,6 +86,15 @@ void bt_a2dp_sink_init(const char *device_name, bt_a2dp_data_cb_t data_cb)
     ESP_ERROR_CHECK(esp_avrc_tg_init());
     ESP_ERROR_CHECK(esp_avrc_tg_register_callback(bt_avrc_tg_cb));
 
+    /* Advertise VOLUME_CHANGE notification capability.
+     * Without this the phone doesn't know the sink supports
+     * absolute volume → falls back to stream-relative attenuation
+     * → enhancer starved of signal → fundamental leakage. */
+    esp_avrc_rn_evt_cap_mask_t evt_cap = {0};
+    esp_avrc_rn_evt_bit_mask_operation(ESP_AVRC_BIT_MASK_OP_SET, &evt_cap,
+                                        ESP_AVRC_RN_VOLUME_CHANGE);
+    ESP_ERROR_CHECK(esp_avrc_tg_set_rn_evt_cap(&evt_cap));
+
     /* ── A2DP sink ────────────────────────────────────────────── */
     ESP_ERROR_CHECK(esp_a2d_register_callback(bt_a2dp_event_cb));
     ESP_ERROR_CHECK(esp_a2d_sink_register_data_callback(bt_a2dp_data_cb));
