@@ -508,7 +508,6 @@ def curve_to_json(freqs: np.ndarray, gains_db: np.ndarray) -> list:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 FFT_N = 256  # window size for overlap-add FFT EQ
-FFT_GAIN_CLAMP = (0.25, 4.0)  # ±12 dB safety clamp on FFT per-bin gains
 FFT_RESIDUAL_THRESHOLD_DB = 1.0  # IIR only corrects where |residual| > this
 
 
@@ -532,30 +531,28 @@ def compute_fft_residual(
 
     This function:
       1. Samples the target curve at FFT bin center frequencies
-      2. Clamps to safe gain range (±12 dB)
-      3. Cubic-spline interpolates back to the eval grid as the FFT
+      2. Cubic-spline interpolates back to the eval grid as the FFT
          approximation (Hann window blends ~3 bins smoothly)
-      4. Subtracts to get the residual
-      5. Thresholds residual at ±1 dB
+      3. Subtracts to get the residual
+      4. Thresholds residual at ±1 dB
 
     Returns:
         fft_bin_freqs:  bin center frequencies (Hz)
-        fft_gains_linear: per-bin scalar gains (linear, clamped)
+        fft_gains_linear: per-bin scalar gains (linear)
         fft_approx_db: FFT approximation on the eval grid (dB)
         residual_db:   target - FFT approx, thresholded (dB)
     """
     # 1. Bin center frequencies
     fft_bin_freqs = np.arange(fft_n // 2 + 1, dtype=float) * fs / fft_n
 
-    # 2. Target curve sampled at bin centers, converted to linear gains, clamped.
+    # 2. Target curve sampled at bin centers, converted to linear gains.
     #    The DC bin (0 Hz) is pinned to 1.0 — there is no musical content at DC,
     #    and np.interp extrapolates an arbitrary value from the first eval point
     #    (~20 Hz).  A large DC gain would distort all bass frequencies through
     #    the Hann window's spectral leakage (main lobe ~750 Hz wide).
     target_at_bins = np.interp(fft_bin_freqs, freqs, target_db)
     target_at_bins[0] = 0.0  # 0 dB → linear gain = 1.0
-    gains_linear = np.clip(10.0 ** (target_at_bins / 20.0),
-                           FFT_GAIN_CLAMP[0], FFT_GAIN_CLAMP[1])
+    gains_linear = 10.0 ** (target_at_bins / 20.0)
     fft_gains_db = 20.0 * np.log10(np.maximum(gains_linear, 1e-12))
 
     # 3. Cubic spline interpolates the piecewise-constant bin gains back to

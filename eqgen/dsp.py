@@ -137,7 +137,6 @@ class BassEnhancerConfig:
     h3_amp: float = 1.0       # 3rd harmonic amplitude
     env_attack: float = 5.0    # ms
     env_release: float = 200.0 # ms
-    corr_limit: float = 20.0   # dB (legacy)
     fs: float = 44100.0        # sample rate
     limiter_release_ms: float = 50.0   # ms — output limiter release
     limiter_threshold: float = 1.0     # linear — peak threshold for harmonic attenuation

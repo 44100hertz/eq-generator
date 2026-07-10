@@ -5,12 +5,12 @@ The actual DSP processing is done in C (src/enhancer.so via ctypes).
 This module provides the offline design/validation tools:
   - BiquadQ28: Q4.28 coefficient quantization (mirrors C implementation)
   - ReciprocalLUT: 1/x lookup table for envelope normalization
-  - Utility helpers: float↔Q16 conversion, reorder_attenuation_first
+  - Utility helpers: float↔Q16 conversion
 """
 
 import numpy as np
 from dataclasses import dataclass
-from typing import Tuple, List
+from typing import List
 
 from eqgen.eq_fit import BiquadCoeffs
 
@@ -111,31 +111,6 @@ def q28_to_float(v: int) -> float:
 def quantize_biquads_q28(biquads: List[BiquadCoeffs]) -> List[BiquadQ28]:
     """Quantize float biquad list to Q4.28."""
     return [BiquadQ28.from_float(bc) for bc in biquads]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Cascade reordering — prevents intermediate overflow
-# ─────────────────────────────────────────────────────────────────────────────
-
-def reorder_attenuation_first(
-    biquads: List[BiquadCoeffs], bands: List[dict]
-) -> Tuple[List[BiquadCoeffs], List[dict]]:
-    """Reorder biquads so attenuation stages precede boost stages.
-
-    Prevents intermediate overflow in fixed-point cascades.
-    """
-    dc_gains = []
-    for bc in biquads:
-        num = bc.b0 + bc.b1 + bc.b2
-        den = 1.0 + bc.a1 + bc.a2
-        dc_gains.append(abs(num / den) if abs(den) > 1e-12 else 1.0)
-
-    indexed = list(enumerate(zip(biquads, bands, dc_gains)))
-    indexed.sort(key=lambda x: x[1][2])
-
-    result_bq = [bc for _, (bc, _, _) in indexed]
-    result_bands = [band for _, (_, band, _) in indexed]
-    return result_bq, result_bands
 
 
 # ─────────────────────────────────────────────────────────────────────────────

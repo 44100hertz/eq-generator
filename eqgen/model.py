@@ -192,49 +192,6 @@ def small_speaker(f: float) -> float:
 
 # ── Full preprocessing curve (mirrors Rust bass_enhancer_preprocess) ─
 
-def preprocess_eq_curve(
-    target_curve: dict,       # {freq: target_gain}
-    speaker_response: callable,
-    fc: float,
-    h2: float,
-    h3: float,
-) -> dict:
-    """Compute preprocessed EQ gains matching the Rust pipeline.
-
-    For each frequency in target_curve, computes G such that:
-        A(f, G) = target_curve[f]
-    where A is model_perceived_amplitude with the given speaker.
-
-    Below fc/2 the enhancer handles bass perception via harmonics —
-    EQ should stay flat there.
-    """
-    result = {}
-
-    for f, target in sorted(target_curve.items()):
-        S_f = speaker_response(f)
-        model_factor = model_perceived_amplitude(f, 1.0, fc, h2, h3, speaker_response)
-        G = target / model_factor if model_factor > 1e-12 else 0.01
-
-        bare_correction = target / S_f if S_f > 1e-12 else 0.01
-        G = min(G, bare_correction)
-
-        result[f] = G
-
-    # Below fc/2: hold correction flat at the model gain computed AT fc/2.
-    freqs_sorted = sorted(target_curve.keys())
-    target_at_fc2 = float(np.interp(fc / 2.0, freqs_sorted,
-                                     [target_curve[f] for f in freqs_sorted]))
-    S_fc2 = speaker_response(fc / 2.0)
-    model_g = model_perceived_amplitude(fc / 2.0, 1.0, fc, h2, h3, speaker_response)
-    flat_val = target_at_fc2 / model_g if model_g > 1e-12 else 0.01
-    flat_val = min(flat_val, target_at_fc2 / S_fc2 if S_fc2 > 1e-12 else 0.01)
-    for f in result:
-        if f <= fc / 2.0:
-            result[f] = flat_val
-
-    return dict(sorted(result.items()))
-
-
 # ── Analysis runs ─────────────────────────────────────────────────────
 
 def run_loudness_analysis():

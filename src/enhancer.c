@@ -92,9 +92,6 @@ void BassEnhancerCfg_init(BassEnhancerCfg *cfg,
     cfg->h2_amp_q16 = (int32_t)(h2_amp * Q16 + 0.5);
     cfg->h3_amp_q16 = (int32_t)(h3_amp * Q16 + 0.5);
 
-    /* Pre-gain clamp: [1/16, 16.0] = [-24, +24] dB range in Q16 */
-    if (pre_gain < 0.0625f) pre_gain = 0.0625f;
-    if (pre_gain > 16.0f)   pre_gain = 16.0f;
     cfg->pre_gain_q16 = (int32_t)(pre_gain * Q16 + (pre_gain >= 0.0f ? 0.5f : -0.5f));
 
     /* Limiter release coefficient */
@@ -269,13 +266,14 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
     int32_t lp_t2 = LPQ16_tick(&ch->lp_t2, eq_out);
     int32_t env_t2 = Env_tick(&ch->env_t2, lp_t2);
 
+    /* Floor envelope to 0.25 (Q16) → 1/env capped at 4.0 (+12 dB).
+       Prevents fundamental-leakage blow-up on quiet signals while
+       keeping full LUT resolution across the useful range. */
+    int32_t env_t2_norm = env_t2 > 16384 ? env_t2 : 16384;
     int32_t norm_t2;
     if (env_t2 > 6) {
-        uint32_t inv = ReciprocalLUT_lookup(lut, env_t2);
+        uint32_t inv = ReciprocalLUT_lookup(lut, env_t2_norm);
         norm_t2 = (int32_t)(((int64_t)lp_t2 * (int64_t)inv) >> 16);
-        /* Cap normalization gain at +12 dB — quiet signals amplify noise. */
-        if (norm_t2 >  262144) norm_t2 =  262144;  /* 4.0 in Q16 */
-        if (norm_t2 < -262144) norm_t2 = -262144;
     } else {
         norm_t2 = 0;
     }
@@ -294,13 +292,11 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
     int32_t lp_t3 = LPQ16_tick(&ch->lp_t3, eq_out);
     int32_t env_t3 = Env_tick(&ch->env_t3, lp_t3);
 
+    int32_t env_t3_norm = env_t3 > 16384 ? env_t3 : 16384;
     int32_t norm_t3;
     if (env_t3 > 6) {
-        uint32_t inv = ReciprocalLUT_lookup(lut, env_t3);
+        uint32_t inv = ReciprocalLUT_lookup(lut, env_t3_norm);
         norm_t3 = (int32_t)(((int64_t)lp_t3 * (int64_t)inv) >> 16);
-        /* Cap normalization gain at +12 dB — quiet signals amplify noise. */
-        if (norm_t3 >  262144) norm_t3 =  262144;
-        if (norm_t3 < -262144) norm_t3 = -262144;
     } else {
         norm_t3 = 0;
     }
@@ -334,10 +330,6 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
     }
     harm_hp = (int32_t)(((int64_t)harm_hp * (int64_t)lim_gain) >> 16);
     out = dry_hp + harm_hp;
-
-    /* Brick-wall clamp (±1.0 in Q16) */
-    if (out >  65536) out =  65536;
-    if (out < -65536) out = -65536;
 
     c3 = esp_cpu_get_cycle_count();
 

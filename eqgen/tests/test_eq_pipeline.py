@@ -30,17 +30,12 @@ from eqgen.eq_fit import (
 from eqgen.quantize import (
     BiquadQ28,
     quantize_biquads_q28,
-    reorder_attenuation_first,
     q28_to_float,
     ReciprocalLUT,
     float_to_q16,
 )
 from eqgen.dsp import butterworth_hp_mag, butterworth_lp_mag
 
-
-def _reorder_biquads(fit):
-    """Reorder biquad cascade in-place: attenuation before boost."""
-    fit.biquads, fit.bands = reorder_attenuation_first(fit.biquads, fit.bands)
 
 
 # ── Speaker models for testing ──────────────────────────────────────
@@ -106,9 +101,6 @@ def test_pipeline(name: str, speaker_fn, freqs, fs=44100.0, max_bands=6):
     if fit_max_err > 3.0:
         print(f"  ⚠️  Float fit error exceeds 3 dB — consider more bands")
 
-    # ── Step 2b: Reorder cascade ─────────────────────────────────────
-    _reorder_biquads(fit)
-    print(f"\n  Reordered cascade (attenuation-first)")
 
     # ── Step 3: Quantize to Q4.28 ───────────────────────────────────
     print(f"\n  ── Step 3: Quantize to Q4.28 ──")

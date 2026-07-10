@@ -272,7 +272,7 @@ def fit_eq_curve(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Convenience: fit to dict-based EQ curve (from model.preprocess_eq_curve)
+# Convenience: fit to dict-based EQ curve
 # ─────────────────────────────────────────────────────────────────────────────
 
 def fit_from_dict(
