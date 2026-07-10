@@ -219,6 +219,7 @@ def fit_eq_curve(
 
     cascade_db = np.zeros(n_eval)
     residual = eval_target.copy()
+    prev_rms_err = float(np.sqrt(np.mean(residual ** 2)))
 
     for i in range(max_bands):
         actionable = np.abs(residual)
@@ -241,6 +242,17 @@ def fit_eq_curve(
         if current_rms - best_err < 0.01 and current_rms < stop_db * 2.0:
             break
 
+        # Compute what the residual would look like with this band
+        pk_db = _peaking_response_db(f0, best_gain, best_Q, eval_freqs, fs)
+        new_cascade = cascade_db + pk_db
+        new_residual = eval_target - new_cascade
+
+        # Early-stop: reject band if RMS error increased (biquad made things
+        # worse overall, even if it reduced a single peak)
+        new_rms_err = float(np.sqrt(np.mean(new_residual ** 2)))
+        if new_rms_err > prev_rms_err:
+            break
+
         pk = design_peaking(f0, best_gain, best_Q, fs)
         result.biquads.append(pk)
         result.bands.append({
@@ -250,9 +262,9 @@ def fit_eq_curve(
             "Q": best_Q,
         })
 
-        pk_db = _peaking_response_db(f0, best_gain, best_Q, eval_freqs, fs)
-        cascade_db = cascade_db + pk_db
-        residual = eval_target - cascade_db
+        cascade_db = new_cascade
+        residual = new_residual
+        prev_rms_err = new_rms_err
 
     # Store residual on the original freqs for API compatibility
     result.residual_db = target_db - cascade_response_db(result.biquads, freqs, fs)

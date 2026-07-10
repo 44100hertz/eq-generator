@@ -25,6 +25,7 @@
 
 #include "eq_coeffs.h"
 #include "enhancer.h"
+#include "fft_eq.h"
 
 static volatile int g_running = 1;
 
@@ -60,6 +61,27 @@ int main(int argc, char *argv[]) {
     BassEnhancerCfg cfg;
     ReciprocalLUT lut;
 
+    float pre_gain_f = 1.0f;
+#ifdef EQGEN_PRE_GAIN_Q16
+    pre_gain_f = (float)EQGEN_PRE_GAIN_Q16 / 65536.0f;
+#endif
+
+    /* ── FFT hybrid EQ (if enabled) ─────────────────────────────── */
+    FftEq *fft_eq = NULL;
+#if EQGEN_FFT_BINS > 0
+    {
+        const float *fft_gains = eqgen_get_fft_gains((int)fs);
+        fft_eq = fft_eq_create(fft_gains);
+        if (!fft_eq) {
+            fprintf(stderr, "filter: FFT EQ allocation failed\n");
+        } else {
+            fprintf(stderr, "filter: FFT EQ enabled (%d bins)\n", EQGEN_FFT_BINS);
+        }
+        /* When FFT is active: apply pre_gain in float BEFORE Q16 conversion
+         * to prevent clipping from FFT boost.  Bypass it in the enhancer. */
+    }
+#endif
+
     BassEnhancerCfg_init(&cfg,
                          EQGEN_CUTOFF_HZ,
                          EQGEN_H2_AMP,
@@ -67,11 +89,7 @@ int main(int argc, char *argv[]) {
                          EQGEN_RELEASE_SECS,
                          fs,
                          EQGEN_LIMITER_RELEASE_SECS,
-#ifdef EQGEN_PRE_GAIN_Q16
-                         (float)EQGEN_PRE_GAIN_Q16 / 65536.0f,
-#else
-                         1.0f,
-#endif
+                         fft_eq ? 1.0f : pre_gain_f,  /* if FFT: float path handles it */
                          n_bq,
                          coeffs);
     ReciprocalLUT_init(&lut);
@@ -79,20 +97,55 @@ int main(int argc, char *argv[]) {
 
     fprintf(stderr, "filter: running at %.0f Hz\n", fs);
 
-    float buf[512]; /* stereo interleaved: L,R,L,R,...  256 frames = 5.8ms @ 44100 */
+    float buf_interleaved[256]; /* 128 stereo frames: L,R,L,R,... */
+    float buf_l[128];           /* left channel for FFT pass */
+    float buf_r[128];           /* right channel for FFT pass */
     size_t frame_sz = 2 * sizeof(float);
+    unsigned long frame_count = 0;
+    unsigned long partial_count = 0;
 
     while (g_running) {
-        size_t nread = fread(buf, frame_sz, 256, stdin);
+        size_t nread = fread(buf_interleaved, frame_sz, 128, stdin);
         if (nread == 0) {
             if (feof(stdin)) break;
             if (ferror(stdin)) { perror("filter: read error"); break; }
             continue;
         }
+        frame_count++;
+        if (nread != 128) {
+            partial_count++;
+            /* Zero-fill the rest so FFT EQ doesn't see stale data */
+            for (size_t i = nread; i < 128; i++) {
+                buf_interleaved[i * 2]     = 0.0f;
+                buf_interleaved[i * 2 + 1] = 0.0f;
+            }
+            if (partial_count <= 5 || partial_count % 1000 == 0) {
+                fprintf(stderr, "filter: partial read %zu/128 (frame %lu, count %lu)\n",
+                        nread, frame_count, partial_count);
+            }
+        }
 
+        /* Deinterleave input */
         for (size_t i = 0; i < nread; i++) {
-            float fl = buf[i * 2];
-            float fr = buf[i * 2 + 1];
+            buf_l[i] = buf_interleaved[i * 2];
+            buf_r[i] = buf_interleaved[i * 2 + 1];
+        }
+
+        /* ── Pass 1: FFT EQ (broad correction) ────────────────── */
+        if (fft_eq) {
+            fft_eq_process_frame(fft_eq, buf_l, buf_r, buf_l, buf_r);
+            /* Apply pre_gain before Q16 to prevent clipping from FFT boost.
+             * When FFT EQ is active, enhancer pre_gain is 1.0 (no-op). */
+            for (size_t i = 0; i < nread; i++) {
+                buf_l[i] *= pre_gain_f;
+                buf_r[i] *= pre_gain_f;
+            }
+        }
+
+        /* ── Pass 2: IIR biquad cascade + enhancer (surgical) ──── */
+        for (size_t i = 0; i < nread; i++) {
+            float fl = buf_l[i];
+            float fr = buf_r[i];
 
             /* float [-1,1] → Q16 */
             int32_t ql = (int32_t)(fl * 65536.0f);
@@ -107,11 +160,17 @@ int main(int argc, char *argv[]) {
             BassEnhancer_process_stereo(&enh, &ql, &qr);
 
             /* Q16 → float */
-            buf[i * 2]     = (float)ql / 65536.0f;
-            buf[i * 2 + 1] = (float)qr / 65536.0f;
+            buf_l[i] = (float)ql / 65536.0f;
+            buf_r[i] = (float)qr / 65536.0f;
         }
 
-        size_t nwritten = fwrite(buf, frame_sz, nread, stdout);
+        /* ── Interleave output ─────────────────────────────────── */
+        for (size_t i = 0; i < nread; i++) {
+            buf_interleaved[i * 2]     = buf_l[i];
+            buf_interleaved[i * 2 + 1] = buf_r[i];
+        }
+
+        size_t nwritten = fwrite(buf_interleaved, frame_sz, nread, stdout);
         if (nwritten < nread) {
             perror("filter: write error");
             break;
@@ -119,8 +178,10 @@ int main(int argc, char *argv[]) {
         fflush(stdout);
     }
 
+    if (fft_eq) fft_eq_destroy(fft_eq);
     free(eq_bqs_l);
     free(eq_bqs_r);
-    fprintf(stderr, "filter: done\n");
+    fprintf(stderr, "filter: done (%lu frames, %lu partial)\n",
+            frame_count, partial_count);
     return 0;
 }

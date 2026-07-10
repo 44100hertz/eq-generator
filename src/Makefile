@@ -13,7 +13,7 @@ CFLAGS   ?= -O2 -Wall -Wextra
 LDFLAGS_SO ?= -shared -fPIC -lm
 
 SOURCES        = enhancer.c enhancer_api.c
-HEADERS        = enhancer.h enhancer_api.h biquad_q28.h envelope.h dc_blocker.h eq_coeffs.h
+HEADERS        = enhancer.h enhancer_api.h biquad_q28.h envelope.h dc_blocker.h eq_coeffs.h fft_eq.h
 TARGET         = enhancer.so
 
 LADSPA_SOURCES = enhancer.c ladspa/ladspa_wrapper.c
@@ -24,10 +24,14 @@ LADSPA_INSTALL_DIR = $(HOME)/.ladspa
 TEST_SOURCES   = test_enhancer.c
 TEST_TARGET    = test_enhancer
 
-FILTER_SOURCES = filter.c enhancer.c enhancer_api.c
+FILTER_SOURCES = filter.c enhancer.c enhancer_api.c fft_eq.c
 FILTER_TARGET  = eqgen_filter
 
-.PHONY: all ladspa install-ladspa filter clean test
+BENCH_SOURCES  = bench_hybrid.c fft_eq.c enhancer.c
+BENCH_HEADERS  = fft_eq.h enhancer.h biquad_q28.h envelope.h dc_blocker.h
+BENCH_TARGET   = bench_hybrid
+
+.PHONY: all ladspa install-ladspa filter bench clean test
 
 all: $(TARGET) $(LADSPA_TARGET) $(FILTER_TARGET)
 
@@ -48,8 +52,14 @@ $(FILTER_TARGET): $(FILTER_SOURCES) $(HEADERS)
 
 filter: $(FILTER_TARGET)
 
+$(BENCH_TARGET): $(BENCH_SOURCES) $(BENCH_HEADERS)
+	$(CC) $(CFLAGS) -I. -o $@ $(BENCH_SOURCES) -lm
+
+bench: $(BENCH_TARGET)
+	./$(BENCH_TARGET)
+
 clean:
-	rm -f $(TARGET) $(LADSPA_TARGET) $(TEST_TARGET) $(FILTER_TARGET)
+	rm -f $(TARGET) $(LADSPA_TARGET) $(TEST_TARGET) $(FILTER_TARGET) $(BENCH_TARGET)
 
 test: $(TEST_TARGET)
 	./$(TEST_TARGET)

@@ -48,7 +48,7 @@ except ImportError:
 sys.path.insert(0, str(ROOT))
 
 from eqgen.presets import Preset, PresetManager, PRESETS_DIR, MAX_IIR_BANDS
-from eqgen.pipeline import run_pipeline
+from eqgen.pipeline import run_pipeline, compute_fft_residual, FFT_N
 from eqgen.eq_fit import cascade_response_db, BiquadCoeffs, fit_eq_curve
 from eqgen.quantize import q28_to_float, quantize_biquads_q28
 
@@ -92,22 +92,32 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
         fs = detailed["sample_rate"]
         max_gain_db = detailed.get("max_gain_db", 0.0)
 
-        # IIR fit
-        pre_gain = 10.0 ** (max_gain_db / 20.0) if max_gain_db > 0.0 else 1.0
-        shifted_db = gains_db - max_gain_db if max_gain_db > 0.0 else gains_db
-
-        fit = fit_eq_curve(freqs, shifted_db, fs, max_bands=preset.max_bands,
-                           min_freq=freqs[0], max_freq=freqs[-1],
-                           min_peaking_freq=freqs[0])
-        bq_q28 = quantize_biquads_q28(fit.biquads)
-        q28_floats = [BiquadCoeffs(b0=q28_to_float(b.b0), b1=q28_to_float(b.b1),
-                                   b2=q28_to_float(b.b2), a1=q28_to_float(b.a1),
-                                   a2=q28_to_float(b.a2)) for b in bq_q28]
-        fitted_db = cascade_response_db(q28_floats, freqs, fs)
-
-        # High-res IIR response
+        # ── FFT + IIR hybrid EQ: FFT handles broad shape, IIR fits narrow residual ─
         freqs_hires = np.logspace(np.log10(freqs[0]), np.log10(freqs[-1]), 500)
-        fitted_db_hires = cascade_response_db(q28_floats, freqs_hires, fs)
+
+        fft_bin_freqs, fft_gains_linear, fft_approx_db, residual_db = \
+            compute_fft_residual(freqs, gains_db, fs, FFT_N)
+
+        # FFT gains in dB for visualization
+        fft_gains_db = 20.0 * np.log10(np.maximum(fft_gains_linear, 1e-12))
+
+        # Fit IIR biquads to the self-normalizing FFT residual
+        fit_residual = fit_eq_curve(freqs, residual_db, fs,
+                                    max_bands=preset.max_bands,
+                                    min_freq=freqs[0], max_freq=freqs[-1],
+                                    min_peaking_freq=freqs[0])
+        bq_q28_res = quantize_biquads_q28(fit_residual.biquads)
+        q28_floats_res = [BiquadCoeffs(b0=q28_to_float(b.b0), b1=q28_to_float(b.b1),
+                                       b2=q28_to_float(b.b2), a1=q28_to_float(b.a1),
+                                       a2=q28_to_float(b.a2)) for b in bq_q28_res]
+        iir_residual_db = cascade_response_db(q28_floats_res, freqs_hires, fs)
+
+        # Combined FFT + IIR response on hi-res grid
+        from scipy.interpolate import interp1d
+        fft_interp = interp1d(fft_bin_freqs, fft_gains_db, kind='cubic',
+                              bounds_error=False, fill_value='extrapolate')
+        fft_approx_hires = fft_interp(freqs_hires)
+        combined_db = fft_approx_hires + iir_residual_db
 
         # Raw measurement (as-is, no level shift) and fitted target line.
         # The target is always pink or brown noise — a straight line in dB
@@ -144,7 +154,7 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
             "status": "complete",
             "task_id": task_id,
             "metrics": {
-                "n_bands": len(fit.bands),
+                "n_bands": len(fit_residual.bands),
                 "rms_err": float(np.sqrt(np.mean(err_arr ** 2))),
                 "bass_err": float(np.max(np.abs(err_arr[err_freqs <= 250]))),
                 "mid_err": float(np.max(np.abs(err_arr[(err_freqs > 250) & (err_freqs <= 2000)]))),
@@ -158,8 +168,14 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
             "targ_smoothed": detailed["target_resampled"],
             "correction": [{"freq": float(f), "db": float(d)} for f, d in zip(freqs, gains_db)],
             "error": error,
-            "iir_fit": [{"freq": float(f), "db": float(d + max_gain_db)}
-                        for f, d in zip(freqs_hires, fitted_db_hires)],
+            "iir_fit": [{"freq": float(f), "db": float(d)}
+                        for f, d in zip(freqs_hires, iir_residual_db)],
+            "fft_response": [{"freq": float(f), "db": float(d)}
+                             for f, d in zip(fft_bin_freqs, fft_gains_db) if f > 0],
+            "combined": [{"freq": float(f), "db": float(d)}
+                         for f, d in zip(freqs_hires, combined_db)],
+            "prediction_error": [{"freq": float(f), "db": float(d)}
+                                 for f, d in zip(freqs_hires, combined_db - np.interp(freqs_hires, freqs, gains_db))],
         }
 
     except Exception as e:
@@ -202,7 +218,7 @@ def _apply_preset_to_system(preset_dict: dict, task_id: str):
 
         # 1-2. Run pipeline + IIR fit (delegates to wire.py)
         (eq_freqs, bq_q28_44, bq_q28_48, bands_44, bands_48,
-         cfg, coeffs_flat) = run_full_pipeline(
+         cfg, coeffs_flat, fft_gains_44, fft_gains_48) = run_full_pipeline(
             meas_paths=meas_paths,
             target_path=target_path,
             noise_path=noise_path,
@@ -219,7 +235,8 @@ def _apply_preset_to_system(preset_dict: dict, task_id: str):
         # 3. Generate eq_coeffs.h + sfx_data.h (delegates to wire.py)
         generate_eq_header(bq_q28_44, bq_q28_48, bands_44, bands_48, cfg,
                           bluetooth_id=preset.bluetooth_id or None,
-                          default_volume=preset.default_volume)
+                          default_volume=preset.default_volume,
+                          fft_gains_44=fft_gains_44, fft_gains_48=fft_gains_48)
         generate_sfx_header()
         logger.info("Wrote eq_coeffs.h (%d biquads)", len(bands_44))
 
@@ -306,7 +323,7 @@ def _flash_esp32(preset_dict: dict, task_id: str):
 
         # 1. Run pipeline + IIR fit
         (eq_freqs, bq_q28_44, bq_q28_48, bands_44, bands_48,
-         cfg, coeffs_flat) = run_full_pipeline(
+         cfg, coeffs_flat, fft_gains_44, fft_gains_48) = run_full_pipeline(
             meas_paths=meas_paths,
             target_path=target_path,
             noise_path=noise_path,
@@ -323,7 +340,8 @@ def _flash_esp32(preset_dict: dict, task_id: str):
         # 2. Generate eq_coeffs.h + sfx_data.h
         generate_eq_header(bq_q28_44, bq_q28_48, bands_44, bands_48, cfg,
                           bluetooth_id=preset.bluetooth_id or None,
-                          default_volume=preset.default_volume)
+                          default_volume=preset.default_volume,
+                          fft_gains_44=fft_gains_44, fft_gains_48=fft_gains_48)
         generate_sfx_header()
         logger.info("Wrote eq_coeffs.h (%d biquads)", len(bands_44))
 
@@ -1195,12 +1213,15 @@ function renderResults() {
     return;
   }
   const n_bands = (r.metrics && r.metrics.n_bands) || '—';
+  const fft_bin_hz = r.metrics && r.metrics.fs ? Math.round(r.metrics.fs / 256) : 187;
 
   resultsDiv.innerHTML = `
     <div class="chart"><h3>1. Measurement &amp; Target</h3><canvas id="cMeas"></canvas>
-      <div class="legend"><span><i class="swatch" style="background:#58a6ff"></i> Measurement (Welch FFT)</span><span><i class="swatch" style="background:#58a6ff;height:0;border-bottom:1px dashed #58a6ff"></i> Meas. smoothed</span><span><i class="swatch" style="background:#d2991d"></i> Target (fit)</span></div></div>
-    <div class="chart"><h3>2. IIR Fit vs Ideal Correction (${n_bands} bands, greedy biquad design)</h3><canvas id="cIir"></canvas>
-      <div class="legend"><span><i class="swatch" style="background:#3fb950"></i> Ideal correction (from measurement)</span><span><i class="swatch" style="background:#bc8cff;height:1px;border:1px dashed #bc8cff"></i> IIR biquad fit (computational design)</span></div></div>
+      <div class="legend"><span><i class="swatch" style="background:#58a6ff"></i> Raw measurement</span><span><i class="swatch" style="background:#58a6ff;height:0;border-bottom:1px dashed #58a6ff"></i> Meas. smoothed</span><span><i class="swatch" style="background:#d2991d"></i> Target (fit)</span></div></div>
+    <div class="chart"><h3>2. IIR + FFT Combined (${n_bands} biquad bands, 256 FFT bins @ ${fft_bin_hz} Hz)</h3><canvas id="cFft"></canvas>
+      <div class="legend"><span><i class="swatch" style="background:rgba(63,185,80,0.55)"></i> Correction curve</span><span><i class="swatch" style="background:rgba(88,166,255,0.65);height:0;border:1px dashed rgba(88,166,255,0.65)"></i> FFT (broad)</span><span><i class="swatch" style="background:rgba(188,140,255,0.55);height:0;border:1px dashed rgba(188,140,255,0.55)"></i> IIR (surgical)</span><span><i class="swatch" style="background:rgba(255,120,80,0.8);height:3px"></i> Combined</span></div></div>
+    <div class="chart"><h3>3. Predicted Response Error (combined − correction, ideally flat at 0 dB)</h3><canvas id="cError"></canvas>
+      <div class="legend"><span><i class="swatch" style="background:#f85149"></i> Residual error</span></div></div>
   `;
 
   requestAnimationFrame(() => {
@@ -1210,7 +1231,15 @@ function renderResults() {
         {name:'Meas. smoothed',data:r.meas_smoothed,color:'#58a6ff',dash:[4,2],width:1.2},
         {name:'Target (fit)',data:r.targ_smoothed,color:'#d2991d',width:1.8},
       ], 'dB');
-      drawChart('cIir', [{name:'Ideal',data:r.correction,color:COLORS[1]},{name:'IIR fit',data:r.iir_fit,color:COLORS[4],dash:[6,3],width:1.4}], 'dB');
+      drawChart('cFft', [
+        {name:'Correction',data:r.correction,color:'rgba(63,185,80,0.55)',width:1.8},
+        {name:'FFT (broad)',data:r.fft_response,color:'rgba(88,166,255,0.65)',dash:[4,2],width:2.2},
+        {name:'IIR (surgical)',data:r.iir_fit,color:'rgba(188,140,255,0.55)',dash:[6,3],width:1.2},
+        {name:'Combined',data:r.combined,color:'rgba(255,120,80,0.8)',width:2.4},
+      ], 'dB');
+      drawChart('cError', [
+        {name:'Residual error',data:r.prediction_error,color:COLORS[2],width:1.4},
+      ], 'dB', {yMin: -3, yMax: 3});
     });
   });
 }

@@ -1,0 +1,19 @@
+{
+  "name": "new-preset",
+  "description": "",
+  "measurements": [
+    "measurements/lunchbox/measured.wav"
+  ],
+  "target": "measurements/lunchbox/target.wav",
+  "noise": "measurements/lunchbox/noise.wav",
+  "fc": 60,
+  "h2": 0.5,
+  "h3": 1,
+  "max_bands": 12,
+  "smooth_exponent": 1,
+  "release": 0.2,
+  "limiter_release": 0.049,
+  "bluetooth_id": "",
+  "high_rolloffs": [],
+  "low_rolloffs": []
+}
