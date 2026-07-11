@@ -22,7 +22,6 @@ from typing import Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from eqgen.eq_fit import BiquadCoeffs, cascade_response_db, fit_eq_curve
-from eqgen.quantize import BiquadQ28, q28_to_float, quantize_biquads_q28
 from eqgen.presets import MAX_IIR_BANDS
 from eqgen import enhancer_ffi
 from eqgen.dsp import first_order_lp_mag
@@ -606,17 +605,17 @@ def design_eq(
     max_bands: int = MAX_IIR_BANDS,
     fft_n: int = 0,
     min_peaking_freq: float = 0.0,
-) -> Tuple[List[int], List[dict], np.ndarray, np.ndarray, np.ndarray]:
-    """Design a quantized IIR EQ to match a target curve.
+) -> Tuple[List[float], List[dict], np.ndarray, np.ndarray, np.ndarray]:
+    """Design an IIR EQ to match a target curve.
 
     When fft_n > 0 (FFT hybrid mode), the IIR biquads are fitted to
     the *residual* after subtracting the FFT's broad correction.
     The FFT handles the overall shape at coarse bin resolution;
     the IIR surgically corrects narrow peaks and dips.
 
-    Returns (coeffs_flat_q28, bands, freqs, fit_target_db, fitted_db).
+    Returns (coeffs_flat, bands, freqs, fit_target_db, fitted_db).
     fit_target_db is the curve actually fitted (full target or residual).
-    coeffs_flat_q28 is a flat list of int32 Q4.28 coefficients:
+    coeffs_flat is a flat list of float coefficients:
     [b0, b1, b2, a1, a2, b0, b1, b2, a1, a2, ...].
     """
     if fft_n > 0:
@@ -633,15 +632,11 @@ def design_eq(
                        min_freq=freqs[0], max_freq=freqs[-1],
                        min_peaking_freq=min_peaking_freq if min_peaking_freq > 0 else freqs[0])
 
-    bq_q28 = quantize_biquads_q28(fit.biquads)
     coeffs = []
-    for bq in bq_q28:
-        coeffs.extend([bq.b0, bq.b1, bq.b2, bq.a1, bq.a2])
+    for bc in fit.biquads:
+        coeffs.extend([bc.b0, bc.b1, bc.b2, bc.a1, bc.a2])
 
-    q28_floats = [BiquadCoeffs(b0=q28_to_float(b.b0), b1=q28_to_float(b.b1),
-                               b2=q28_to_float(b.b2), a1=q28_to_float(b.a1),
-                               a2=q28_to_float(b.a2)) for b in bq_q28]
-    fitted_db = cascade_response_db(q28_floats, freqs, fs)
+    fitted_db = cascade_response_db(fit.biquads, freqs, fs)
 
     return coeffs, fit.bands, freqs, fit_target, fitted_db
 
@@ -650,18 +645,18 @@ def design_eq(
 # Default EQ coefficients (flat 3-HP cascade)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def build_default_eq_coeffs(fs: float = 44100.0) -> List[int]:
-    """Build a flat 3-HP-cascade default EQ as Q4.28 int list."""
+def build_default_eq_coeffs(fs: float = 44100.0) -> List[float]:
+    """Build a flat 3-HP-cascade default EQ as float list."""
     coeffs = []
     SQRT2 = np.sqrt(2.0)
     for fc in [25, 35, 45]:
         omega = np.tan(np.pi * fc / fs)
         c = 1.0 + SQRT2 * omega + omega * omega
-        b0 = int(np.round((1.0 / c) * (1 << 28)))
-        b1 = int(np.round((-2.0 / c) * (1 << 28)))
-        b2 = int(np.round((1.0 / c) * (1 << 28)))
-        a1 = int(np.round((2.0 * (omega * omega - 1.0) / c) * (1 << 28)))
-        a2 = int(np.round(((1.0 - SQRT2 * omega + omega * omega) / c) * (1 << 28)))
+        b0 = 1.0 / c
+        b1 = -2.0 / c
+        b2 = 1.0 / c
+        a1 = (2.0 * (omega * omega - 1.0)) / c
+        a2 = (1.0 - SQRT2 * omega + omega * omega) / c
         coeffs.extend([b0, b1, b2, a1, a2])
     return coeffs
 
@@ -767,7 +762,7 @@ def compute_smart_volume_curves(
 def process_track(
     input_path: str,
     output_path: str,
-    coeffs_q28: List[int],
+    coeffs: List[float],
     n_biquads: int,
     cutoff_hz: float = 60.0,
     h2: float = 0.5,
@@ -799,7 +794,7 @@ def process_track(
         cutoff_hz=cutoff_hz, h2_amp=h2, h3_amp=h3,
         release_secs=release_secs,
         pre_gain=pre_gain,
-        fs=44100.0, coeffs_q28=coeffs_q28)
+        fs=44100.0, coeffs=coeffs)
 
     out_data = bytearray(len(pcm))
     peak_in = 0

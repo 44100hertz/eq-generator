@@ -5,6 +5,8 @@
  *
  * The DSP chain runs at compile-time from eq_coeffs.h.
  * To change the EQ curve, re-run the desktop export tool and re-flash.
+ *
+ * All DSP is float now — no more Q16/Q28 integer math.
  */
 
 #include <math.h>
@@ -33,13 +35,12 @@ static const char *TAG = "eqgen";
 /* ── DSP instance (globally accessible from the BT callback) ──── */
 
 static BassEnhancer      enhancer;
-static BiquadQ28         eq_bqs_left[EQGEN_N_BIQUADS];
-static BiquadQ28         eq_bqs_right[EQGEN_N_BIQUADS];
-static ReciprocalLUT     rec_lut;
+static Biquad             eq_bqs_left[EQGEN_N_BIQUADS];
+static Biquad             eq_bqs_right[EQGEN_N_BIQUADS];
 
 #if EQGEN_FFT_BINS > 0
 static FftEq            *fft_eq;
-static float             fft_pre_gain;   /* pre-gain applied in float before Q16 */
+static float             fft_pre_gain;   /* pre-gain applied in float before biquads */
 #endif
 
 /* ── Track the last I2S/DSP sample rate ───────────────────────── */
@@ -52,8 +53,8 @@ static int dsp_rate = 0;
 static volatile int sfx_pending = 0;  /* 1=connected, 2=disconnected */
 static volatile uint32_t sfx_event_ms = 0;  /* last event timestamp (ms) */
 
-/* ── Volume LUT: maps 0..127 → Q16 gain (dB-linear) ────────── */
-static int32_t vol_lut[128];
+/* ── Volume LUT: maps 0..127 → float gain (dB-linear) ────────── */
+static float vol_lut[128];
 static uint8_t last_vol = 255;  /* 255 = uninitialised, forces first update */
 
 /* ────────────────────────────────────────────────────────────────
@@ -62,22 +63,16 @@ static uint8_t last_vol = 255;  /* 255 = uninitialised, forces first update */
 
 static void dsp_init(int rate)
 {
-    const int32_t *coeffs = eqgen_get_coeffs(rate);
+    const float *coeffs = eqgen_get_coeffs(rate);
     float fs = (float)eqgen_get_fs(rate);
 
-    ReciprocalLUT_init(&rec_lut);
-
 #if EQGEN_FFT_BINS > 0
-    /* Pre-gain computed from correction curve peak (eq_coeffs.h).
-     * When FFT EQ is active: apply in float BEFORE Q16 conversion
-     * to prevent clipping from FFT boost. Bypass it in the enhancer. */
-#ifdef EQGEN_PRE_GAIN_Q16
-    fft_pre_gain = (float)EQGEN_PRE_GAIN_Q16 / 65536.0f;
+#ifdef EQGEN_PRE_GAIN
+    fft_pre_gain = EQGEN_PRE_GAIN;
 #else
     fft_pre_gain = 1.0f;
 #endif
 
-    /* Initialize FFT EQ with per-bin gains for this sample rate */
     const float *fft_gains = eqgen_get_fft_gains(rate);
     if (fft_eq) fft_eq_destroy(fft_eq);
     fft_eq = fft_eq_create(fft_gains);
@@ -86,9 +81,6 @@ static void dsp_init(int rate)
     }
 #endif
 
-    /* Set up DSP configuration from eq_coeffs.h defines.
-     * When FFT is active: pre_gain passed to enhancer is 1.0
-     * (the real pre-gain is applied in float before Q16 conversion). */
     BassEnhancerCfg cfg;
     BassEnhancerCfg_init(&cfg,
                          EQGEN_CUTOFF_HZ,
@@ -97,21 +89,20 @@ static void dsp_init(int rate)
                          EQGEN_RELEASE_SECS,
                          fs,
                          EQGEN_LIMITER_RELEASE_SECS,
-#if defined(EQGEN_PRE_GAIN_Q16) && EQGEN_FFT_BINS == 0
-                         (float)EQGEN_PRE_GAIN_Q16 / 65536.0f,
+#if defined(EQGEN_PRE_GAIN) && EQGEN_FFT_BINS == 0
+                         EQGEN_PRE_GAIN,
 #else
                          1.0f,
 #endif
                          EQGEN_N_BIQUADS,
                          coeffs);
 
-    BassEnhancer_init(&enhancer, &cfg, &rec_lut,
+    BassEnhancer_init(&enhancer, &cfg,
                       eq_bqs_left, eq_bqs_right);
 
-    /* Configure loudness shelf (corner: 200 Hz, max boost: 8 dB).
-     * Shelf starts at 0 dB — updated on first volume change. */
+    /* Configure loudness shelf (corner: 200 Hz, max boost: 8 dB). */
     BassEnhancerCfg_set_loudness(&cfg, EQGEN_LOUDNESS_FC_HZ, fs, 0.0f);
-    enhancer.cfg = cfg;  /* copy back the updated config */
+    enhancer.cfg = cfg;
 
     dsp_rate = rate;
 
@@ -126,7 +117,7 @@ static void dsp_init(int rate)
 #endif
 }
 
-/* ── SFX playback helper — batch-write to avoid per-sample DMA overhead ── */
+/* ── SFX playback helper ────────────────────────────────────────── */
 
 #define SFX_BATCH 256  /* stereo frames per DMA write */
 #define SFX_FADE   200  /* samples to fade in/out */
@@ -135,35 +126,36 @@ static void play_sfx(const int16_t *mono, uint32_t n_samples, int rate)
 {
     int16_t stereo[SFX_BATCH * 2];
 
-    /* Read AVRCP absolute volume once for the SFX duration.
-     * Q16 gain: 0=mute, 65536=unity (vol 127). */
     uint8_t vol = bt_a2dp_get_volume();
-    int32_t vol_q16 = vol ? ((int32_t)vol << 16) / 127 : 0;
+    float vol_f = vol ? (float)vol / 127.0f : 0.0f;
 
     for (uint32_t off = 0; off < n_samples; off += SFX_BATCH) {
         uint32_t chunk = SFX_BATCH;
         if (off + chunk > n_samples) chunk = n_samples - off;
 
         for (uint32_t i = 0; i < chunk; i++) {
-            int32_t s = mono[off + i];
-            s = s >> 2;  /* −12 dB */
+            float s = (float)mono[off + i] / 32768.0f;  /* int16 → float */
+            s *= 0.25f;  /* −12 dB */
 
-            /* Fade in/out to avoid amplitude discontinuity */
+            /* Fade in/out */
             uint32_t pos = off + i;
             if (pos < SFX_FADE) {
-                s = (s * (int32_t)pos) / SFX_FADE;
+                s *= (float)pos / (float)SFX_FADE;
             } else if (pos >= n_samples - SFX_FADE) {
-                s = (s * (int32_t)(n_samples - 1 - pos)) / SFX_FADE;
+                s *= (float)(n_samples - 1 - pos) / (float)SFX_FADE;
             }
 
             /* Apply BT system volume */
-            s = (s * vol_q16) >> 16;
+            s *= vol_f;
 
-            stereo[i * 2]     = (int16_t)s;
-            stereo[i * 2 + 1] = (int16_t)s;
+            /* Clamp and convert to int16 */
+            int32_t si = (int32_t)(s * 32768.0f);
+            if (si >  32767) si =  32767;
+            if (si < -32768) si = -32768;
+
+            stereo[i * 2]     = (int16_t)si;
+            stereo[i * 2 + 1] = (int16_t)si;
         }
-        /* DMA backpressure (portMAX_DELAY) paces writes at the I2S rate.
-         * No busy-wait needed — the DMA buffer acts as a FIFO. */
         i2s_out_write(stereo, chunk, NULL);
     }
     (void)rate;
@@ -187,18 +179,11 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
 {
     /* ── Play pending SFX before anything else ── */
     if (sfx_pending) {
-        /* Debounce: wait 200ms after last event for rapid-fire
-         * connect/disconnect cycles to settle (common in A2DP init).
-         * Audio data is NOT discarded during the wait — it flows through
-         * normally.  The SFX is simply deferred until the debounce
-         * timer expires. */
         int64_t age_ms = ((int64_t)esp_timer_get_time() / 1000) - (int64_t)sfx_event_ms;
         if (age_ms >= 200) {
             int pending = sfx_pending;
             sfx_pending = 0;
 
-            /* On connect (audio may start soon): init I2S at BT rate.
-             * On disconnect (audio already stopped): use last known rate. */
             int play_rate = (i2s_rate > 0) ? i2s_rate : rate;
             if (play_rate != i2s_rate) {
                 i2s_out_init(play_rate);
@@ -231,15 +216,13 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
     }
 
 #if EQGEN_FFT_BINS > 0
-    /* ── FFT hybrid path: accumulate → FFT EQ → IIR + enhancer ── */
     static float  fft_buf_l[EQGEN_FFT_HOP];
     static float  fft_buf_r[EQGEN_FFT_HOP];
     static float  fft_out_l[EQGEN_FFT_HOP];
     static float  fft_out_r[EQGEN_FFT_HOP];
     static int    fft_buf_count = 0;
-    static int    fft_buf_rate = 0;  /* to detect rate changes */
+    static int    fft_buf_rate = 0;
 
-    /* On rate change: discard partial FFT buffer (stale rate data) */
     if (rate != fft_buf_rate) {
         fft_buf_count = 0;
         fft_buf_rate = rate;
@@ -254,36 +237,31 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
     const int16_t *in = (const int16_t *)data;
     uint32_t frames = len / 4;   /* 2 channels × 2 bytes */
 
-    /* Read AVRCP absolute volume once per chunk; map through dB LUT.
-     * Also detect volume changes for smart volume interpolation. */
     uint8_t vol = bt_a2dp_get_volume();
     if (vol != last_vol) {
         update_smart_volume(rate, vol);
     }
-    int32_t vol_q16 = vol_lut[vol];
+    float vol_f = vol_lut[vol];
 
 #if EQGEN_FFT_BINS > 0
     for (uint32_t i = 0; i < frames; i++) {
-        /* Accumulate: int16 → float normalized to [-1, 1] */
+        /* Accumulate: int16 → float [-1, 1] */
         fft_buf_l[fft_buf_count] = (float)in[i * 2]     / 32768.0f;
         fft_buf_r[fft_buf_count] = (float)in[i * 2 + 1] / 32768.0f;
         fft_buf_count++;
 
         if (fft_buf_count == EQGEN_FFT_HOP) {
-            /* Process the hop-sized buffer through FFT EQ */
             if (fft_eq) {
                 fft_eq_process_frame(fft_eq, fft_buf_l, fft_buf_r,
                                      fft_out_l, fft_out_r);
             } else {
-                /* FFT alloc failed earlier — pass through */
                 for (int j = 0; j < EQGEN_FFT_HOP; j++) {
                     fft_out_l[j] = fft_buf_l[j];
                     fft_out_r[j] = fft_buf_r[j];
                 }
             }
 
-            /* Apply pre-gain in float before Q16 conversion to
-             * prevent clipping from FFT boosts in biquad cascade. */
+            /* Apply pre-gain in float before biquads */
             for (int j = 0; j < EQGEN_FFT_HOP; j++) {
                 fft_out_l[j] *= fft_pre_gain;
                 fft_out_r[j] *= fft_pre_gain;
@@ -291,30 +269,24 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
 
             /* Feed FFT output through IIR biquads + bass enhancer */
             for (int j = 0; j < EQGEN_FFT_HOP; j++) {
-                int32_t ql = (int32_t)(fft_out_l[j] * 32768.0f) << 1;
-                int32_t qr = (int32_t)(fft_out_r[j] * 32768.0f) << 1;
+                float l = fft_out_l[j];
+                float r = fft_out_r[j];
 
-                /* Clamp to Q16 range */
-                if (ql >  65535) ql =  65535;
-                if (ql < -65536) ql = -65536;
-                if (qr >  65535) qr =  65535;
-                if (qr < -65536) qr = -65536;
+                BassEnhancer_process_stereo(&enhancer, &l, &r);
 
-                BassEnhancer_process_stereo(&enhancer, &ql, &qr);
+                /* Apply BT system volume */
+                l *= vol_f;
+                r *= vol_f;
 
-                /* Apply BT system volume while still in Q16 */
-                ql = (ql * vol_q16) >> 16;
-                qr = (qr * vol_q16) >> 16;
+                /* float → int16, clamp */
+                int32_t li = (int32_t)(l * 32768.0f);
+                int32_t ri = (int32_t)(r * 32768.0f);
+                if (li >  32767) li =  32767;
+                if (li < -32768) li = -32768;
+                if (ri >  32767) ri =  32767;
+                if (ri < -32768) ri = -32768;
 
-                /* Q16 → int16 (right-shift by 1, clamp) */
-                ql >>= 1;
-                qr >>= 1;
-                if (ql >  32767) ql =  32767;
-                if (ql < -32768) ql = -32768;
-                if (qr >  32767) qr =  32767;
-                if (qr < -32768) qr = -32768;
-
-                i2s_out_write_stereo((int16_t)ql, (int16_t)qr);
+                i2s_out_write_stereo((int16_t)li, (int16_t)ri);
             }
 
             fft_buf_count = 0;
@@ -323,25 +295,25 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
 #else
     /* ── No-FFT path: sample-by-sample IIR + enhancer ── */
     for (uint32_t i = 0; i < frames; i++) {
-        /* int16 → Q16 (left-shift by 1) */
-        int32_t l = ((int32_t)in[i * 2])     << 1;
-        int32_t r = ((int32_t)in[i * 2 + 1]) << 1;
+        /* int16 → float [-1, 1] */
+        float l = (float)in[i * 2]     / 32768.0f;
+        float r = (float)in[i * 2 + 1] / 32768.0f;
 
         BassEnhancer_process_stereo(&enhancer, &l, &r);
 
-        /* Apply BT system volume while still in Q16 for precision */
-        l = (l * vol_q16) >> 16;
-        r = (r * vol_q16) >> 16;
+        /* Apply BT system volume */
+        l *= vol_f;
+        r *= vol_f;
 
-        /* Q16 → int16 (right-shift by 1, clamp) */
-        l >>= 1;
-        r >>= 1;
-        if (l >  32767) l =  32767;
-        if (l < -32768) l = -32768;
-        if (r >  32767) r =  32767;
-        if (r < -32768) r = -32768;
+        /* float → int16, clamp */
+        int32_t li = (int32_t)(l * 32768.0f);
+        int32_t ri = (int32_t)(r * 32768.0f);
+        if (li >  32767) li =  32767;
+        if (li < -32768) li = -32768;
+        if (ri >  32767) ri =  32767;
+        if (ri < -32768) ri = -32768;
 
-        i2s_out_write_stereo((int16_t)l, (int16_t)r);
+        i2s_out_write_stereo((int16_t)li, (int16_t)ri);
     }
 #endif
 
@@ -366,30 +338,25 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
 
 static void update_smart_volume(int rate, uint8_t vol)
 {
-    /* Only meaningful if DSP is initialised */
     if (dsp_rate <= 0) return;
 
-    float pg_loud = (float)EQGEN_PRE_GAIN_Q16 / 65536.0f;
+    float pg_loud = 1.0f;
+#ifdef EQGEN_PRE_GAIN
+    pg_loud = EQGEN_PRE_GAIN;
+#endif
 
-    /* ── Shared interpolation (identical to desktop filter) ── */
     SmartVolumeParams svp;
     smart_volume_compute(vol, pg_loud, &svp);
 
-    /* ── Apply to enhancer ────────────────────────────────── */
 #if EQGEN_FFT_BINS > 0
-    /* FFT path: pre_gain is applied in float before Q16 conversion;
-     * the enhancer itself sees unity pre_gain. */
     fft_pre_gain = svp.fft_pre_gain;
-    BassEnhancer_update_params(&enhancer, svp.h2_q16, svp.h3_q16,
-                               -1, svp.boost_q16, svp.bleed_q16);
+    BassEnhancer_update_params(&enhancer, svp.h2_amp, svp.h3_amp,
+                               NAN, svp.boost, svp.bleed);
 #else
-    BassEnhancer_update_params(&enhancer, svp.h2_q16, svp.h3_q16,
-                               svp.pg_q16, svp.boost_q16, svp.bleed_q16);
+    BassEnhancer_update_params(&enhancer, svp.h2_amp, svp.h3_amp,
+                               svp.pre_gain, svp.boost, svp.bleed);
 #endif
 
-    /* ── Rebuild volume LUT: offset by current shelf dB so that
-     *    midrange loudness = pre_gain_loud × LUT_base, same as
-     *    without smart volume.  Bass gets the full shelf boost.  ── */
     smart_volume_rebuild_lut(vol_lut, svp.shelf_db);
 
     last_vol = vol;
@@ -397,11 +364,11 @@ static void update_smart_volume(int rate, uint8_t vol)
     ESP_LOGI(TAG, "Smart vol: vol=%u t=%.2f h2=%.3f h3=%.3f shelf=%.1f dB pg=%.3f bleed=%.3f",
              (unsigned)vol,
              (double)(float)vol / 127.0,
-             (double)(float)svp.h2_q16 / 65536.0,
-             (double)(float)svp.h3_q16 / 65536.0,
+             (double)svp.h2_amp,
+             (double)svp.h3_amp,
              (double)svp.shelf_db,
-             (double)(float)svp.pg_q16 / 65536.0,
-             (double)(float)svp.bleed_q16 / 65536.0);
+             (double)svp.pre_gain,
+             (double)svp.bleed);
 }
 
 /* ────────────────────────────────────────────────────────────────
@@ -410,25 +377,11 @@ static void update_smart_volume(int rate, uint8_t vol)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "eqgen firmware starting");
+    ESP_LOGI(TAG, "eqgen firmware starting (float DSP)");
 
-    /* DSP is initialized lazily when the first audio frame
-     * arrives (so we know the negotiated sample rate).
-     * This ensures the correct biquad coefficients (44.1k or 48k)
-     * and HP/LP filter tuning are selected at runtime. */
-
-    /* Start Bluetooth A2DP sink.
-     * This also starts the DSP+I2S task internally.
-     * I2S is initialized lazily when the first audio frame
-     * arrives (so we know the negotiated sample rate). */
     bt_a2dp_set_event_callback(bt_event_handler);
     bt_a2dp_sink_init(EQGEN_BT_DEVICE_NAME, audio_data_handler);
 
-    /* Nothing else — FreeRTOS scheduler runs the BT stack
-     * and the dsp_i2s task.  app_main returns and the idle
-     * task reclaims this stack. */
-    /* Build dB-linear volume LUT with no compensation at startup.
-     * Smart volume will adjust it when the first volume arrives. */
     smart_volume_rebuild_lut(vol_lut, 0.0f);
 
     ESP_LOGI(TAG, "Firmware running — pair your phone now.");

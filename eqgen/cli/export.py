@@ -2,7 +2,7 @@
 """
 Export fitted IIR EQ biquads as a C header for ESP32 firmware.
 
-Generates src/eq_coeffs.h with Q4.28 fixed-point coefficients.
+Generates src/eq_coeffs.h with float coefficients.
 
 Usage:
     python -m eqgen.cli.export --speaker small --h2 0.33 --h3 0.33 --fc 60 \
@@ -20,7 +20,6 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from eqgen.eq_fit import fit_eq_curve
-from eqgen.quantize import BiquadQ28, quantize_biquads_q28
 from eqgen.pipeline import run_pipeline, pre_gain_from_max_gain
 from eqgen.presets import MAX_IIR_BANDS
 
@@ -34,11 +33,10 @@ SPEAKERS = {
 
 
 def _fit_header_bands(freqs, shifted_db, fs, max_bands, f_min, f_max):
-    """Fit biquads at a single sample rate, return (bq_q28, bands, fit)."""
+    """Fit biquads at a single sample rate, return (biquads, bands, n_bands)."""
     fit = fit_eq_curve(freqs, shifted_db, fs, max_bands=max_bands,
                        min_freq=f_min, max_freq=f_max)
-    bq_q28 = quantize_biquads_q28(fit.biquads)
-    return bq_q28, fit.bands, fit.n_bands
+    return fit.biquads, fit.bands, fit.n_bands
 
 
 def generate_header(speaker_name: str, speaker_fn, fs: float, fc: float,
@@ -55,12 +53,11 @@ def generate_header(speaker_name: str, speaker_fn, fs: float, fc: float,
 
     max_gain_db = max(0.0, float(np.max(target_db)))
     pre_gain = pre_gain_from_max_gain(max_gain_db)
-    pre_gain_q16 = int(round(pre_gain * 65536.0))
 
     # Fit at both 44100 and 48000
-    bq_q28_44, bands_44, n_bands_44 = _fit_header_bands(
+    biquads_44, bands_44, n_bands_44 = _fit_header_bands(
         freqs, target_db, 44100.0, max_bands, f_min, f_max)
-    bq_q28_48, bands_48, n_bands_48 = _fit_header_bands(
+    biquads_48, bands_48, n_bands_48 = _fit_header_bands(
         freqs, target_db, 48000.0, max_bands, f_min, f_max)
 
     lines = []
@@ -70,16 +67,15 @@ def generate_header(speaker_name: str, speaker_fn, fs: float, fc: float,
     lines.append(f"// are sample-rate-dependent.  At runtime, eqgen_get_coeffs(rate) selects")
     lines.append(f"// the correct array for 44100 Hz or 48000 Hz.")
     lines.append(f"//")
-    lines.append(f"// 44.1k: {n_bands_44} biquads, 48k: {n_bands_48} biquads — Q4.28 fixed-point")
+    lines.append(f"// 44.1k: {n_bands_44} biquads, 48k: {n_bands_48} biquads — float coefficients")
     lines.append(f"// fc={fc:.0f} Hz, h2_amp={h2:.2f}, h3_amp={h3:.2f}")
     lines.append("")
     lines.append("#pragma once")
-    lines.append("#include <stdint.h>")
     lines.append("")
     lines.append(f"#define EQGEN_CUTOFF_HZ            {fc:.1f}f")
     lines.append(f"#define EQGEN_H2_AMP               {h2:.3f}f")
     lines.append(f"#define EQGEN_H3_AMP               {h3:.3f}f")
-    lines.append(f"#define EQGEN_PRE_GAIN_Q16          {pre_gain_q16}  // {pre_gain:.2f}x = {20*np.log10(pre_gain):+.1f} dB")
+    lines.append(f"#define EQGEN_PRE_GAIN             {pre_gain:.6f}f  // {pre_gain:.2f}x = {20*np.log10(pre_gain):+.1f} dB")
     lines.append("")
     lines.append("/* ── Smart volume (AVRCP-based loudness compensation) ────────────── */")
     lines.append("#define EQGEN_LOUDNESS_FC_HZ         200.0f  /* one-pole shelf corner freq  */")
@@ -94,33 +90,24 @@ def generate_header(speaker_name: str, speaker_fn, fs: float, fc: float,
     lines.append(f"#define EQGEN_N_BIQUADS            {n_bands_44}")
     lines.append("")
 
-    # 44100 Hz coefficients
-    lines.append(f"static const int32_t eqgen_coeffs_q28_44100[{n_bands_44 * 5}] = {{")
-    for i, bq in enumerate(bq_q28_44):
-        band = bands_44[i]
-        lines.append(
-            f"    {bq.b0:>11d}, {bq.b1:>11d}, {bq.b2:>11d}, "
-            f"{bq.a1:>11d}, {bq.a2:>11d},"
-            f"  // [{i}] f0={band['f0']:6.1f} Hz gain={band['gain_db']:+5.1f} dB"
-        )
-    lines.append("};")
-    lines.append("")
+    def _write_coeffs(name, biquads, bands):
+        lines.append(f"static const float {name}[{len(bands) * 5}] = {{")
+        for i, bc in enumerate(biquads):
+            band = bands[i]
+            lines.append(
+                f"    {bc.b0:>15.9f}f, {bc.b1:>15.9f}f, {bc.b2:>15.9f}f, "
+                f"{bc.a1:>15.9f}f, {bc.a2:>15.9f}f,"
+                f"  // [{i}] f0={band['f0']:6.1f} Hz gain={band['gain_db']:+5.1f} dB"
+            )
+        lines.append("};")
+        lines.append("")
 
-    # 48000 Hz coefficients
-    lines.append(f"static const int32_t eqgen_coeffs_q28_48000[{n_bands_48 * 5}] = {{")
-    for i, bq in enumerate(bq_q28_48):
-        band = bands_48[i]
-        lines.append(
-            f"    {bq.b0:>11d}, {bq.b1:>11d}, {bq.b2:>11d}, "
-            f"{bq.a1:>11d}, {bq.a2:>11d},"
-            f"  // [{i}] f0={band['f0']:6.1f} Hz gain={band['gain_db']:+5.1f} dB"
-        )
-    lines.append("};")
-    lines.append("")
+    _write_coeffs("eqgen_coeffs_44100", biquads_44, bands_44)
+    _write_coeffs("eqgen_coeffs_48000", biquads_48, bands_48)
 
     lines.append("/** Select coefficient array for the given sample rate. */")
-    lines.append("static inline const int32_t *eqgen_get_coeffs(int sample_rate) {")
-    lines.append("    return (sample_rate == 48000) ? eqgen_coeffs_q28_48000 : eqgen_coeffs_q28_44100;")
+    lines.append("static inline const float *eqgen_get_coeffs(int sample_rate) {")
+    lines.append("    return (sample_rate == 48000) ? eqgen_coeffs_48000 : eqgen_coeffs_44100;")
     lines.append("}")
     lines.append("")
     lines.append("/** Select nominal Fs for the given sample rate. */")
