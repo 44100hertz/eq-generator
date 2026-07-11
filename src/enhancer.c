@@ -135,10 +135,10 @@ void BassEnhancer_init(BassEnhancer *enh,
     lp_init(&enh->right.lp_t3,  cfg->lp_t3_alpha);
 
     /* Initialize HP biquads */
-    biquad_init(&enh->left.hp,      cfg->hp_coeffs);
-    biquad_init(&enh->left.hp_harm, cfg->hp_harm_coeffs);
-    biquad_init(&enh->right.hp,      cfg->hp_coeffs);
-    biquad_init(&enh->right.hp_harm, cfg->hp_harm_coeffs);
+    biquad_init(&enh->left.hp,      enh->cfg.hp_coeffs);
+    biquad_init(&enh->left.hp_harm, enh->cfg.hp_harm_coeffs);
+    biquad_init(&enh->right.hp,      enh->cfg.hp_coeffs);
+    biquad_init(&enh->right.hp_harm, enh->cfg.hp_harm_coeffs);
 
     /* Initialize DC blockers (5 Hz cutoff) */
     float dc_R = expf(-2.0f * (float)M_PI * 5.0f / cfg->fs);
