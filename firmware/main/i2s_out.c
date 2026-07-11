@@ -57,7 +57,11 @@ int i2s_out_init(int sample_rate)
 
     /* ── Configure standard (Philips) mode ───────────────────── */
     i2s_std_config_t std_cfg = {
-        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate),
+        .clk_cfg  = {
+            .sample_rate_hz = (uint32_t)sample_rate,
+            .clk_src        = I2S_CLK_SRC_APLL,
+            .mclk_multiple  = I2S_MCLK_MULTIPLE_256,
+        },
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
                         I2S_DATA_BIT_WIDTH_16BIT,
                         I2S_SLOT_MODE_STEREO),

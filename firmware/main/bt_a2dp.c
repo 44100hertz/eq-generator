@@ -34,6 +34,7 @@ static const char *TAG = "bt_a2dp";
 /* Hold ~100ms of stereo 16-bit audio at 48 kHz (worst case).
  * 100ms × 48000 × 4 bytes/frame ≈ 19200 → round up to 20480.     */
 #define PCM_STREAM_BUF_SIZE  20480
+#define PCM_CHUNK            512    /* bytes per read (128 stereo frames) */
 
 static StreamBufferHandle_t pcm_stream;
 static bt_a2dp_data_cb_t    user_data_cb;
@@ -101,7 +102,7 @@ void bt_a2dp_sink_init(const char *device_name, bt_a2dp_data_cb_t data_cb)
     ESP_ERROR_CHECK(esp_a2d_sink_init());
 
     /* ── StreamBuffer + DSP task (runs on app core) ───────────── */
-    pcm_stream = xStreamBufferCreate(PCM_STREAM_BUF_SIZE, 4);
+    pcm_stream = xStreamBufferCreate(PCM_STREAM_BUF_SIZE, PCM_CHUNK);
     xTaskCreatePinnedToCore(dsp_i2s_task, "dsp_i2s", 4096, NULL, 5,
                             NULL, 1);
 
@@ -241,16 +242,13 @@ static void bt_a2dp_data_cb(const uint8_t *data, uint32_t len)
                      (unsigned)len - (unsigned)sent, (unsigned)len,
                      (unsigned)avail, (unsigned)PCM_STREAM_BUF_SIZE);
         }
-        /* Reset the buffer to recover. */
-        xStreamBufferReset(pcm_stream);
+
     }
 }
 
 /* ───────────────────────────────────────────────────────────────────
  *  DSP + I2S task — runs on the application core (core 1)
  * ─────────────────────────────────────────────────────────────────── */
-
-#define PCM_CHUNK 512   /* bytes to read per tick (128 stereo frames) */
 
 static void dsp_i2s_task(void *arg)
 {

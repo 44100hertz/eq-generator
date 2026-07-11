@@ -10,7 +10,7 @@
  */
 
 /* ── Profiling: comment out for production builds ─────────────── */
-#define EQGEN_PROFILE
+// #define EQGEN_PROFILE
 
 #include <math.h>
 #include <stdbool.h>
