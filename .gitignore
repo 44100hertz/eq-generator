@@ -31,3 +31,4 @@ src/test_enhancer
 src/bench_hybrid
 src/bench_sweep
 src/bench_sweep_*
+prototypes/fft_eq_test
