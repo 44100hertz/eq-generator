@@ -48,6 +48,7 @@ static inline void biquad_reset(Biquad *bq) {
  *
  *  y = b0*x + b1*x1 + b2*x2 - a1*y1 - a2*y2
  */
+__attribute__((always_inline))
 static inline float biquad_tick(Biquad *bq, float x) {
     const float *c = bq->coeffs;
     float y = c[0] * x + c[1] * bq->x1 + c[2] * bq->x2
