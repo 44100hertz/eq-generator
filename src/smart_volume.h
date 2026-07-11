@@ -1,5 +1,5 @@
 /**
- * smart_volume.h — shared smart volume math
+ * smart_volume.h — shared smart volume math (float)
  *
  * Both the desktop PipeWire filter (src/filter.c) and the ESP32
  * firmware (firmware/main/main.c) include this to guarantee identical
@@ -29,11 +29,11 @@ extern "C" {
 /* ── Results of a smart-volume interpolation ─────────────────────── */
 
 typedef struct {
-    int32_t h2_q16;
-    int32_t h3_q16;
-    int32_t pg_q16;
-    int32_t boost_q16;
-    int32_t bleed_q16;
+    float   h2_amp;
+    float   h3_amp;
+    float   pre_gain;
+    float   boost;      /* (G-1) for loudness shelf */
+    float   bleed;      /* fundamental bleed amount */
     float   shelf_db;
     float   fft_pre_gain;
 } SmartVolumeParams;
@@ -47,43 +47,36 @@ static inline void smart_volume_compute(uint8_t vol,
     float t = (float)vol / 127.0f;   /* 0=quietest, 1=loudest */
 
     /* 1. Harmonic amplitudes: half → full */
-    float h2 = EQGEN_QUIET_H2_AMP + t * (EQGEN_H2_AMP - EQGEN_QUIET_H2_AMP);
-    float h3 = EQGEN_QUIET_H3_AMP + t * (EQGEN_H3_AMP - EQGEN_QUIET_H3_AMP);
-    out->h2_q16 = (int32_t)(h2 * 65536.0f + 0.5f);
-    out->h3_q16 = (int32_t)(h3 * 65536.0f + 0.5f);
+    out->h2_amp = EQGEN_QUIET_H2_AMP + t * (EQGEN_H2_AMP - EQGEN_QUIET_H2_AMP);
+    out->h3_amp = EQGEN_QUIET_H3_AMP + t * (EQGEN_H3_AMP - EQGEN_QUIET_H3_AMP);
 
     /* 2. Shelf boost: linearly from full to 0 dB */
-    float shelf_db        = EQGEN_QUIET_SHELF_DB * (1.0f - t);
-    float shelf_linear    = powf(10.0f, shelf_db / 20.0f);
-    out->shelf_db         = shelf_db;
-    out->boost_q16        = (int32_t)((shelf_linear - 1.0f) * 65536.0f + 0.5f);
+    out->shelf_db    = EQGEN_QUIET_SHELF_DB * (1.0f - t);
+    float shelf_linear = powf(10.0f, out->shelf_db / 20.0f);
+    out->boost       = shelf_linear - 1.0f;
 
-    /* 3. Pre-gain: reduce at quiet to offset shelf boost.
-     *    The LUT cancels the reduction so midrange stays at the
-     *    reference level. */
+    /* 3. Pre-gain: reduce at quiet to offset shelf boost */
     float max_shelf_linear = powf(10.0f, EQGEN_QUIET_SHELF_DB / 20.0f);
     float pg_quiet         = pg_loud / max_shelf_linear;
-    float pre_gain         = pg_quiet + t * (pg_loud - pg_quiet);
-    out->pg_q16            = (int32_t)(pre_gain * 65536.0f + 0.5f);
-    out->fft_pre_gain      = pre_gain;
+    out->pre_gain          = pg_quiet + t * (pg_loud - pg_quiet);
+    out->fft_pre_gain      = out->pre_gain;
 
     /* 4. Fundamental bleed: proportional to harmonic reduction */
-    float bleed        = EQGEN_QUIET_FUNDAMENTAL_BLEED * (1.0f - t);
-    out->bleed_q16     = (int32_t)(bleed * 65536.0f + 0.5f);
+    out->bleed = EQGEN_QUIET_FUNDAMENTAL_BLEED * (1.0f - t);
 }
 
 /* ── Rebuild the 128-entry volume LUT ───────────────────────────── */
 
-static inline void smart_volume_rebuild_lut(int32_t vol_lut[128],
+static inline void smart_volume_rebuild_lut(float vol_lut[128],
                                             float compensation_db)
 {
     for (int i = 1; i < 128; i++) {
         float db = ((float)i / 127.0f) * (-SV_DB_FLOOR) + SV_DB_FLOOR
                    + compensation_db;
         if (db > 0.0f) db = 0.0f;
-        vol_lut[i] = (int32_t)(powf(10.0f, db / 20.0f) * 65536.0f + 0.5f);
+        vol_lut[i] = powf(10.0f, db / 20.0f);
     }
-    vol_lut[0] = 0;
+    vol_lut[0] = 0.0f;
 }
 
 #ifdef __cplusplus

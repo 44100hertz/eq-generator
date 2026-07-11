@@ -21,7 +21,7 @@ from eqgen.analysis import goertzel_magnitude
 
 def run_sine_sweep(
     freqs_hz: List[float],
-    eq_coeffs_q28: List[int],
+    eq_coeffs: List[float],
     fc: float = 60.0,
     h2: float = 0.5,
     h3: float = 1.0,
@@ -51,7 +51,7 @@ def run_sine_sweep(
     enh = effi.create_enhancer(
         cutoff_hz=fc, h2_amp=h2, h3_amp=h3,
         release_secs=release_secs, fs=fs,
-        coeffs_q28=eq_coeffs_q28,
+        coeffs=eq_coeffs,
     )
 
     results = {}

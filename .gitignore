@@ -32,3 +32,5 @@ src/bench_hybrid
 src/bench_sweep
 src/bench_sweep_*
 prototypes/fft_eq_test
+firmware/tests/quick_bench/build/
+.pi-subagents/

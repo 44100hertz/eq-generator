@@ -1,10 +1,8 @@
 /**
- * bench_sweep.c — Sweep FFT sizes and biquad counts for CPU benchmarking.
+ * bench_sweep.c — Sweep FFT sizes and biquad counts for CPU benchmarking (float).
  *
  * Build: gcc -O2 -Wall -o bench_sweep bench_sweep.c fft_eq.c enhancer.c \
  *        -I. -lm -DFFT_EQ_N=<n>
- *
- * Usage: ./bench_sweep <fft_n> <n_biquads> <n_frames>
  */
 
 #include <math.h>
@@ -13,21 +11,14 @@
 #include <string.h>
 #include <time.h>
 
-#include "biquad_q28.h"
+#include "biquad.h"
 #include "fft_eq.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
-#define Q16 65536
 #define FRAME_SAMPLES (FFT_EQ_HOP)
-
-static int f2q16(float x) {
-    if (x >= 0.9999f) return 0x7FFFFFFF;
-    if (x <= -1.0f)   return (int32_t)0x80000000;
-    return (int32_t)(x * Q16 + (x >= 0.0f ? 0.5f : -0.5f));
-}
 
 static float randf(void) { return (float)rand() / (float)RAND_MAX; }
 
@@ -37,20 +28,14 @@ static double now_sec(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
-static void design_bq(int32_t coeffs[5], float fc, float fs) {
+static void design_bq(float coeffs[5], float fc, float fs) {
     float omega = tanf((float)M_PI * fc / fs);
     float c = 1.0f + 1.41421356237f * omega + omega * omega;
-    float b0 = 1.0f / c;
-    float b1 = -2.0f / c;
-    float b2 = 1.0f / c;
-    float a1 = (2.0f * (omega * omega - 1.0f)) / c;
-    float a2 = (1.0f - 1.41421356237f * omega + omega * omega) / c;
-    float q28 = 268435456.0f;
-    coeffs[0] = (int32_t)(b0 * q28 + (b0 >= 0.0f ? 0.5f : -0.5f));
-    coeffs[1] = (int32_t)(b1 * q28 + (b1 >= 0.0f ? 0.5f : -0.5f));
-    coeffs[2] = (int32_t)(b2 * q28 + (b2 >= 0.0f ? 0.5f : -0.5f));
-    coeffs[3] = (int32_t)(a1 * q28 + (a1 >= 0.0f ? 0.5f : -0.5f));
-    coeffs[4] = (int32_t)(a2 * q28 + (a2 >= 0.0f ? 0.5f : -0.5f));
+    coeffs[0] = 1.0f / c;
+    coeffs[1] = -2.0f / c;
+    coeffs[2] = 1.0f / c;
+    coeffs[3] = (2.0f * (omega * omega - 1.0f)) / c;
+    coeffs[4] = (1.0f - 1.41421356237f * omega + omega * omega) / c;
 }
 
 int main(int argc, char *argv[]) {
@@ -60,18 +45,18 @@ int main(int argc, char *argv[]) {
     float fs = 48000.0f;
 
     /* Setup biquad cascade */
-    BiquadQ28 *bqs_l = NULL, *bqs_r = NULL;
-    int32_t *bq_coeffs = NULL;
+    Biquad *bqs_l = NULL, *bqs_r = NULL;
+    float *bq_coeffs = NULL;
     float bq_freqs[40];
     if (n_bq > 0) {
-        bqs_l = calloc((size_t)n_bq, sizeof(BiquadQ28));
-        bqs_r = calloc((size_t)n_bq, sizeof(BiquadQ28));
-        bq_coeffs = calloc((size_t)(n_bq * 5), sizeof(int32_t));
+        bqs_l = calloc((size_t)n_bq, sizeof(Biquad));
+        bqs_r = calloc((size_t)n_bq, sizeof(Biquad));
+        bq_coeffs = calloc((size_t)(n_bq * 5), sizeof(float));
         for (int i = 0; i < n_bq; i++) {
             bq_freqs[i] = 20.0f * powf(20000.0f / 20.0f, (float)i / (float)n_bq);
             design_bq(&bq_coeffs[i * 5], bq_freqs[i], fs);
-            BiquadQ28_init(&bqs_l[i], &bq_coeffs[i * 5]);
-            BiquadQ28_init(&bqs_r[i], &bq_coeffs[i * 5]);
+            biquad_init(&bqs_l[i], &bq_coeffs[i * 5]);
+            biquad_init(&bqs_r[i], &bq_coeffs[i * 5]);
         }
     }
 
@@ -108,12 +93,8 @@ int main(int argc, char *argv[]) {
     for (int f = 0; f < n_frames; f++) {
         if (n_bq > 0) {
             for (int i = 0; i < FRAME_SAMPLES; i++) {
-                int32_t ql = f2q16(input_l[i]);
-                int32_t qr = f2q16(input_r[i]);
-                ql = BiquadQ28_cascade(bqs_l, n_bq, ql);
-                qr = BiquadQ28_cascade(bqs_r, n_bq, qr);
-                mid_l[i] = (float)ql / Q16;
-                mid_r[i] = (float)qr / Q16;
+                mid_l[i] = biquad_cascade(bqs_l, n_bq, input_l[i]);
+                mid_r[i] = biquad_cascade(bqs_r, n_bq, input_r[i]);
             }
         } else {
             memcpy(mid_l, input_l, FRAME_SAMPLES * sizeof(float));
@@ -133,10 +114,8 @@ int main(int argc, char *argv[]) {
         t0 = now_sec();
         for (int f = 0; f < n_frames; f++) {
             for (int i = 0; i < FRAME_SAMPLES; i++) {
-                int32_t ql = f2q16(input_l[i]);
-                int32_t qr = f2q16(input_r[i]);
-                ql = BiquadQ28_cascade(bqs_l, n_bq, ql);
-                qr = BiquadQ28_cascade(bqs_r, n_bq, qr);
+                biquad_cascade(bqs_l, n_bq, input_l[i]);
+                biquad_cascade(bqs_r, n_bq, input_r[i]);
             }
         }
         t_bq = (now_sec() - t0) / (double)n_frames;

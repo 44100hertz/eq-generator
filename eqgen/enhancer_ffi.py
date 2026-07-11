@@ -4,13 +4,14 @@ C FFI wrapper for the harmonic bass enhancer shared library (src/enhancer.so).
 Provides opaque-handle creation, destruction, reset, and stereo processing
 wrapped behind a clean Python API.  Import this instead of copy-pasting
 ctypes boilerplate into every script.
+
+All coefficients are now float (no more Q4.28 integer math).
 """
 
 import ctypes
 from ctypes import (
     c_int32,
     c_float,
-    c_int16,
     c_void_p,
     POINTER,
     Structure,
@@ -56,7 +57,7 @@ class EnhancerParams(Structure):
         ("pre_gain", c_float),
         ("fs", c_float),
         ("eq_n_biquads", c_int32),
-        ("eq_coeffs_q28", c_void_p),
+        ("eq_coeffs", c_void_p),  # pointer to float array
     ]
 
 
@@ -80,8 +81,8 @@ def _bind() -> None:
     lib.enhancer_reset.restype = None
     lib.enhancer_process_stereo.argtypes = [
         c_void_p,
-        POINTER(c_int16),
-        POINTER(c_int16),
+        POINTER(c_float),
+        POINTER(c_float),
     ]
     lib.enhancer_process_stereo.restype = None
     _bound = True
@@ -98,7 +99,7 @@ def create_enhancer(
     limiter_release_secs: float = 0.049,
     pre_gain: float = 1.0,
     fs: float = 44100.0,
-    coeffs_q28: List[int] | None = None,
+    coeffs: List[float] | None = None,
 ) -> ctypes.c_void_p:
     """Create an enhancer instance.
 
@@ -107,21 +108,17 @@ def create_enhancer(
         h2_amp, h3_amp: 2nd/3rd harmonic amplitudes (0…1).
         release_secs: envelope release for harmonic linearisation (s).
         limiter_release_secs: AGC limiter release time (s, typ. 0.049).
-            The limiter applies 1.0/max(env,1.0) to harmonics only —
-            always active, matching the EEL reference behaviour.
         pre_gain: linear gain applied before EQ (default 1.0).
-            Set to db_to_ratio(max_gain_db) of the ideal correction
-            curve so EQ biquads only cut, never boost.
         fs: sample rate (Hz).
-        coeffs_q28: flat list of Q4.28 biquad coefficients.
+        coeffs: flat list of float biquad coefficients [b0,b1,b2,a1,a2,...].
     """
     _bind()
 
-    if coeffs_q28 is None:
-        coeffs_q28 = []
-    n_biquads = len(coeffs_q28) // 5
+    if coeffs is None:
+        coeffs = []
+    n_biquads = len(coeffs) // 5
 
-    eq_arr = (c_int32 * len(coeffs_q28))(*coeffs_q28)
+    eq_arr = (c_float * len(coeffs))(*coeffs)
     global _eq_arr_keepalive
     _eq_arr_keepalive = eq_arr  # prevent garbage collection
     params = EnhancerParams(
@@ -133,7 +130,7 @@ def create_enhancer(
         pre_gain=pre_gain,
         fs=fs,
         eq_n_biquads=n_biquads,
-        eq_coeffs_q28=cast(eq_arr, c_void_p),
+        eq_coeffs=cast(eq_arr, c_void_p),
     )
     lib = get_lib()
     enh = lib.enhancer_create(byref(params))
@@ -152,9 +149,9 @@ def reset_enhancer(enh: ctypes.c_void_p) -> None:
     get_lib().enhancer_reset(enh)
 
 
-def process_stereo_frame(enh: ctypes.c_void_p, left: int, right: int) -> tuple[int, int]:
-    """Process a single stereo sample pair (int16 values) in-place."""
-    l = c_int16(left)
-    r = c_int16(right)
+def process_stereo_frame(enh: ctypes.c_void_p, left: float, right: float) -> tuple[float, float]:
+    """Process a single stereo sample pair (float values in [-1.0, 1.0]) in-place."""
+    l = c_float(left)
+    r = c_float(right)
     get_lib().enhancer_process_stereo(enh, byref(l), byref(r))
     return l.value, r.value

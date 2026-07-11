@@ -1,12 +1,11 @@
 /**
- * enhancer_api.h — Clean opaque API for Python FFI
+ * enhancer_api.h — Clean opaque API for Python FFI (float)
  *
  * Hides BassEnhancer internals behind a simple create/destroy/process API.
  * Suitable for ctypes FFI.
  */
 
 #pragma once
-#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,7 +26,7 @@ typedef struct {
     float   pre_gain;      /* linear gain applied before EQ (typ. 1.0) */
     float   fs;
     int     eq_n_biquads;
-    const int32_t *eq_coeffs_q28;  /* array of 5*n Q4.28 coefficients */
+    const float *eq_coeffs;  /* array of 5*n float coefficients */
 } EnhancerParams;
 
 /* ── API ───────────────────────────────────────────────────────────── */
@@ -42,10 +41,10 @@ void enhancer_destroy(EnhancerHandle *enh);
 void enhancer_reset(EnhancerHandle *enh);
 
 /** Process one stereo frame.
- *  Input:  int16 samples (range [-32768, 32767])
- *  Output: int16 samples (range [-32768, 32767]), written in-place.
+ *  Input:  float samples (range [-1.0, 1.0])
+ *  Output: float samples (range [-1.0, 1.0]), written in-place.
  */
-void enhancer_process_stereo(EnhancerHandle *enh, int16_t *left, int16_t *right);
+void enhancer_process_stereo(EnhancerHandle *enh, float *left, float *right);
 
 #ifdef __cplusplus
 }
