@@ -15,7 +15,7 @@
   "release": 0.2,
   "limiter_release": 0.049,
   "bluetooth_id": "KEN\u00b7RAD LUNCHBOX",
-  "default_volume": 32,
+  "speaker_level": 60,
   "high_rolloffs": [],
   "low_rolloffs": []
 }

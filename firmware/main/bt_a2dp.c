@@ -44,7 +44,7 @@ static bool                 audio_running = false;
 
 /* ── AVRCP absolute volume (phone → sink) ─────────────────────── */
 
-static volatile uint8_t s_volume = EQGEN_DEFAULT_VOLUME;  /* 0=mute, 127=max */
+static volatile uint8_t s_volume = 127;  /* 0=mute, 127=max; phone overwrites via AVRCP */
 
 /* ── Forward declarations ──────────────────────────────────────────── */
 

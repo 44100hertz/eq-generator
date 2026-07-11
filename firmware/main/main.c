@@ -89,8 +89,15 @@ static void dsp_init(int rate)
     BassEnhancer_init(&enhancer, &cfg,
                       eq_bqs_left, eq_bqs_right);
 
-    /* Configure loudness shelf (corner: 200 Hz, max boost: 8 dB). */
-    BassEnhancerCfg_set_loudness(&cfg, EQGEN_LOUDNESS_FC_HZ, fs, 0.0f);
+    /* Pre-compute loudness shelf alpha now so the one-pole filter
+     * is ready.  Boost starts at 0 — update_smart_volume() will
+     * push the correct boost on first volume change.
+     *
+     * Do NOT use BassEnhancerCfg_set_loudness(..., 0.0f) here:
+     * that early-returns with alpha=0, permanently disabling the
+     * shelf regardless of later boost updates. */
+    cfg.loudness_alpha = 1.0f - expf(-2.0f * (float)M_PI * EQGEN_LOUDNESS_FC_HZ / fs);
+    cfg.loudness_boost = 0.0f;
     enhancer.cfg = cfg;
 
     dsp_rate = rate;
@@ -114,7 +121,12 @@ static void play_sfx(const int16_t *mono, uint32_t n_samples, int rate)
     int16_t stereo[SFX_BATCH * 2];
 
     uint8_t vol = bt_a2dp_get_volume();
-    float vol_f = vol ? (float)vol / 127.0f : 0.0f;
+    float vol_f = vol_lut[vol];   /* dB-linear LUT — same as audio path */
+
+    /* Cap SFX to prevent blasting on high-gain speakers.
+     * SFX never plays louder than -(speaker_level - 20) dB FS. */
+    float sfx_cap_linear = powf(10.0f, -(EQGEN_SPEAKER_LEVEL_DB - 20.0f) / 20.0f);
+    vol_f = fminf(vol_f, sfx_cap_linear);
 
     for (uint32_t off = 0; off < n_samples; off += SFX_BATCH) {
         uint32_t chunk = SFX_BATCH;
@@ -122,7 +134,15 @@ static void play_sfx(const int16_t *mono, uint32_t n_samples, int rate)
 
         for (uint32_t i = 0; i < chunk; i++) {
             float s = (float)mono[off + i] / 32768.0f;  /* int16 → float */
-            s *= 0.25f;  /* −12 dB */
+
+            /* Apply enhancer pre-gain so SFX level tracks audio level.
+             * Audio goes through pre_gain → EQ → mix → LUT.
+             * SFX bypasses the enhancer, so we apply both here. */
+#ifdef EQGEN_PRE_GAIN
+            s *= EQGEN_PRE_GAIN;
+#else
+            s *= 0.5f;   /* −6 dB headroom fallback */
+#endif
 
             /* Fade in/out */
             uint32_t pos = off + i;
@@ -307,7 +327,7 @@ static void update_smart_volume(int rate, uint8_t vol)
     BassEnhancer_update_params(&enhancer, svp.h2_amp, svp.h3_amp,
                                svp.pre_gain, svp.boost, svp.bleed);
 
-    smart_volume_rebuild_lut(vol_lut, svp.shelf_db);
+    smart_volume_rebuild_lut(vol_lut, svp.shelf_db, EQGEN_SPEAKER_LEVEL_DB);
 
     last_vol = vol;
 
@@ -332,7 +352,7 @@ void app_main(void)
     bt_a2dp_set_event_callback(bt_event_handler);
     bt_a2dp_sink_init(EQGEN_BT_DEVICE_NAME, audio_data_handler);
 
-    smart_volume_rebuild_lut(vol_lut, 0.0f);
+    smart_volume_rebuild_lut(vol_lut, 0.0f, EQGEN_SPEAKER_LEVEL_DB);
 
     ESP_LOGI(TAG, "Firmware running — pair your phone now.");
 }

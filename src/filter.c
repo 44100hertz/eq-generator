@@ -69,7 +69,7 @@ int main(int argc, char *argv[]) {
 
     /* Volume LUT — mirrors ESP32 rebuild_vol_lut() exactly. */
     float vol_lut[128];
-    smart_volume_rebuild_lut(vol_lut, 0.0f);
+    smart_volume_rebuild_lut(vol_lut, 0.0f, EQGEN_SPEAKER_LEVEL_DB);
 
     BassEnhancerCfg_init(&cfg,
                          EQGEN_CUTOFF_HZ,
@@ -82,8 +82,11 @@ int main(int argc, char *argv[]) {
                          n_bq,
                          coeffs);
 
-    /* Initialise loudness shelf alpha (boost stays 0 until first control msg) */
-    BassEnhancerCfg_set_loudness(&cfg, EQGEN_LOUDNESS_FC_HZ, fs, 0.0f);
+    /* Pre-compute loudness shelf alpha (same reason as firmware).
+     * Do NOT use BassEnhancerCfg_set_loudness(..., 0.0f) — it will
+     * set alpha=0, permanently disabling the shelf. */
+    cfg.loudness_alpha = 1.0f - expf(-2.0f * (float)M_PI * EQGEN_LOUDNESS_FC_HZ / fs);
+    cfg.loudness_boost = 0.0f;
 
     BassEnhancer_init(&enh, &cfg, eq_bqs_l, eq_bqs_r);
 
@@ -112,7 +115,7 @@ int main(int argc, char *argv[]) {
                     SmartVolumeParams svp;
                     smart_volume_compute(vol, pg_ref, &svp);
 
-                    smart_volume_rebuild_lut(vol_lut, svp.shelf_db);
+                    smart_volume_rebuild_lut(vol_lut, svp.shelf_db, EQGEN_SPEAKER_LEVEL_DB);
 
                     BassEnhancer_update_params(&enh, svp.h2_amp, svp.h3_amp,
                                                svp.pre_gain, svp.boost, svp.bleed);

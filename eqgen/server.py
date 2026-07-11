@@ -242,7 +242,7 @@ def _apply_preset_to_system(preset_dict: dict, task_id: str):
         # 3. Generate eq_coeffs.h + sfx_data.h (delegates to wire.py)
         generate_eq_header(bq_q28_44, bq_q28_48, bands_44, bands_48, cfg,
                           bluetooth_id=preset.bluetooth_id or None,
-                          default_volume=preset.default_volume)
+                          speaker_level=preset.speaker_level)
         generate_sfx_header()
         logger.info("Wrote eq_coeffs.h (%d biquads)", len(bands_44))
 
@@ -351,7 +351,7 @@ def _flash_esp32(preset_dict: dict, task_id: str):
         # 2. Generate eq_coeffs.h + sfx_data.h
         generate_eq_header(bq_q28_44, bq_q28_48, bands_44, bands_48, cfg,
                           bluetooth_id=preset.bluetooth_id or None,
-                          default_volume=preset.default_volume)
+                          speaker_level=preset.speaker_level)
         generate_sfx_header()
         logger.info("Wrote eq_coeffs.h (%d biquads)", len(bands_44))
 
@@ -1164,7 +1164,7 @@ function readForm() {
     release: numVal('fRelease', 0.2),
     limiter_release: numVal('fLimiter', 0.049),
     bluetooth_id: document.getElementById('fBtId')?.value || '',
-    default_volume: intVal('fDefVol', 32),
+    speaker_level: intVal('fSpkLevel', 60),
     high_rolloffs: [],
     low_rolloffs: [],
   };
@@ -1234,7 +1234,7 @@ function renderEditor() {
       <div class="form-group"><label>Release (s)</label><input id="fRelease" type="number" step="0.01" min="0.01" max="2" value="${p.release ?? 0.2}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Limiter Release (s)</label><input id="fLimiter" type="number" step="0.001" min="0.01" max="0.5" value="${p.limiter_release ?? 0.049}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Bluetooth ID</label><input id="fBtId" value="${esc(p.bluetooth_id || '')}" placeholder="e.g. Living Room Speaker" oninput="scheduleAnalyze()"></div>
-      <div class="form-group"><label>Default Volume (0–127)</label><input id="fDefVol" type="number" step="1" min="0" max="127" value="${p.default_volume ?? 32}" oninput="scheduleAnalyze()"></div>
+      <div class="form-group"><label>Speaker Level (dB)</label><input id="fSpkLevel" type="number" step="1" min="20" max="100" value="${p.speaker_level ?? 60}" oninput="scheduleAnalyze()"></div>
     </div>
   `;
 }
@@ -1285,7 +1285,7 @@ function onHouseCurveChange() {
 }
 
 function newPreset() {
-  state.activePreset = { name: 'new-preset', measurements: [], target: '', house_curve: 'flat', fc: 60, h2: 0.5, h3: 1.0, max_bands: __MAX_IIR_BANDS__, smooth_exponent: 1.0, release: 0.2, limiter_release: 0.049, bluetooth_id: '', default_volume: 32 };
+  state.activePreset = { name: 'new-preset', measurements: [], target: '', house_curve: 'flat', fc: 60, h2: 0.5, h3: 1.0, max_bands: __MAX_IIR_BANDS__, smooth_exponent: 1.0, release: 0.2, limiter_release: 0.049, bluetooth_id: '', speaker_level: 60 };
   state.pipelineResult = null;
   document.getElementById('results').innerHTML = '';
   document.getElementById('presetList').querySelectorAll('.active').forEach(el => el.classList.remove('active'));
