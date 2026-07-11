@@ -22,10 +22,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
 
 #include "eq_coeffs.h"
 #include "enhancer.h"
 #include "fft_eq.h"
+#include "smart_volume.h"
 
 static volatile int g_running = 1;
 
@@ -65,6 +69,12 @@ int main(int argc, char *argv[]) {
 #ifdef EQGEN_PRE_GAIN_Q16
     pre_gain_f = (float)EQGEN_PRE_GAIN_Q16 / 65536.0f;
 #endif
+    const float pg_ref = pre_gain_f;  /* never mutate — used as loud reference */
+
+    /* Volume LUT — mirrors ESP32 rebuild_vol_lut() exactly.
+     * Desktop always simulates vol=127; LUT entry carries shelf compensation. */
+    int32_t vol_lut[128];
+    smart_volume_rebuild_lut(vol_lut, 0.0f);
 
     /* ── FFT hybrid EQ (if enabled) ─────────────────────────────── */
     FftEq *fft_eq = NULL;
@@ -92,8 +102,21 @@ int main(int argc, char *argv[]) {
                          fft_eq ? 1.0f : pre_gain_f,  /* if FFT: float path handles it */
                          n_bq,
                          coeffs);
+
+    /* Initialise loudness shelf alpha (boost stays 0 until first control msg) */
+    BassEnhancerCfg_set_loudness(&cfg, EQGEN_LOUDNESS_FC_HZ, fs, 0.0f);
+
     ReciprocalLUT_init(&lut);
     BassEnhancer_init(&enh, &cfg, &lut, eq_bqs_l, eq_bqs_r);
+
+    /* Open control FIFO for live smart-volume adjustments (optional).
+     * O_RDWR always succeeds — the filter only reads, but being a "writer"
+     * means any O_WRONLY client (web UI) can connect without blocking. */
+    const char *ctrl_path = "/tmp/eqgen_sv_fifo";
+    int ctrl_fd = open(ctrl_path, O_RDWR | O_NONBLOCK);
+    if (ctrl_fd >= 0) {
+        fprintf(stderr, "filter: smart-volume control on %s\n", ctrl_path);
+    }
 
     fprintf(stderr, "filter: running at %.0f Hz\n", fs);
 
@@ -105,6 +128,46 @@ int main(int argc, char *argv[]) {
     unsigned long partial_count = 0;
 
     while (g_running) {
+        /* ── Check smart-volume control FIFO (non-blocking) ────── */
+        if (ctrl_fd >= 0) {
+            unsigned char vol_byte;
+            ssize_t nr;
+            while ((nr = read(ctrl_fd, &vol_byte, 1)) > 0) {
+                uint8_t vol = vol_byte;
+                if (vol <= 127) {
+                    /* ── Shared interpolation (identical to ESP32) ── */
+                    SmartVolumeParams svp;
+                    smart_volume_compute(vol, pg_ref, &svp);
+
+                    /* ── Rebuild LUT so vol_lut[127] carries shelf boost ── */
+                    smart_volume_rebuild_lut(vol_lut, svp.shelf_db);
+
+                    /* ── Apply to enhancer ── */
+                    if (fft_eq) {
+                        pre_gain_f = svp.fft_pre_gain;
+                        BassEnhancer_update_params(&enh, svp.h2_q16, svp.h3_q16,
+                                                   -1, svp.boost_q16, svp.bleed_q16);
+                    } else {
+                        BassEnhancer_update_params(&enh, svp.h2_q16, svp.h3_q16,
+                                                   svp.pg_q16, svp.boost_q16, svp.bleed_q16);
+                    }
+
+                    fprintf(stderr, "filter: vol=%u h2=%.3f h3=%.3f pg=%.3f shelf=%.1f dB bleed=%.3f\n",
+                            (unsigned)vol,
+                            (double)(float)svp.h2_q16 / 65536.0,
+                            (double)(float)svp.h3_q16 / 65536.0,
+                            (double)(float)svp.pg_q16 / 65536.0,
+                            (double)svp.shelf_db,
+                            (double)(float)svp.bleed_q16 / 65536.0);
+                }
+            }
+            /* Reopen on EOF (writer closed) or unexpected error */
+            if (nr == 0 || (nr < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+                close(ctrl_fd);
+                ctrl_fd = open(ctrl_path, O_RDWR | O_NONBLOCK);
+            }
+        }
+
         size_t nread = fread(buf_interleaved, frame_sz, 128, stdin);
         if (nread == 0) {
             if (feof(stdin)) break;
@@ -164,10 +227,14 @@ int main(int argc, char *argv[]) {
             buf_r[i] = (float)qr / 65536.0f;
         }
 
-        /* ── Interleave output ─────────────────────────────────── */
+        /* ── Interleave output ───────────────────────────────────
+         * Apply vol_lut[127] — always at "max volume", but the LUT
+         * carries the shelf-dB compensation so midrange stays at the
+         * loud reference level.  Identical to ESP32 vol=127 path.   */
+        float vol_gain = (float)vol_lut[127] / 65536.0f;
         for (size_t i = 0; i < nread; i++) {
-            buf_interleaved[i * 2]     = buf_l[i];
-            buf_interleaved[i * 2 + 1] = buf_r[i];
+            buf_interleaved[i * 2]     = buf_l[i] * vol_gain;
+            buf_interleaved[i * 2 + 1] = buf_r[i] * vol_gain;
         }
 
         size_t nwritten = fwrite(buf_interleaved, frame_sz, nread, stdout);
@@ -179,6 +246,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (fft_eq) fft_eq_destroy(fft_eq);
+    if (ctrl_fd >= 0) close(ctrl_fd);
     free(eq_bqs_l);
     free(eq_bqs_r);
     fprintf(stderr, "filter: done (%lu frames, %lu partial)\n",

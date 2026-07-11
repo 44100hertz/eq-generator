@@ -5,7 +5,7 @@
     "measurements/lunchbox/measured.wav"
   ],
   "target": "measurements/lunchbox/target.wav",
-  "house_curve": "flat",
+  "house_curve": "nad",
   "noise": "measurements/lunchbox/noise.wav",
   "fc": 65,
   "h2": 1.1,

@@ -25,6 +25,7 @@ from eqgen.eq_fit import BiquadCoeffs, cascade_response_db, fit_eq_curve
 from eqgen.quantize import BiquadQ28, q28_to_float, quantize_biquads_q28
 from eqgen.presets import MAX_IIR_BANDS
 from eqgen import enhancer_ffi
+from eqgen.dsp import first_order_lp_mag
 from scipy.interpolate import interp1d
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -663,6 +664,100 @@ def build_default_eq_coeffs(fs: float = 44100.0) -> List[int]:
         a2 = int(np.round(((1.0 - SQRT2 * omega + omega * omega) / c) * (1 << 28)))
         coeffs.extend([b0, b1, b2, a1, a2])
     return coeffs
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Smart volume simulation: model the correction curve at different volume levels
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Constants matching eq_coeffs.h / firmware
+SV_LOUDNESS_FC = 200.0    # Hz — one-pole shelf corner
+SV_SHELF_MAX_DB = 8.0     # dB — max shelf boost at vol→0
+SV_BLEED_MAX = 0.25       # linear — max LP bleed at vol→0
+
+
+def compute_smart_volume_curves(
+    freqs: np.ndarray,
+    correction_db: np.ndarray,
+    h2: float,
+    h3: float,
+    pre_gain_db_loud: float = 0.0,
+) -> dict:
+    """Compute effective correction curves at different smart-volume levels.
+
+    The correction_db is already normalized (midrange mean = 0 dB).
+    The effective curve shows correction + shelf only — pre-gain is reported
+    as absolute text, not applied to the curve.
+
+    Returns dict with keys: vol_levels, curves, shelf_curves, params.
+    """
+    levels = [
+        ("Quiet (vol→0)", 0.0),
+        ("25% vol", 0.25),
+        ("50% vol", 0.5),
+        ("75% vol", 0.75),
+        ("Loud (vol→127)", 1.0),
+    ]
+
+    max_shelf_linear = 10.0 ** (SV_SHELF_MAX_DB / 20.0)
+
+    curves = []
+    shelf_curves = []
+
+    for label, t in levels:
+        boost_db = SV_SHELF_MAX_DB * (1.0 - t)
+
+        # Absolute pre-gain: pg_loud / [1/max + t*(1 - 1/max)]
+        pg_fraction = 1.0 / max_shelf_linear + t * (1.0 - 1.0 / max_shelf_linear)
+        pg_db_abs = pre_gain_db_loud + 20.0 * np.log10(max(pg_fraction, 1e-12))
+
+        # Shelf contribution: one-pole low shelf at 200 Hz
+        if boost_db > 0.01:
+            gain_linear = 10.0 ** (boost_db / 20.0)
+            shelf_gain = np.array([
+                1.0 + (gain_linear - 1.0) * first_order_lp_mag(f, SV_LOUDNESS_FC)
+                for f in freqs
+            ])
+            shelf_db = 20.0 * np.log10(np.maximum(shelf_gain, 1e-12))
+        else:
+            shelf_db = np.zeros_like(freqs)
+
+        # Effective: correction + shelf + absolute pre_gain.
+        # This shifts the entire curve so you can see that at t=0,
+        # bass stays at the loud pre-gain level (−4.8 dB) because
+        # shelf (+8) + pre_gain (−12.8) = −4.8 dB — same as loud.
+        effective_db = correction_db + shelf_db + pg_db_abs
+
+        curves.append({
+            "label": label,
+            "t": round(t, 2),
+            "pre_gain_db": round(pg_db_abs, 1),
+            "shelf_max_db": round(boost_db, 1),
+            "freqs": freqs.tolist(),
+            "effective_db": effective_db.tolist(),
+        })
+        shelf_curves.append({
+            "label": label,
+            "t": round(t, 2),
+            "freqs": freqs.tolist(),
+            "shelf_db": shelf_db.tolist(),
+        })
+
+    return {
+        "vol_levels": [(lbl, t) for lbl, t in levels],
+        "curves": curves,
+        "shelf_curves": shelf_curves,
+        "params": {
+            "fc": float(SV_LOUDNESS_FC),
+            "shelf_max_db": float(SV_SHELF_MAX_DB),
+            "bleed_max": float(SV_BLEED_MAX),
+            "h2_loud": float(h2),
+            "h2_quiet": float(h2 * 0.5),
+            "h3_loud": float(h3),
+            "h3_quiet": float(h3 * 0.5),
+            "pre_gain_db_loud": round(pre_gain_db_loud, 1),
+        },
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -156,6 +156,12 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
         err_arr = np.array([e["db"] for e in error])
         err_freqs = np.array([e["freq"] for e in error])
 
+        # ── Smart volume: compute effective curves at different volume levels ─
+        from eqgen.pipeline import compute_smart_volume_curves, pre_gain_from_max_gain
+        pg_db_loud = 20.0 * np.log10(pre_gain_from_max_gain(max_gain_db))
+        sv_result = compute_smart_volume_curves(freqs, gains_db, preset.h2, preset.h3,
+                                                  pre_gain_db_loud=float(pg_db_loud))
+
         result = {
             "status": "complete",
             "task_id": task_id,
@@ -182,6 +188,7 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
                          for f, d in zip(freqs_hires, combined_db)],
             "prediction_error": [{"freq": float(f), "db": float(d)}
                                  for f, d in zip(freqs_hires, combined_db - np.interp(freqs_hires, freqs, gains_db))],
+            "smart_volume": sv_result,
         }
 
     except Exception as e:
@@ -464,6 +471,18 @@ def api_scan_measurements():
     return pm.scan_measurement_dirs()
 
 
+def api_set_smart_volume(vol: int):
+    """Write a volume value (0-127) to the smart-volume control FIFO."""
+    ctrl_path = "/tmp/eqgen_sv_fifo"
+    try:
+        fd = os.open(ctrl_path, os.O_WRONLY)
+        os.write(fd, bytes([max(0, min(127, vol))]))
+        os.close(fd)
+        return {"volume": vol, "status": "ok"}
+    except (FileNotFoundError, OSError) as e:
+        return {"volume": vol, "status": "no_filter", "error": str(e)}
+
+
 def api_run_pipeline(data: dict):
     """Start a pipeline run in the background. Returns a task_id."""
     import uuid
@@ -588,6 +607,12 @@ if HAS_FASTAPI:
     async def pipeline_status(task_id: str):
         return api_pipeline_status(task_id)
 
+    @app.post("/api/smart-volume")
+    async def set_smart_volume_ep(request: Request):
+        data = await request.json()
+        vol = int(data.get("volume", 127))
+        return api_set_smart_volume(vol)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Bottle / stdlib fallback
@@ -670,6 +695,9 @@ if not HAS_FASTAPI:
                 elif p == "/api/flash" and method == "POST":
                     data = self._read_json()
                     self._send_json(api_flash_esp32(data))
+                elif p == "/api/smart-volume" and method == "POST":
+                    data = self._read_json()
+                    self._send_json(api_set_smart_volume(int(data.get("volume", 127))))
                 elif p.startswith("/api/status/") and method == "GET":
                     task_id = p.split("/api/status/", 1)[1]
                     self._send_json(api_pipeline_status(task_id))
@@ -799,6 +827,14 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       <button id="btnFlash" onclick="flashESP32()" disabled>&#x1F4E1; Flash ESP32</button>
       <button id="btnSave" onclick="savePreset()" disabled>&#x1F4BE; Save</button>
     </div>
+  </div>
+  <div id="liveBar" style="padding:8px 20px;border-bottom:1px solid var(--border);background:var(--bg);display:flex;align-items:center;gap:12px;font-size:12px">
+    <span style="color:var(--muted);font-weight:600">&#x1F50A; Live Smart Volume</span>
+    <input type="range" id="liveSlider" min="0" max="127" value="127"
+      style="flex:1;max-width:200px;accent-color:var(--accent)"
+      oninput="onLiveSlider(this.value)">
+    <span id="liveLabel" style="color:var(--accent);min-width:24px;text-align:right">127</span>
+    <span id="liveStatus" style="color:var(--muted);font-size:11px"></span>
   </div>
   <div class="content" id="content">
     <div id="editor"></div>
@@ -1071,6 +1107,33 @@ function setStatus(msg, cls = '') {
   bar.className = cls;
 }
 
+// ── Live smart-volume slider (sends to eqgen_filter via FIFO) ────
+
+let _svDebounce = null;
+function onLiveSlider(vol) {
+  const label = document.getElementById('liveLabel');
+  const status = document.getElementById('liveStatus');
+  if (label) label.textContent = vol;
+
+  // Debounce: send only after slider stops for 80ms
+  if (_svDebounce) clearTimeout(_svDebounce);
+  _svDebounce = setTimeout(async () => {
+    try {
+      const r = await api('/api/smart-volume', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({volume: parseInt(vol)}),
+      });
+      if (status) {
+        status.textContent = r.status === 'ok' ? '✓ live' : '✗ ' + (r.error || 'no filter');
+        status.style.color = r.status === 'ok' ? 'var(--green)' : 'var(--red)';
+      }
+    } catch(e) {
+      if (status) { status.textContent = '✗ ' + e.message; status.style.color = 'var(--red)'; }
+    }
+  }, 80);
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Rendering
 // ═══════════════════════════════════════════════════════════════════════
@@ -1264,6 +1327,28 @@ function renderResults() {
   }
   const n_bands = (r.metrics && r.metrics.n_bands) || '—';
   const fft_bin_hz = r.metrics && r.metrics.fs ? Math.round(r.metrics.fs / 256) : 187;
+  const sv = r.smart_volume || null;
+
+  let svHtml = '';
+  if (sv && sv.curves) {
+    svHtml = `
+    <div class="chart">
+      <h3>4. Smart Volume — Shelf Boost &amp; Pre-Gain by Volume
+        <span style="font-weight:400;font-size:12px;color:var(--muted);margin-left:12px">
+          Vol: <input type="range" id="svSlider" min="0" max="127" value="127"
+            style="vertical-align:middle;width:160px;accent-color:var(--accent)"
+            oninput="onSvSlider(this.value)">
+          <span id="svLabel" style="display:inline-block;width:50px;text-align:right">127</span>
+        </span>
+        <span id="svPgLabel" style="font-weight:400;font-size:12px;color:var(--yellow);margin-left:16px"></span>
+      </h3>
+      <canvas id="cSmartVol"></canvas>
+      <div class="legend">
+        <span><i class="swatch" style="background:rgba(63,185,80,0.55)"></i> Correction (loud, vol→127)</span>
+        <span><i class="swatch" style="background:rgba(88,166,255,0.7);height:0;border-bottom:2px dashed rgba(88,166,255,0.7)"></i> + Shelf boost (current vol)</span>
+      </div>
+    </div>`;
+  }
 
   resultsDiv.innerHTML = `
     <div class="chart"><h3>1. Measurement &amp; Target</h3><canvas id="cMeas"></canvas>
@@ -1272,6 +1357,7 @@ function renderResults() {
       <div class="legend"><span><i class="swatch" style="background:rgba(63,185,80,0.55)"></i> Correction curve</span><span><i class="swatch" style="background:rgba(88,166,255,0.65);height:0;border:1px dashed rgba(88,166,255,0.65)"></i> FFT (broad)</span><span><i class="swatch" style="background:rgba(188,140,255,0.55);height:0;border:1px dashed rgba(188,140,255,0.55)"></i> IIR (surgical)</span><span><i class="swatch" style="background:rgba(255,120,80,0.8);height:3px"></i> Combined</span></div></div>
     <div class="chart"><h3>3. Predicted Response Error (combined − correction, ideally flat at 0 dB)</h3><canvas id="cError"></canvas>
       <div class="legend"><span><i class="swatch" style="background:#f85149"></i> Residual error</span></div></div>
+    ${svHtml}
   `;
 
   requestAnimationFrame(() => {
@@ -1290,8 +1376,57 @@ function renderResults() {
       drawChart('cError', [
         {name:'Residual error',data:r.prediction_error,color:COLORS[2],width:1.4},
       ], 'dB', {yMin: -3, yMax: 3});
+      if (sv && sv.curves) {
+        state._svData = sv;
+        onSvSlider(127);
+      }
     });
   });
+}
+
+// ── Smart volume slider ──────────────────────────────────────────────
+
+function onSvSlider(vol) {
+  const sv = state._svData;
+  if (!sv || !sv.curves) return;
+
+  const label = document.getElementById('svLabel');
+  if (label) label.textContent = vol;
+
+  const pgLabel = document.getElementById('svPgLabel');
+
+  const t = vol / 127;
+
+  const curves = sv.curves;
+  let idxLo = 0, idxHi = sv.curves.length - 1;
+  for (let i = 0; i < curves.length - 1; i++) {
+    if (t >= curves[i].t && t <= curves[i + 1].t) {
+      idxLo = i; idxHi = i + 1; break;
+    }
+  }
+  const a = (t - curves[idxLo].t) / (curves[idxHi].t - curves[idxLo].t + 0.0001);
+  const pgDb = curves[idxLo].pre_gain_db + a * (curves[idxHi].pre_gain_db - curves[idxLo].pre_gain_db);
+  const sdb = curves[idxLo].shelf_max_db + a * (curves[idxHi].shelf_max_db - curves[idxLo].shelf_max_db);
+
+  if (pgLabel) {
+    pgLabel.textContent = 'pre-gain: ' + pgDb.toFixed(1) + ' dB  |  shelf boost: +' + sdb.toFixed(1) + ' dB';
+  }
+
+  const freqs = curves[idxLo].freqs;
+  const interp = [];
+  for (let i = 0; i < freqs.length; i++) {
+    const vLo = curves[idxLo].effective_db[i];
+    const vHi = curves[idxHi].effective_db[i];
+    interp.push({freq: freqs[i], db: vLo + a * (vHi - vLo)});
+  }
+
+  const loudCurve = sv.curves[sv.curves.length-1].effective_db.map(
+    (d, i) => ({freq: sv.curves[0].freqs[i], db: d}));
+
+  drawChart('cSmartVol', [
+    {name:'Correction (loud)', data: loudCurve, color:'rgba(63,185,80,0.55)', width:1.6},
+    {name:'+ Shelf (vol=' + vol + ')', data: interp, color:'rgba(88,166,255,0.7)', dash:[5,3], width:2.0},
+  ], 'dB');
 }
 
 // ═══════════════════════════════════════════════════════════════════════

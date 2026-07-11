@@ -21,6 +21,7 @@
 #include "eq_coeffs.h"
 #include "envelope.h"
 #include "fft_eq.h"
+#include "smart_volume.h"
 
 #include "bt_a2dp.h"
 #include "i2s_out.h"
@@ -52,8 +53,8 @@ static volatile int sfx_pending = 0;  /* 1=connected, 2=disconnected */
 static volatile uint32_t sfx_event_ms = 0;  /* last event timestamp (ms) */
 
 /* ── Volume LUT: maps 0..127 → Q16 gain (dB-linear) ────────── */
-#define VOL_DB_FLOOR -60.0f  /* dB at vol=1 (0=mute) */
 static int32_t vol_lut[128];
+static uint8_t last_vol = 255;  /* 255 = uninitialised, forces first update */
 
 /* ────────────────────────────────────────────────────────────────
  *  DSP init
@@ -106,6 +107,11 @@ static void dsp_init(int rate)
 
     BassEnhancer_init(&enhancer, &cfg, &rec_lut,
                       eq_bqs_left, eq_bqs_right);
+
+    /* Configure loudness shelf (corner: 200 Hz, max boost: 8 dB).
+     * Shelf starts at 0 dB — updated on first volume change. */
+    BassEnhancerCfg_set_loudness(&cfg, EQGEN_LOUDNESS_FC_HZ, fs, 0.0f);
+    enhancer.cfg = cfg;  /* copy back the updated config */
 
     dsp_rate = rate;
 
@@ -248,8 +254,12 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
     const int16_t *in = (const int16_t *)data;
     uint32_t frames = len / 4;   /* 2 channels × 2 bytes */
 
-    /* Read AVRCP absolute volume once per chunk; map through dB LUT. */
+    /* Read AVRCP absolute volume once per chunk; map through dB LUT.
+     * Also detect volume changes for smart volume interpolation. */
     uint8_t vol = bt_a2dp_get_volume();
+    if (vol != last_vol) {
+        update_smart_volume(rate, vol);
+    }
     int32_t vol_q16 = vol_lut[vol];
 
 #if EQGEN_FFT_BINS > 0
@@ -352,6 +362,48 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
 #endif
 }
 
+/* ── Smart volume: interpolate between quiet & loud preset ───────── */
+
+static void update_smart_volume(int rate, uint8_t vol)
+{
+    /* Only meaningful if DSP is initialised */
+    if (dsp_rate <= 0) return;
+
+    float pg_loud = (float)EQGEN_PRE_GAIN_Q16 / 65536.0f;
+
+    /* ── Shared interpolation (identical to desktop filter) ── */
+    SmartVolumeParams svp;
+    smart_volume_compute(vol, pg_loud, &svp);
+
+    /* ── Apply to enhancer ────────────────────────────────── */
+#if EQGEN_FFT_BINS > 0
+    /* FFT path: pre_gain is applied in float before Q16 conversion;
+     * the enhancer itself sees unity pre_gain. */
+    fft_pre_gain = svp.fft_pre_gain;
+    BassEnhancer_update_params(&enhancer, svp.h2_q16, svp.h3_q16,
+                               -1, svp.boost_q16, svp.bleed_q16);
+#else
+    BassEnhancer_update_params(&enhancer, svp.h2_q16, svp.h3_q16,
+                               svp.pg_q16, svp.boost_q16, svp.bleed_q16);
+#endif
+
+    /* ── Rebuild volume LUT: offset by current shelf dB so that
+     *    midrange loudness = pre_gain_loud × LUT_base, same as
+     *    without smart volume.  Bass gets the full shelf boost.  ── */
+    smart_volume_rebuild_lut(vol_lut, svp.shelf_db);
+
+    last_vol = vol;
+
+    ESP_LOGI(TAG, "Smart vol: vol=%u t=%.2f h2=%.3f h3=%.3f shelf=%.1f dB pg=%.3f bleed=%.3f",
+             (unsigned)vol,
+             (double)(float)vol / 127.0,
+             (double)(float)svp.h2_q16 / 65536.0,
+             (double)(float)svp.h3_q16 / 65536.0,
+             (double)svp.shelf_db,
+             (double)(float)svp.pg_q16 / 65536.0,
+             (double)(float)svp.bleed_q16 / 65536.0);
+}
+
 /* ────────────────────────────────────────────────────────────────
  *  App entry
  * ──────────────────────────────────────────────────────────────── */
@@ -375,12 +427,9 @@ void app_main(void)
     /* Nothing else — FreeRTOS scheduler runs the BT stack
      * and the dsp_i2s task.  app_main returns and the idle
      * task reclaims this stack. */
-    /* Build dB-linear volume LUT (0→mute, 1→-60 dB, 127→0 dB). */
-    for (int i = 1; i < 128; i++) {
-        float db = ((float)i / 127.0f) * (-VOL_DB_FLOOR) + VOL_DB_FLOOR;
-        vol_lut[i] = (int32_t)(powf(10.0f, db / 20.0f) * 65536.0f + 0.5f);
-    }
-    vol_lut[0] = 0;
+    /* Build dB-linear volume LUT with no compensation at startup.
+     * Smart volume will adjust it when the first volume arrives. */
+    smart_volume_rebuild_lut(vol_lut, 0.0f);
 
     ESP_LOGI(TAG, "Firmware running — pair your phone now.");
 }

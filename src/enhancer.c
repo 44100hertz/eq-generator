@@ -109,6 +109,42 @@ void BassEnhancerCfg_init(BassEnhancerCfg *cfg,
     /* EQ settings */
     cfg->eq_n_biquads = eq_n_biquads;
     cfg->eq_coeffs    = eq_coeffs;
+
+    /* Loudness defaults: disabled */
+    cfg->loudness_alpha_q16    = 0;
+    cfg->loudness_boost_q16    = 0;
+    cfg->fundamental_bleed_q16 = 0;
+}
+
+/* ── Loudness shelf setup ──────────────────────────────────────── */
+
+void BassEnhancerCfg_set_loudness(BassEnhancerCfg *cfg,
+                                  float fc, float fs, float boost_db)
+{
+    if (boost_db <= 0.0f || fc <= 0.0f) {
+        cfg->loudness_alpha_q16 = 0;
+        cfg->loudness_boost_q16 = 0;
+        return;
+    }
+    float alpha = 1.0f - expf(-2.0f * (float)M_PI * fc / fs);
+    cfg->loudness_alpha_q16 = (int32_t)(alpha * Q16 + 0.5f);
+    float gain = powf(10.0f, boost_db / 20.0f);
+    cfg->loudness_boost_q16 = (int32_t)((gain - 1.0f) * Q16 + 0.5f);
+}
+
+/* ── Runtime parameter update ──────────────────────────────────── */
+
+void BassEnhancer_update_params(BassEnhancer *enh,
+                                int32_t h2_q16, int32_t h3_q16,
+                                int32_t pre_gain_q16,
+                                int32_t loudness_boost_q16,
+                                int32_t fundamental_bleed_q16)
+{
+    if (h2_q16 >= 0)               enh->cfg.h2_amp_q16     = h2_q16;
+    if (h3_q16 >= 0)               enh->cfg.h3_amp_q16     = h3_q16;
+    if (pre_gain_q16 >= 0)         enh->cfg.pre_gain_q16   = pre_gain_q16;
+    if (loudness_boost_q16 >= 0)   enh->cfg.loudness_boost_q16 = loudness_boost_q16;
+    if (fundamental_bleed_q16 >= 0) enh->cfg.fundamental_bleed_q16 = fundamental_bleed_q16;
 }
 
 /* ── Enhancer init / reset ─────────────────────────────────────────── */
@@ -186,6 +222,9 @@ void BassEnhancer_reset(BassEnhancer *enh) {
     enh->right.env_t3.peak  = 0;
     enh->left.env_lim.peak  = 0;
     enh->right.env_lim.peak = 0;
+
+    enh->left.loudness_state  = 0;
+    enh->right.loudness_state = 0;
 }
 
 /* ── Single-channel processing ─────────────────────────────────────── */
@@ -321,10 +360,19 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
         harm_scaled_t3 = (int32_t)(((int64_t)harm_t3 * (int64_t)env_t3) >> 16);
     }
 
+    /* ── Stage 2a: Fundamental bleed ────────────────────────────────
+     * When harmonics are reduced (quiet listening), bleed a portion of
+     * the LP signal directly into the output to maintain bass perception.
+     * At full h2/h3 (loud) this is 0 → no change to existing behavior. */
+    int32_t fundamental = 0;
+    if (cfg->fundamental_bleed_q16 != 0) {
+        fundamental = (int32_t)(((int64_t)lp_t2 * (int64_t)cfg->fundamental_bleed_q16) >> 16);
+    }
+
     c2 = esp_cpu_get_cycle_count();
 
     /* ── Stage 3: Mix ──────────────────────────────────────────────── */
-    int32_t harm_sum = harm_scaled_t2 + harm_scaled_t3;
+    int32_t harm_sum = harm_scaled_t2 + harm_scaled_t3 + fundamental;
     int32_t harm_hp  = BiquadQ28_tick_q44(&ch->hp_harm, harm_sum);
     int32_t dry_hp   = BiquadQ28_tick_q44(&ch->hp, eq_out);
     int32_t out = dry_hp + harm_hp;
@@ -341,6 +389,13 @@ static int32_t enhancer_process_channel(BassEnhancerChan *ch,
     }
     harm_hp = (int32_t)(((int64_t)harm_hp * (int64_t)lim_gain) >> 16);
     out = dry_hp + harm_hp;
+
+    /* ── Stage 3a: Loudness shelf (one-pole low shelf, after limiter) ── */
+    if (cfg->loudness_boost_q16 != 0) {
+        int32_t diff = out - ch->loudness_state;
+        ch->loudness_state += (int32_t)(((int64_t)diff * (int64_t)cfg->loudness_alpha_q16) >> 16);
+        out += (int32_t)(((int64_t)ch->loudness_state * (int64_t)cfg->loudness_boost_q16) >> 16);
+    }
 
     c3 = esp_cpu_get_cycle_count();
 

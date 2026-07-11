@@ -47,6 +47,11 @@ typedef struct {
     int32_t limiter_release_coeff_q16; /* exp(-1/(fs*lim_rel)) in Q16  */
     int32_t pre_gain_q16;       /* pre-gain before EQ (Q16, 1.0=65536)*/
 
+    /* ── Loudness compensation ──────────────────────────────────── */
+    int32_t loudness_alpha_q16;     /* one-pole LP alpha (0 = disabled)    */
+    int32_t loudness_boost_q16;     /* (G-1) in Q16, 0 = no shelf         */
+    int32_t fundamental_bleed_q16;  /* LP→mix bleed (0=none, ~16400=max)  */
+
     /* Butterworth HP coefficients in Q4.28 */
     int32_t hp_coeffs[5];       /* HP at cutoff_hz  (dry path)        */
     int32_t hp_harm_coeffs[5];  /* HP at cutoff_hz  (harmonics path)  */
@@ -64,6 +69,9 @@ typedef struct {
 typedef struct {
     /* DC blocker (first stage, blocks subsonic DC) */
     DCBlocker dc_block;
+
+    /* Loudness shelf state (one-pole LP, applied after limiter) */
+    int32_t loudness_state;
 
     /* EQ biquads */
     BiquadQ28 *eq_bqs;          /* array of eq_n_biquads BiquadQ28    */
@@ -94,6 +102,25 @@ typedef struct {
  *  coeffs_out[5] = {b0, b1, b2, a1, a2} in Q4.28.
  */
 void bass_design_butter_hp_q28(float fc, float fs, int32_t coeffs_out[5]);
+
+/** Configure the loudness compensation shelf.
+ *  fc: corner frequency (typ. 200 Hz)
+ *  boost_db: max gain at DC (typ. 8 dB).  0 disables the shelf.
+ *
+ *  Call after BassEnhancerCfg_init(). Safe to call at runtime;
+ *  only updates cfg fields, does not touch filter state. */
+void BassEnhancerCfg_set_loudness(BassEnhancerCfg *cfg,
+                                  float fc, float fs, float boost_db);
+
+/** Update runtime parameters without resetting filter state.
+ *  All in Q16 format. Pass -1 for any parameter to leave it unchanged.
+ *  fundamental_bleed controls how much of the LP (un-HP'd) signal
+ *  is mixed directly into the output to compensate for reduced harmonics. */
+void BassEnhancer_update_params(BassEnhancer *enh,
+                                int32_t h2_q16, int32_t h3_q16,
+                                int32_t pre_gain_q16,
+                                int32_t loudness_boost_q16,
+                                int32_t fundamental_bleed_q16);
 
 /** Initialize BassEnhancerCfg from user-friendly float parameters.
  *  Designs all LP/HP filters and pre-computes Q16/Q28 values.

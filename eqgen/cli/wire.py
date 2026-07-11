@@ -98,6 +98,17 @@ def generate_eq_header(bq_q28_44, bq_q28_48, bands_44, bands_48, cfg,
     vol = max(0, min(127, int(default_volume)))
     lines.append(f'#define EQGEN_BT_DEVICE_NAME        "{bt_name}"')
     lines.append(f"#define EQGEN_DEFAULT_VOLUME         {vol}")
+    h2 = float(cfg.get('h2_amp', 0.5))
+    h3 = float(cfg.get('h3_amp', 1.0))
+    lines.append("")
+    lines.append("/* ── Smart volume (AVRCP-based loudness compensation) ────────────── */")
+    lines.append("#define EQGEN_LOUDNESS_FC_HZ         200.0f  /* one-pole shelf corner freq  */")
+    lines.append("#define EQGEN_QUIET_SHELF_DB           8.0f  /* boost at DC when vol → 0   */")
+    lines.append("#define EQGEN_QUIET_FUNDAMENTAL_BLEED  0.25f /* 25% LP bleed when h2 halved */")
+    lines.append("")
+    lines.append("/* Derived: quiet harmonic amplitudes (half of configured) */")
+    lines.append(f"#define EQGEN_QUIET_H2_AMP       ({h2:.3f}f * 0.5f)")
+    lines.append(f"#define EQGEN_QUIET_H3_AMP       ({h3:.3f}f * 0.5f)")
     lines.append("")
     # 44100 Hz coefficients
     lines.append(f"static const int32_t eqgen_coeffs_q28_44100[{len(bands_44) * 5}] = {{")
@@ -489,7 +500,14 @@ def setup_wiring(cfg, coeffs_flat):
     if not null_serial:
         sys.exit("ERROR: cannot resolve eqgen_sink serial")
 
-    # 4. Launch filter chain: pw-cat → filter → pw-cat
+    # 4. Create control FIFO for live smart-volume adjustments
+    ctrl_path = "/tmp/eqgen_sv_fifo"
+    if os.path.exists(ctrl_path):
+        os.remove(ctrl_path)
+    os.mkfifo(ctrl_path)
+    print(f"  Created control FIFO: {ctrl_path}")
+
+    # 4b. Launch filter chain: pw-cat → filter → pw-cat
     # Record: pw-cat -a with numeric serial → captures from eqgen_sink monitor
     # Playback: pw-cat -a --target 0 → creates unlinked ports, we link manually
     print(f"\n── Launching DSP chain (eqgen_sink → filter → {output_sink})...")
