@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include "fpu.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -23,7 +25,7 @@ static inline void lp_init(LP *lp, float alpha) {
 
 /** Process one sample. */
 static inline float lp_tick(LP *lp, float x) {
-    lp->y1 = lp->y1 + lp->alpha * (x - lp->y1);
+    lp->y1 = ftz(lp->y1 + lp->alpha * (x - lp->y1));
     return lp->y1;
 }
 

@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include "fpu.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -51,12 +53,12 @@ static inline void biquad_reset(Biquad *bq) {
 __attribute__((always_inline))
 static inline float biquad_tick(Biquad *bq, float x) {
     const float *c = bq->coeffs;
-    float y = c[0] * x + c[1] * bq->x1 + c[2] * bq->x2
-            - c[3] * bq->y1 - c[4] * bq->y2;
+    float y = ftz(c[0] * x + c[1] * bq->x1 + c[2] * bq->x2
+                - c[3] * bq->y1 - c[4] * bq->y2);
 
     bq->x2 = bq->x1;
     bq->x1 = x;
-    bq->y2 = bq->y1;
+    bq->y2 = ftz(bq->y1);
     bq->y1 = y;
 
     return y;

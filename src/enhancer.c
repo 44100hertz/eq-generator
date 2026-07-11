@@ -93,7 +93,6 @@ void BassEnhancerCfg_set_loudness(BassEnhancerCfg *cfg,
 
 /* ── Runtime parameter update ──────────────────────────────────── */
 
-#include <math.h>
 #ifndef NAN
 #define NAN (0.0f/0.0f)
 #endif
@@ -185,18 +184,6 @@ void BassEnhancer_reset(BassEnhancer *enh) {
 
     enh->left.loudness_state  = 0.0f;
     enh->right.loudness_state = 0.0f;
-}
-
-/* ── Single-channel processing ─────────────────────────────────────── */
-
-/** Chebyshev T2: 2x² - 1. */
-float cheb_t2(float x) {
-    return 2.0f * x * x - 1.0f;
-}
-
-/** Chebyshev T3: 4x³ - 3x. */
-float cheb_t3(float x) {
-    return 4.0f * x * x * x - 3.0f * x;
 }
 
 /* ── Profiling ─────────────────────────────────────────────────────── */
@@ -349,4 +336,11 @@ void BassEnhancer_process_stereo(BassEnhancer *enh,
 {
     *left  = enhancer_process_channel(&enh->left,  &enh->cfg, *left);
     *right = enhancer_process_channel(&enh->right, &enh->cfg, *right);
+
+    /* Safety net: clamp NaN/Inf to zero.  Once NaN enters biquad state
+     * it propagates permanently — catching it here resets the output
+     * but NOT the biquad state.  If NaN appears, dsp_init should also
+     * reset biquads on next stream start. */
+    if (!isfinite(*left))  *left  = 0.0f;
+    if (!isfinite(*right)) *right = 0.0f;
 }

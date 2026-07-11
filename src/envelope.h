@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include "fpu.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -38,7 +40,7 @@ static inline float env_tick(Env *env, float x) {
     if (ax > env->peak) {
         env->peak = ax;
     } else {
-        env->peak *= env->release;
+        env->peak = ftz(env->peak * env->release);
     }
     return env->peak;
 }

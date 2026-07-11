@@ -155,9 +155,17 @@ extern EnhancerProfile enh_profile;
 
 void enhancer_profile_report(void);
 
-/* ── Low-level Chebyshev (exposed for testing) ────────────────────── */
-float cheb_t2(float x);
-float cheb_t3(float x);
+/* ── Low-level Chebyshev ──────────────────────────────────────────── */
+
+/** Chebyshev T2: 2x² - 1. */
+static inline float cheb_t2(float x) {
+    return 2.0f * x * x - 1.0f;
+}
+
+/** Chebyshev T3: 4x³ - 3x. */
+static inline float cheb_t3(float x) {
+    return 4.0f * x * x * x - 3.0f * x;
+}
 
 #ifdef __cplusplus
 }

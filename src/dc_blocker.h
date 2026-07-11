@@ -10,6 +10,8 @@
 
 #pragma once
 
+#include "fpu.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -32,7 +34,7 @@ static inline void dc_blocker_init(DCBlocker *dc, float R) {
 
 /** Process one sample. y = x - x1 + R*y1 */
 static inline float dc_blocker_tick(DCBlocker *dc, float x) {
-    float y = x - dc->x1 + dc->R * dc->y1;
+    float y = ftz(x - dc->x1 + dc->R * dc->y1);
     dc->x1 = x;
     dc->y1 = y;
     return y;

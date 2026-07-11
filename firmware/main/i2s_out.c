@@ -106,7 +106,23 @@ int i2s_out_write_stereo(int16_t left, int16_t right)
     esp_err_t err = i2s_channel_write(tx_handle, buf, sizeof(buf),
                                       &bytes_written, portMAX_DELAY);
     if (err != ESP_OK) {
+        static uint32_t err_count = 0;
+        err_count++;
+        /* Log every 1000th to avoid log-spamming on persistent failure */
+        if (err_count % 1000 == 1 || err_count == 1) {
+            ESP_LOGW(TAG, "i2s_channel_write failed: 0x%x (count=%lu)",
+                     err, (unsigned long)err_count);
+        }
         return err;
+    }
+    if (bytes_written != sizeof(buf)) {
+        static uint32_t short_count = 0;
+        short_count++;
+        if (short_count % 1000 == 1 || short_count == 1) {
+            ESP_LOGW(TAG, "i2s short write: %u/%u (count=%lu)",
+                     (unsigned)bytes_written, (unsigned)sizeof(buf),
+                     (unsigned long)short_count);
+        }
     }
     return 0;
 }
