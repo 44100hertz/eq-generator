@@ -89,6 +89,12 @@ def generate_header(speaker_name: str, speaker_fn, fs: float, fc: float,
     lines.append(f"#define EQGEN_FS_48000              48000")
     lines.append(f"#define EQGEN_N_BIQUADS            {n_bands_44}")
     lines.append("")
+    lines.append("/* ── Firmware config ────────────────────────────────────────────── */")
+    lines.append("#define EQGEN_RELEASE_SECS           0.200f")
+    lines.append("#define EQGEN_LIMITER_RELEASE_SECS   0.049f")
+    lines.append('#define EQGEN_BT_DEVICE_NAME        "eqgen"')
+    lines.append("#define EQGEN_DEFAULT_VOLUME          32")
+    lines.append("")
 
     def _write_coeffs(name, biquads, bands):
         lines.append(f"static const float {name}[{len(bands) * 5}] = {{")

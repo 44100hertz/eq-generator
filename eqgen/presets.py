@@ -24,7 +24,7 @@ PRESETS_DIR = ROOT / "presets"
 HOUSE_CURVES_PATH = PRESETS_DIR / "house_curves.json"
 
 # ── Global limit: maximum IIR biquad bands across the entire program ──
-MAX_IIR_BANDS = 8
+MAX_IIR_BANDS = 24
 
 
 @dataclass

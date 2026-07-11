@@ -3,8 +3,7 @@
  *
  * Reads raw float32le stereo interleaved samples from stdin,
  * processes through BassEnhancer_process_stereo, writes to stdout.
- * Uses baked-in eq_coeffs.h coefficients and supports sample-rate
- * independent processing.
+ * Uses baked-in eq_coeffs.h coefficients.
  *
  * Usage:
  *   parec -d eqgen_sink.monitor --format=float32le --rate=48000 \
@@ -27,7 +26,6 @@
 
 #include "eq_coeffs.h"
 #include "enhancer.h"
-#include "fft_eq.h"
 #include "smart_volume.h"
 
 static volatile int g_running = 1;
@@ -62,29 +60,16 @@ int main(int argc, char *argv[]) {
     BassEnhancer enh;
     BassEnhancerCfg cfg;
 
-    float pre_gain_f = 1.0f;
 #ifdef EQGEN_PRE_GAIN
-    pre_gain_f = EQGEN_PRE_GAIN;
+    float pre_gain_f = EQGEN_PRE_GAIN;
+#else
+    float pre_gain_f = 1.0f;
 #endif
-    const float pg_ref = pre_gain_f;  /* never mutate — used as loud reference */
+    const float pg_ref = pre_gain_f;  /* never mutate */
 
     /* Volume LUT — mirrors ESP32 rebuild_vol_lut() exactly. */
     float vol_lut[128];
     smart_volume_rebuild_lut(vol_lut, 0.0f);
-
-    /* ── FFT hybrid EQ (if enabled) ─────────────────────────────── */
-    FftEq *fft_eq = NULL;
-#if EQGEN_FFT_BINS > 0
-    {
-        const float *fft_gains = eqgen_get_fft_gains((int)fs);
-        fft_eq = fft_eq_create(fft_gains);
-        if (!fft_eq) {
-            fprintf(stderr, "filter: FFT EQ allocation failed\n");
-        } else {
-            fprintf(stderr, "filter: FFT EQ enabled (%d bins)\n", EQGEN_FFT_BINS);
-        }
-    }
-#endif
 
     BassEnhancerCfg_init(&cfg,
                          EQGEN_CUTOFF_HZ,
@@ -93,7 +78,7 @@ int main(int argc, char *argv[]) {
                          EQGEN_RELEASE_SECS,
                          fs,
                          EQGEN_LIMITER_RELEASE_SECS,
-                         fft_eq ? 1.0f : pre_gain_f,
+                         pre_gain_f,
                          n_bq,
                          coeffs);
 
@@ -112,8 +97,6 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "filter: running at %.0f Hz\n", fs);
 
     float buf_interleaved[256]; /* 128 stereo frames: L,R,L,R,... */
-    float buf_l[128];           /* left channel for FFT pass */
-    float buf_r[128];           /* right channel for FFT pass */
     size_t frame_sz = 2 * sizeof(float);
     unsigned long frame_count = 0;
     unsigned long partial_count = 0;
@@ -131,14 +114,8 @@ int main(int argc, char *argv[]) {
 
                     smart_volume_rebuild_lut(vol_lut, svp.shelf_db);
 
-                    if (fft_eq) {
-                        pre_gain_f = svp.fft_pre_gain;
-                        BassEnhancer_update_params(&enh, svp.h2_amp, svp.h3_amp,
-                                                   NAN, svp.boost, svp.bleed);
-                    } else {
-                        BassEnhancer_update_params(&enh, svp.h2_amp, svp.h3_amp,
-                                                   svp.pre_gain, svp.boost, svp.bleed);
-                    }
+                    BassEnhancer_update_params(&enh, svp.h2_amp, svp.h3_amp,
+                                               svp.pre_gain, svp.boost, svp.bleed);
 
                     fprintf(stderr, "filter: vol=%u h2=%.3f h3=%.3f pg=%.3f shelf=%.1f dB bleed=%.3f\n",
                             (unsigned)vol,
@@ -174,37 +151,15 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        /* Deinterleave input */
+        float vol_gain = vol_lut[127];
         for (size_t i = 0; i < nread; i++) {
-            buf_l[i] = buf_interleaved[i * 2];
-            buf_r[i] = buf_interleaved[i * 2 + 1];
-        }
-
-        /* ── Pass 1: FFT EQ (broad correction) ────────────────── */
-        if (fft_eq) {
-            fft_eq_process_frame(fft_eq, buf_l, buf_r, buf_l, buf_r);
-            for (size_t i = 0; i < nread; i++) {
-                buf_l[i] *= pre_gain_f;
-                buf_r[i] *= pre_gain_f;
-            }
-        }
-
-        /* ── Pass 2: IIR biquad cascade + enhancer (surgical) ──── */
-        for (size_t i = 0; i < nread; i++) {
-            float l = buf_l[i];
-            float r = buf_r[i];
+            float l = buf_interleaved[i * 2];
+            float r = buf_interleaved[i * 2 + 1];
 
             BassEnhancer_process_stereo(&enh, &l, &r);
 
-            buf_l[i] = l;
-            buf_r[i] = r;
-        }
-
-        /* ── Interleave output ─────────────────────────────────── */
-        float vol_gain = vol_lut[127];
-        for (size_t i = 0; i < nread; i++) {
-            buf_interleaved[i * 2]     = buf_l[i] * vol_gain;
-            buf_interleaved[i * 2 + 1] = buf_r[i] * vol_gain;
+            buf_interleaved[i * 2]     = l * vol_gain;
+            buf_interleaved[i * 2 + 1] = r * vol_gain;
         }
 
         size_t nwritten = fwrite(buf_interleaved, frame_sz, nread, stdout);
@@ -215,7 +170,6 @@ int main(int argc, char *argv[]) {
         fflush(stdout);
     }
 
-    if (fft_eq) fft_eq_destroy(fft_eq);
     if (ctrl_fd >= 0) close(ctrl_fd);
     free(eq_bqs_l);
     free(eq_bqs_r);

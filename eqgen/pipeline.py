@@ -25,8 +25,6 @@ from eqgen.eq_fit import BiquadCoeffs, cascade_response_db, fit_eq_curve
 from eqgen.presets import MAX_IIR_BANDS
 from eqgen import enhancer_ffi
 from eqgen.dsp import first_order_lp_mag
-from scipy.interpolate import interp1d
-
 ROOT = Path(__file__).resolve().parent.parent
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -514,88 +512,7 @@ def curve_to_json(freqs: np.ndarray, gains_db: np.ndarray) -> list:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# FFT + IIR hybrid: FFT handles broad shape, IIR fits narrow residual
-# ═══════════════════════════════════════════════════════════════════════════════
-
-FFT_N = 256  # window size for overlap-add FFT EQ
-FFT_RESIDUAL_THRESHOLD_DB = 1.0  # IIR only corrects where |residual| > this
-
-
-def compute_fft_residual(
-    freqs: np.ndarray,
-    target_db: np.ndarray,
-    fs: float,
-    fft_n: int = FFT_N,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Compute the FFT approximation of a target curve and the residual.
-
-    In the FFT + IIR hybrid architecture, the FFT overlap-add EQ applies
-    per-bin scalar gains at ~187.5 Hz resolution (256-point @ 48 kHz).
-    The IIR biquads then surgically correct the narrow features the FFT
-    can't resolve — the *residual*.
-
-    The residual is self-normalizing: it oscillates around 0 dB because
-    the FFT handles the broad shape.  No pre-gain offset is needed —
-    biquads handle both boosts and cuts, and a uniform post-gain after
-    the cascade compensates for any overall level shift.
-
-    This function:
-      1. Samples the target curve at FFT bin center frequencies
-      2. Cubic-spline interpolates back to the eval grid as the FFT
-         approximation (Hann window blends ~3 bins smoothly)
-      3. Subtracts to get the residual
-      4. Thresholds residual at ±1 dB
-
-    Returns:
-        fft_bin_freqs:  bin center frequencies (Hz)
-        fft_gains_linear: per-bin scalar gains (linear)
-        fft_approx_db: FFT approximation on the eval grid (dB)
-        residual_db:   target - FFT approx, thresholded (dB)
-    """
-    # 1. Bin center frequencies
-    fft_bin_freqs = np.arange(fft_n // 2 + 1, dtype=float) * fs / fft_n
-
-    # 2. Target curve sampled at bin centers, converted to linear gains.
-    #    The DC bin (0 Hz) is pinned to 1.0 — there is no musical content at DC,
-    #    and np.interp extrapolates an arbitrary value from the first eval point
-    #    (~20 Hz).  A large DC gain would distort all bass frequencies through
-    #    the Hann window's spectral leakage (main lobe ~750 Hz wide).
-    target_at_bins = np.interp(fft_bin_freqs, freqs, target_db)
-    target_at_bins[0] = 0.0  # 0 dB → linear gain = 1.0
-    gains_linear = 10.0 ** (target_at_bins / 20.0)
-
-    # Ramp DC → first few bins to prevent time-domain aliasing in the
-    # FFT overlap-add.  A step from 0 dB (DC) to the first bin's gain
-    # creates an impulse response far longer than the 256-point window,
-    # causing wrap-around distortion on bass tones.
-    # The IIR picks up whatever the FFT ramp leaves behind.
-    ramp_end = 4  # ramp bins 0..3 linearly in dB toward bin 4
-    if ramp_end < len(gains_linear):
-        ramp_target_db = float(20.0 * np.log10(max(gains_linear[ramp_end], 1e-12)))
-        for i in range(1, ramp_end):
-            t = i / ramp_end
-            gains_linear[i] = 10.0 ** (t * ramp_target_db / 20.0)
-
-    fft_gains_db = 20.0 * np.log10(np.maximum(gains_linear, 1e-12))
-
-    # 3. Cubic spline interpolates the piecewise-constant bin gains back to
-    #    the eval grid, approximating the Hann window's ~3-bin blending.
-    fft_interp = interp1d(fft_bin_freqs, fft_gains_db, kind='cubic',
-                          bounds_error=False, fill_value='extrapolate')
-    fft_approx_db = fft_interp(freqs)
-
-    # 4. Residual = what the FFT missed (narrow resonances, sharp features)
-    residual_db = target_db - fft_approx_db
-
-    # 5. Threshold: IIR only corrects where residual exceeds ±1 dB.
-    #    Below that, the FFT is close enough — don't waste biquads on noise.
-    residual_db[np.abs(residual_db) < FFT_RESIDUAL_THRESHOLD_DB] = 0.0
-
-    return fft_bin_freqs, gains_linear, fft_approx_db, residual_db
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# IIR design: EQ curve → quantized biquads
+# IIR design: EQ curve → biquad coefficients
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def design_eq(
@@ -603,32 +520,16 @@ def design_eq(
     target_db: np.ndarray,
     fs: float,
     max_bands: int = MAX_IIR_BANDS,
-    fft_n: int = 0,
     min_peaking_freq: float = 0.0,
 ) -> Tuple[List[float], List[dict], np.ndarray, np.ndarray, np.ndarray]:
-    """Design an IIR EQ to match a target curve.
-
-    When fft_n > 0 (FFT hybrid mode), the IIR biquads are fitted to
-    the *residual* after subtracting the FFT's broad correction.
-    The FFT handles the overall shape at coarse bin resolution;
-    the IIR surgically corrects narrow peaks and dips.
+    """Design an IIR EQ to match a target curve using cascaded biquads.
 
     Returns (coeffs_flat, bands, freqs, fit_target_db, fitted_db).
-    fit_target_db is the curve actually fitted (full target or residual).
+    fit_target_db is the curve actually fitted.
     coeffs_flat is a flat list of float coefficients:
     [b0, b1, b2, a1, a2, b0, b1, b2, a1, a2, ...].
     """
-    if fft_n > 0:
-        # Residual is self-normalizing — centered around 0 dB by definition.
-        # FFT handles the broad shape, IIR surgically corrects narrow features.
-        _, _, _, residual_db = compute_fft_residual(freqs, target_db, fs, fft_n)
-        shifted_db = residual_db
-        fit_target = residual_db
-    else:
-        shifted_db = target_db
-        fit_target = target_db
-
-    fit = fit_eq_curve(freqs, shifted_db, fs, max_bands=max_bands,
+    fit = fit_eq_curve(freqs, target_db, fs, max_bands=max_bands,
                        min_freq=freqs[0], max_freq=freqs[-1],
                        min_peaking_freq=min_peaking_freq if min_peaking_freq > 0 else freqs[0])
 
@@ -638,7 +539,7 @@ def design_eq(
 
     fitted_db = cascade_response_db(fit.biquads, freqs, fs)
 
-    return coeffs, fit.bands, freqs, fit_target, fitted_db
+    return coeffs, fit.bands, freqs, target_db, fitted_db
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
