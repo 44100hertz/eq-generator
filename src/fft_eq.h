@@ -31,6 +31,7 @@ typedef struct {
     int   hop;        /* hop size (FFT_EQ_HOP) */
 
     float *window;    /* pre-computed Hann window [n] */
+    float *twiddle;   /* pre-computed twiddle table [n/2] (cos,sin pairs for k=0..n/2-1) */
     float *gains;     /* per-bin scalar gains [n/2 + 1] */
 
     /* Per-channel overlap-add state */
