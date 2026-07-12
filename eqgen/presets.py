@@ -99,6 +99,8 @@ class PresetManager:
         """Return list of preset names (without .json extension)."""
         names = []
         for f in sorted(self.presets_dir.glob("*.json")):
+            if f.name == "house_curves.json":
+                continue
             names.append(f.stem)
         return names
 
