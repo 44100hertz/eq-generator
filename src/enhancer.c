@@ -357,7 +357,15 @@ static float enhancer_process_channel(BassEnhancerChan *ch,
      *   A harmonic at unit physical amplitude delivers ~1/h times
      *   the perceived loudness of a fundamental at unit amplitude.
      *   (Small h → harmonics are efficient → less physical needed.)
-     * w      = fraction of bass loudness supplied by harmonics.
+     * w      = fraction of fundamental loudness replaced by harmonics.
+     *
+     * Derivation (preserve perceived loudness = target):
+     *   perceived = (1-w)·target + harm_amp/h = target
+     *   physical  = (1-w)·target + harm_amp  = room
+     *
+     * Solving:
+     *   harm_amp = (target - room) · h / (1 - h)
+     *   w        = (target - room) / (target · (1 - h))
      *
      * When target ≤ room: pure fundamental (w=0).
      * When target > room: blend to preserve perceived flatness.
@@ -403,12 +411,15 @@ static float enhancer_process_channel(BassEnhancerChan *ch,
 
     float harm_out = 0.0f;
     if (w > 0.0f && h > 0.0f) {
-        /* Harmonics fill the headroom gap: target - room.
-         * Using the capped target ensures harmonics never exceed
-         * what the tanh can meaningfully reproduce.
+        /* Harmonics fill the headroom gap, scaled by h/(1-h)
+         * so perceived loudness = target while physical stays
+         * within room.  Without this scaling, small h (efficient
+         * harmonics) would produce harm_amp ≈ target - room,
+         * over-filling headroom by ~1/h.
          * Slew harm_amp at the same rate as w to prevent the
          * Chebyshev from turning on in one sample during sweeps. */
-        float harm_amp_target = target - room;
+        float h_safe = fmaxf(h, 1e-6f);
+        float harm_amp_target = (target - room) * h_safe / (1.0f - h_safe);
         if (harm_amp_target < 0.0f) harm_amp_target = 0.0f;
         float harm_amp = ch->harm_amp_slew;
         float ha_diff = harm_amp_target - harm_amp;

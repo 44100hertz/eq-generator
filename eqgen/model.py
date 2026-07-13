@@ -29,13 +29,13 @@ from eqgen.dsp import first_order_lp_mag, butterworth_hp_mag
 
 
 # ── Core model ────────────────────────────────────────────────────────
-
-# Equal-loudness: at bass frequencies the ear is ~5× more sensitive
-# to harmonics (100-150 Hz) than fundamentals (50 Hz). Weight the
-# harmonic terms so the model doesn't over-boost.
-EAR_W = 5.0
-EAR_W2 = EAR_W * EAR_W
-
+#
+# NOTE: No additional ear-weighting constant here.
+# compute_harmonic_efficacy() builds Ear(f)/Ear(nf) directly into
+# h2/h3 via:  h = Correction(nf)/Correction(f) * Ear(f)/Ear(nf).
+# The crossfade in enhancer.c then uses h as perceptual efficiency.
+# An extra EAR_W on the harmonic term would double-count the ear.
+#
 def model_perceived_amplitude(
     f: float,
     G: float,
@@ -66,7 +66,7 @@ def model_perceived_amplitude(
     b = h2**4 * lp_f**2  * hp_2f**2 * S2**2
     c = h3**6 * lp_f2**2 * hp_3f**2 * S3**2
 
-    return G * np.sqrt(a + EAR_W2 * b + EAR_W2 * c)
+    return G * np.sqrt(a + b + c)
 
 
 def model_gain_needed(
@@ -95,7 +95,7 @@ def model_gain_needed(
     b = h2**4 * lp_f**2  * hp_2f**2 * S2**2
     c = h3**6 * lp_f2**2 * hp_3f**2 * S3**2
 
-    denom = np.sqrt(a + EAR_W2 * b + EAR_W2 * c)
+    denom = np.sqrt(a + b + c)
     if denom < 1e-12:
         return 0.0
     return target_amplitude / denom
