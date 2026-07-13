@@ -18,13 +18,17 @@ extern "C" {
 
 /* ── Compile-time constants from eq_coeffs.h ──────────────────────── */
 
-#if !defined(EQGEN_QUIET_SHELF_DB)
-#  error "smart_volume.h requires eq_coeffs.h to be included first"
+#if !defined(EQGEN_SPEAKER_LEVEL_DB)
+#  error "smart_volume.h requires eq_coeffs.h (EQGEN_SPEAKER_LEVEL_DB) to be included first"
 #endif
 
 #ifndef EQGEN_OVERBOOST_DB
 #  define EQGEN_OVERBOOST_DB  0.0f
 #endif
+
+/* FM slope: 0.8 dB of bass boost per 10 dB of attenuation.
+ * Matches Fletcher-Munson equal-loudness contours linearly. */
+#define FM_SLOPE  0.08f
 
 /* ── Results of a smart-volume interpolation ─────────────────────── */
 
@@ -38,9 +42,14 @@ typedef struct {
 /* ── Compute shelf boost and pre-gain for a given volume level ────
  *
  * Maps 0–127 to pre-enhancer gain via vol_lut[vol] (linear-in-dB).
- * Additionally applies a loudness shelf (cube-root power law) to
- * compensate for Fletcher-Munson equal-loudness contours at low
- * volumes — exactly as the target speaker box does.
+ * Additionally applies a loudness shelf (linear FM contour: 0.8 dB
+ * per 10 dB of attenuation) to compensate for Fletcher-Munson
+ * equal-loudness contours at low volumes.
+ *
+ * The shelf tracks the absolute listening level: the drop from peak
+ * is speaker_level × (1 − vol/127) dB.  A speaker with 80 dB range
+ * drops 80 dB to vol=0 → 6.4 dB shelf; a 40 dB range speaker drops
+ * 40 dB → 3.2 dB shelf.  Peak volume (vol=127) always gets 0 shelf.
  * ──────────────────────────────────────────────────────────────── */
 
 static inline void smart_volume_compute(uint8_t vol,
@@ -49,17 +58,16 @@ static inline void smart_volume_compute(uint8_t vol,
 {
     float t = (float)vol / 127.0f;   /* 0=quietest, 1=loudest */
 
-    /* 1. Shelf boost: power-law (cube root) tracks equal-loudness contours.
-     * The ear's bass sensitivity drops steeply in the first ~15 dB of
-     * attenuation, then saturates.  A linear mapping would put only 50%
-     * shelf at -30 dB attenuation — far too slow. */
-    float atten_norm = 1.0f - t;   /* 0=loud, 1=quiet */
-    out->shelf_db    = EQGEN_QUIET_SHELF_DB * powf(atten_norm, 0.33f);
+    /* 1. Shelf boost: linear with dB drop from peak volume.
+     *    0.8 dB / 10 dB is an adequate linear approximation of the
+     *    FM equal-loudness contours over our gain range (24–80 dB). */
+    float drop_db  = (1.0f - t) * (float)EQGEN_SPEAKER_LEVEL_DB;
+    out->shelf_db  = FM_SLOPE * drop_db;
     float shelf_linear = powf(10.0f, out->shelf_db / 20.0f);
-    out->boost       = shelf_linear - 1.0f;
+    out->boost     = shelf_linear - 1.0f;
 
-    /* 3. Pre-gain: reduce at quiet to offset shelf boost */
-    float max_shelf_linear = powf(10.0f, EQGEN_QUIET_SHELF_DB / 20.0f);
+    /* 2. Pre-gain: reduce at quiet to offset shelf boost */
+    float max_shelf_linear = powf(10.0f, (FM_SLOPE * (float)EQGEN_SPEAKER_LEVEL_DB) / 20.0f);
     float pg_quiet         = pg_loud / max_shelf_linear;
     out->pre_gain          = pg_quiet + t * (pg_loud - pg_quiet);
     out->fft_pre_gain      = out->pre_gain;

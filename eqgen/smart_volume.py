@@ -2,22 +2,31 @@
 Smart volume simulation: model the correction curve at different volume levels.
 
 Matches the C firmware (smart_volume.h / filter.c) exactly:
-  - Shelf boost: cube-root power law (equal-loudness contours)
+  - Shelf boost: linear with dB drop from peak (0.8 dB per 10 dB, FM contours)
   - Pre-gain: linear interpolation pg_quiet → pg_loud
   - Volume LUT: attenuation mapped through speaker_level
 
 Volume attenuation happens BEFORE the enhancer — this creates
 headroom that the enhancer fills with bleed/harmonics.  The
 effective curve shows the net perceived response.
+
+The shelf follows FM equal-loudness contours linearly:
+  shelf_db = 0.08 × drop_from_peak_db
+where drop_from_peak_db = speaker_level × (1 − vol/127).
+
+This keeps compensation proportional to the absolute listening level:
+a speaker with 80 dB range drops 80 dB to vol=0 (≈20 dB SPL → 6.4 dB
+shelf), while a 40 dB range speaker drops only 40 dB (≈20 dB SPL →
+3.2 dB shelf).  The peak (vol=127) always gets 0 shelf.
 """
 
 import numpy as np
 
 from eqgen.dsp import first_order_lp_mag, pre_gain_from_max_gain
 
-# Constants matching eq_coeffs.h / firmware
-SV_LOUDNESS_FC = 200.0    # Hz — one-pole shelf corner
-SV_SHELF_MAX_DB = 8.0     # dB — max shelf boost at vol→0
+# Constants matching smart_volume.h / firmware
+SV_LOUDNESS_FC = 200.0   # Hz — one-pole shelf corner
+FM_SLOPE = 0.08           # dB shelf per dB of attenuation (0.8 dB / 10 dB)
 
 
 def compute_smart_volume_curves(
@@ -31,7 +40,6 @@ def compute_smart_volume_curves(
 
     Returns dict with keys: curves, lut_db, params.
     """
-    max_shelf_linear = 10.0 ** (SV_SHELF_MAX_DB / 20.0)
     pg_loud_linear = 10.0 ** (pre_gain_db_loud / 20.0)
 
     # Volume LUT: linear-in-dB mapping from sv_db_floor → overboost_db
@@ -41,6 +49,12 @@ def compute_smart_volume_curves(
     if sv_db_floor < -80.0:
         sv_db_floor = -80.0
 
+    lut_range = -sv_db_floor  # 24–80 dB — the speaker's total dynamic range
+
+    # Peak shelf at vol=0 = FM_SLOPE × lut_range (linear with total range)
+    max_shelf_db = FM_SLOPE * lut_range
+    max_shelf_linear = 10.0 ** (max_shelf_db / 20.0)
+
     # Precompute per-step data (0, 32, 64, 96, 127)
     steps = [0, 32, 64, 96, 127]
     curves = []
@@ -48,14 +62,14 @@ def compute_smart_volume_curves(
 
     for vol in steps:
         # Volume attenuation (matches smart_volume_rebuild_lut with compensation_db=0)
-        vol_db = sv_db_floor + (float(vol) / 127.0) * (-sv_db_floor) + overboost_db
+        vol_db = sv_db_floor + (float(vol) / 127.0) * lut_range + overboost_db
         if vol_db > overboost_db:
             vol_db = overboost_db
 
-        # Smart volume: cube-root shelf (matches smart_volume_compute)
+        # Smart volume: linear FM shelf (matches smart_volume_compute)
         t = float(vol) / 127.0
-        atten_norm = 1.0 - t
-        shelf_db_val = SV_SHELF_MAX_DB * (atten_norm ** 0.33)
+        drop_db = lut_range * (1.0 - t)  # dB below peak
+        shelf_db_val = FM_SLOPE * drop_db
 
         # Pre-gain (matches smart_volume_compute)
         pg_quiet = pg_loud_linear / max_shelf_linear
@@ -95,7 +109,8 @@ def compute_smart_volume_curves(
         "lut_db": lut_db,
         "params": {
             "fc": float(SV_LOUDNESS_FC),
-            "shelf_max_db": float(SV_SHELF_MAX_DB),
+            "fm_slope": float(FM_SLOPE),
+            "shelf_max_db": round(max_shelf_db, 2),
             "pre_gain_db_loud": round(pre_gain_db_loud, 1),
             "speaker_level_db": speaker_level_db,
             "sv_db_floor": round(sv_db_floor, 1),
