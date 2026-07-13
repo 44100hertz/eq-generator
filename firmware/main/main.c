@@ -27,6 +27,7 @@
 #include "eq_coeffs.h"
 #include "envelope.h"
 #include "smart_volume.h"
+#include "volume_control.h"
 
 #include "bt_a2dp.h"
 #include "i2s_out.h"
@@ -121,7 +122,7 @@ static void play_sfx(const int16_t *mono, uint32_t n_samples, int rate)
     int16_t stereo[SFX_BATCH * 2];
 
     uint8_t vol = bt_a2dp_get_volume();
-    float vol_f = vol_lut[vol];   /* dB-linear LUT — same as audio path */
+    float vol_f = volume_gain(vol_lut, vol);   /* dB-linear LUT — same as audio path */
 
     /* Cap SFX to prevent blasting on high-gain speakers.
      * SFX never plays louder than -(speaker_level - 20) dB FS. */
@@ -250,7 +251,7 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
     if (vol != last_vol) {
         update_smart_volume(rate, vol);
     }
-    float vol_f = vol_lut[vol];
+    float vol_f = volume_gain(vol_lut, vol);
 
     /* ── Batch buffer for I2S writes: processes into local
      *   buffer, flushes in chunks to amortize DMA overhead. ── */
@@ -334,19 +335,7 @@ static void update_smart_volume(int rate, uint8_t vol)
 {
     if (dsp_rate <= 0) return;
 
-    float pg_loud = 1.0f;
-#ifdef EQGEN_PRE_GAIN
-    pg_loud = EQGEN_PRE_GAIN;
-#endif
-
-    SmartVolumeParams svp;
-    smart_volume_compute(vol, pg_loud, &svp);
-
-    BassEnhancer_update_params(&enhancer,
-                               svp.pre_gain, svp.boost);
-
-    smart_volume_rebuild_lut(vol_lut, svp.shelf_db, EQGEN_SPEAKER_LEVEL_DB, EQGEN_OVERBOOST_DB);
-
+    SmartVolumeParams svp = volume_set(vol, vol_lut, &enhancer);
     last_vol = vol;
 
     ESP_LOGI(TAG, "Smart vol: vol=%u t=%.2f shelf=%.1f dB pg=%.3f",
@@ -367,7 +356,7 @@ void app_main(void)
     bt_a2dp_set_event_callback(bt_event_handler);
     bt_a2dp_sink_init(EQGEN_BT_DEVICE_NAME, audio_data_handler);
 
-    smart_volume_rebuild_lut(vol_lut, 0.0f, EQGEN_SPEAKER_LEVEL_DB, EQGEN_OVERBOOST_DB);
+    volume_init_lut(vol_lut);
 
     ESP_LOGI(TAG, "Firmware running — pair your phone now.");
 }

@@ -37,10 +37,10 @@ typedef struct {
 
 /* ── Compute shelf boost and pre-gain for a given volume level ────
  *
- * h2_amp, h3_amp, and fundamental_bleed are now compile-time
- * constants (EQGEN_H2_AMP, EQGEN_H3_AMP, EQGEN_BLEED_CAP) set at
- * enhancer init and never changed at runtime.  Volume only affects
- * the loudness shelf and its compensating pre-gain.
+ * Maps 0–127 to pre-enhancer gain via vol_lut[vol] (linear-in-dB).
+ * Additionally applies a loudness shelf (cube-root power law) to
+ * compensate for Fletcher-Munson equal-loudness contours at low
+ * volumes — exactly as the target speaker box does.
  * ──────────────────────────────────────────────────────────────── */
 
 static inline void smart_volume_compute(uint8_t vol,

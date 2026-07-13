@@ -27,6 +27,7 @@
 #include "eq_coeffs.h"
 #include "enhancer.h"
 #include "smart_volume.h"
+#include "volume_control.h"
 
 static volatile int g_running = 1;
 
@@ -65,11 +66,11 @@ int main(int argc, char *argv[]) {
 #else
     float pre_gain_f = 1.0f;
 #endif
-    const float pg_ref = pre_gain_f;  /* never mutate */
 
-    /* Volume LUT — mirrors ESP32 rebuild_vol_lut() exactly. */
+    /* Volume LUT — shared orchestration identical to ESP32 firmware. */
     float vol_lut[128];
-    smart_volume_rebuild_lut(vol_lut, 0.0f, EQGEN_SPEAKER_LEVEL_DB, EQGEN_OVERBOOST_DB);
+    volume_init_lut(vol_lut);
+    uint8_t current_vol = 127;  /* start at full volume */
 
     BassEnhancerCfg_init(&cfg,
                          EQGEN_CUTOFF_HZ,
@@ -112,14 +113,8 @@ int main(int argc, char *argv[]) {
             while ((nr = read(ctrl_fd, &vol_byte, 1)) > 0) {
                 uint8_t vol = vol_byte;
                 if (vol <= 127) {
-                    SmartVolumeParams svp;
-                    smart_volume_compute(vol, pg_ref, &svp);
-
-                    smart_volume_rebuild_lut(vol_lut, svp.shelf_db, EQGEN_SPEAKER_LEVEL_DB, EQGEN_OVERBOOST_DB);
-
-                    BassEnhancer_update_params(&enh,
-                                               svp.pre_gain, svp.boost);
-
+                    current_vol = vol;
+                    SmartVolumeParams svp = volume_set(vol, vol_lut, &enh);
                     fprintf(stderr, "filter: vol=%u pg=%.3f shelf=%.1f dB\n",
                             (unsigned)vol,
                             (double)svp.pre_gain,
@@ -151,7 +146,7 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        float vol_gain = vol_lut[127];
+        float vol_gain = volume_gain(vol_lut, current_vol);
         for (size_t i = 0; i < nread; i++) {
             float l = buf_interleaved[i * 2];
             float r = buf_interleaved[i * 2 + 1];

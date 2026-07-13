@@ -1,7 +1,7 @@
 """
 Smart volume simulation: model the correction curve at different volume levels.
 
-Matches the C firmware (smart_volume.h / eq_coeffs.h) exactly:
+Matches the C firmware (smart_volume.h / filter.c) exactly:
   - Shelf boost: cube-root power law (equal-loudness contours)
   - Pre-gain: linear interpolation pg_quiet → pg_loud
   - Volume LUT: attenuation mapped through speaker_level
@@ -29,7 +29,7 @@ def compute_smart_volume_curves(
 ) -> dict:
     """Compute effective curves at different smart-volume levels.
 
-    Returns dict with keys: curves, shelf_curves, lut_db, params.
+    Returns dict with keys: curves, lut_db, params.
     """
     max_shelf_linear = 10.0 ** (SV_SHELF_MAX_DB / 20.0)
     pg_loud_linear = 10.0 ** (pre_gain_db_loud / 20.0)
@@ -44,11 +44,10 @@ def compute_smart_volume_curves(
     # Precompute per-step data (0, 32, 64, 96, 127)
     steps = [0, 32, 64, 96, 127]
     curves = []
-    shelf_curves = []
     lut_db = []
 
     for vol in steps:
-        # Volume attenuation (matches smart_volume_rebuild_lut)
+        # Volume attenuation (matches smart_volume_rebuild_lut with compensation_db=0)
         vol_db = sv_db_floor + (float(vol) / 127.0) * (-sv_db_floor) + overboost_db
         if vol_db > overboost_db:
             vol_db = overboost_db
@@ -57,7 +56,6 @@ def compute_smart_volume_curves(
         t = float(vol) / 127.0
         atten_norm = 1.0 - t
         shelf_db_val = SV_SHELF_MAX_DB * (atten_norm ** 0.33)
-        shelf_linear = 10.0 ** (shelf_db_val / 20.0)
 
         # Pre-gain (matches smart_volume_compute)
         pg_quiet = pg_loud_linear / max_shelf_linear
@@ -67,7 +65,7 @@ def compute_smart_volume_curves(
         # Shelf response: one-pole low shelf at 200 Hz
         if shelf_db_val > 0.01:
             shelf_gain = np.array([
-                1.0 + (shelf_linear - 1.0) * first_order_lp_mag(f, SV_LOUDNESS_FC)
+                1.0 + (10.0 ** (shelf_db_val / 20.0) - 1.0) * first_order_lp_mag(f, SV_LOUDNESS_FC)
                 for f in freqs
             ])
             shelf_db_arr = 20.0 * np.log10(np.maximum(shelf_gain, 1e-12))
@@ -89,18 +87,10 @@ def compute_smart_volume_curves(
             "freqs": freqs.tolist(),
             "effective_db": effective_db.tolist(),
         })
-        shelf_curves.append({
-            "label": label,
-            "vol": vol,
-            "t": round(t, 2),
-            "freqs": freqs.tolist(),
-            "shelf_db": shelf_db_arr.tolist(),
-        })
         lut_db.append(round(vol_db, 1))
 
     return {
         "curves": curves,
-        "shelf_curves": shelf_curves,
         "vol_steps": steps,
         "lut_db": lut_db,
         "params": {
