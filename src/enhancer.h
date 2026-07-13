@@ -5,12 +5,21 @@
  *   1. DC blocker (5 Hz HP)
  *   2. Pre-gain
  *   3. EQ preprocessing (cascaded biquads)
- *   4. LP(fc) → envelope → normalize → T2 → scale     (T2 harmonics)
- *   5. LP(fc/2) → envelope → normalize → T3 → scale   (T3 harmonics)
- *   6. HP(fc) dry + HP(fc) harmonics → mix
- *   7. Fundamental bleed (optional)
- *   8. Harmonic AGC limiter
- *   9. Loudness shelf (optional)
+ *   4. Lookahead: LR4 LP/HP split → ring buffer → upcoming peak
+ *   5. Delay line (5 ms) → LR4 LP → envelope → normalize
+ *   6. Crossfade: target = env, room = push_gain·(1−upcoming)
+ *      w = (target−room)/(target·(1−h)), blend fundamental ↔ harmonics
+ *   7. Mix: LR4 HP + (1−w)·lp_fund + harm
+ *   8. Loudness shelf (optional)
+ *   9. Soft output clamp (tanh)
+ *
+ * Volume scaling MUST run before this enhancer so the headroom
+ * budget is relative to the already-attenuated signal.
+ *
+ * The LP/HP split uses an LR4 crossover (two cascaded 2nd-order
+ * Butterworth sections each).  Unlike a complementary 1st-order split,
+ * the LR4 has negligible phase bleed below cutoff — the lookahead
+ * detects actual HF content, not crossover artifacts.
  *
  * Usage:
  *   BassEnhancer enh;
@@ -24,9 +33,11 @@
 #pragma once
 #include <stdint.h>
 #include "biquad.h"
-#include "lp.h"
 #include "envelope.h"
 #include "dc_blocker.h"
+
+#define LOOKAHEAD_LEN         240   /* 5 ms @ 48 kHz */
+#define LR4_SECTIONS          2     /* cascaded 2nd-order sections */
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,25 +50,24 @@ typedef struct {
     float   h3_amp;         /* 3rd harmonic amplitude (0..1, typ. 0.33)*/
     float   fs;             /* sample rate (typ. 44100)                */
     float   release_secs;   /* envelope release time (typ. 0.2)        */
-    float   limiter_release_secs; /* limiter release time (typ. 0.049)   */
+    float   push_gain;       /* headroom fill strength (1.0 = 0 dBFS) */
 
     /* Pre-computed coefficients */
     float   release_coeff;      /* exp(-1/(fs*release))                */
-    float   limiter_release_coeff; /* exp(-1/(fs*lim_rel))             */
     float   pre_gain;           /* gain before EQ                      */
+    float   h2_scale;           /* h2_amp / (h2_amp + h3_amp)        */
+    float   h3_scale;           /* h3_amp / (h2_amp + h3_amp)        */
 
     /* Loudness compensation */
     float   loudness_alpha;      /* one-pole LP alpha (0 = disabled)   */
     float   loudness_boost;      /* (G-1), 0 = no shelf                */
-    float   fundamental_bleed;   /* LP→mix bleed (0=none, ~0.25=max)   */
 
-    /* Butterworth HP coefficients */
-    float   hp_coeffs[5];       /* HP at cutoff_hz  (dry path)         */
-    float   hp_harm_coeffs[5];  /* HP at cutoff_hz  (harmonics path)   */
+    /* 2nd-order Butterworth HP (harmonics cleanup path only) */
+    float   hp_harm_coeffs[5];
 
-    /* First-order LP coefficients */
-    float   lp_t2_alpha;        /* LP at cutoff_hz  (for T2 path)      */
-    float   lp_t3_alpha;        /* LP at cutoff_hz/2 (for T3 path)     */
+    /* LR4 crossover: 2 cascaded 2nd-order Butterworth sections each */
+    float   lp_cross_coeffs[LR4_SECTIONS * 5];  /* LP biquad coeffs */
+    float   hp_cross_coeffs[LR4_SECTIONS * 5];  /* HP biquad coeffs */
 
     /* EQ settings */
     int     eq_n_biquads;       /* number of EQ biquads                */
@@ -71,16 +81,25 @@ typedef struct {
 
     Biquad     *eq_bqs;          /* array of eq_n_biquads Biquad       */
 
-    /* Enhancer filters */
-    LP          lp_t2;            /* LP filter for T2 path              */
-    LP          lp_t3;            /* LP filter for T3 path              */
-    Biquad      hp;               /* HP filter for dry path             */
-    Biquad      hp_harm;          /* HP filter for harmonics path       */
+    /* LR4 crossover filter states */
+    Biquad      lp_cross[LR4_SECTIONS];  /* LP for fundamental extract */
+    Biquad      hp_cross[LR4_SECTIONS];  /* HP for dry high-pass      */
+    Biquad      hp_lookahead[LR4_SECTIONS]; /* HP for lookahead       */
+    Biquad      hp_harm;              /* HP for harmonics cleanup       */
 
     /* Envelopes */
-    Env         env_t2;           /* envelope for T2 path               */
-    Env         env_t3;           /* envelope for T3 path               */
-    Env         env_lim;          /* envelope for harmonic limiter      */
+    Env         env;              /* instantaneous envelope             */
+    float       env_smooth;       /* env low-passed to kill ripple     */
+
+    /* Crossfade slew state */
+    float       w_slew;           /* low-passed crossfade weight       */
+    float       harm_amp_slew;    /* low-passed harmonic amplitude     */
+
+    /* Lookahead */
+    float       hp_ring[LOOKAHEAD_LEN];  /* |dry_hp| window         */
+    int         hp_ring_pos;
+    float       eq_delay[LOOKAHEAD_LEN]; /* delay line for eq_out   */
+    int         delay_pos;
 } BassEnhancerChan;
 
 /* ── Stereo enhancer ───────────────────────────────────────────────── */
@@ -97,6 +116,14 @@ typedef struct {
  */
 void bass_design_butter_hp(float fc, float fs, float coeffs_out[5]);
 
+/** Design LR4 crossover coefficients.
+ *  lp_coeffs[10]: two cascaded 2nd-order LP biquads (5 coeffs each)
+ *  hp_coeffs[10]: two cascaded 2nd-order HP biquads (5 coeffs each)
+ */
+void bass_design_lr4(float fc, float fs,
+                      float lp_coeffs[LR4_SECTIONS * 5],
+                      float hp_coeffs[LR4_SECTIONS * 5]);
+
 /** Configure the loudness compensation shelf.
  *  fc: corner frequency (typ. 200 Hz)
  *  boost_db: max gain at DC (typ. 8 dB).  0 disables the shelf.
@@ -105,19 +132,18 @@ void BassEnhancerCfg_set_loudness(BassEnhancerCfg *cfg,
                                   float fc, float fs, float boost_db);
 
 /** Update runtime parameters without resetting filter state.
- *  Pass NaN for any parameter to leave it unchanged. */
+ *  h2_amp, h3_amp are set once via cfg and
+ *  never changed at runtime.  Pass NaN to leave unchanged. */
 void BassEnhancer_update_params(BassEnhancer *enh,
-                                float h2_amp, float h3_amp,
                                 float pre_gain,
-                                float loudness_boost,
-                                float fundamental_bleed);
+                                float loudness_boost);
 
 /** Initialize BassEnhancerCfg from user-friendly parameters.
  *  Designs all LP/HP filters and pre-computes coefficients. */
 void BassEnhancerCfg_init(BassEnhancerCfg *cfg,
                           float cutoff_hz, float h2_amp, float h3_amp,
                           float release_secs, float fs,
-                          float limiter_release_secs,
+                          float push_gain,
                           float pre_gain,
                           int eq_n_biquads, const float *eq_coeffs);
 

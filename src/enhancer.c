@@ -28,6 +28,7 @@ static inline uint32_t esp_cpu_get_cycle_count(void) { return 0; }
 
 #define SQRT2 1.4142135623730951f
 
+#define ENV_SMOOTH_ALPHA 0.002f
 void bass_design_butter_hp(float fc, float fs, float coeffs_out[5]) {
     float omega = tanf((float)M_PI * fc / fs);
     float c = 1.0f + SQRT2 * omega + omega * omega;
@@ -39,12 +40,53 @@ void bass_design_butter_hp(float fc, float fs, float coeffs_out[5]) {
     coeffs_out[4] = (1.0f - SQRT2 * omega + omega * omega) / c;
 }
 
+/* ── LR4 crossover design ─────────────────────────────────────────── */
+
+void bass_design_lr4(float fc, float fs,
+                      float lp_coeffs[LR4_SECTIONS * 5],
+                      float hp_coeffs[LR4_SECTIONS * 5])
+{
+    float k = tanf((float)M_PI * fc / fs);
+    float k2 = k * k;
+    float norm = 1.0f / (1.0f + SQRT2 * k + k2);
+
+    /* Single 2nd-order Butterworth LP section */
+    float lp_b0 = k2 * norm;
+    float lp_b1 = 2.0f * k2 * norm;
+    float lp_b2 = k2 * norm;
+    float lp_a1 = 2.0f * (k2 - 1.0f) * norm;
+    float lp_a2 = (1.0f - SQRT2 * k + k2) * norm;
+
+    /* Single 2nd-order Butterworth HP section */
+    float hp_b0 = norm;
+    float hp_b1 = -2.0f * norm;
+    float hp_b2 = norm;
+    float hp_a1 = lp_a1;  /* same denominator as LP */
+    float hp_a2 = lp_a2;
+
+    /* Two cascaded sections for LR4 */
+    for (int i = 0; i < LR4_SECTIONS; i++) {
+        lp_coeffs[i * 5 + 0] = lp_b0;
+        lp_coeffs[i * 5 + 1] = lp_b1;
+        lp_coeffs[i * 5 + 2] = lp_b2;
+        lp_coeffs[i * 5 + 3] = lp_a1;
+        lp_coeffs[i * 5 + 4] = lp_a2;
+
+        hp_coeffs[i * 5 + 0] = hp_b0;
+        hp_coeffs[i * 5 + 1] = hp_b1;
+        hp_coeffs[i * 5 + 2] = hp_b2;
+        hp_coeffs[i * 5 + 3] = hp_a1;
+        hp_coeffs[i * 5 + 4] = hp_a2;
+    }
+}
+
+
 /* ── Configuration initialization ──────────────────────────────────── */
 
 void BassEnhancerCfg_init(BassEnhancerCfg *cfg,
                           float cutoff_hz, float h2_amp, float h3_amp,
                           float release_secs, float fs,
-                          float limiter_release_secs,
+                          float push_gain,
                           float pre_gain,
                           int eq_n_biquads, const float *eq_coeffs)
 {
@@ -54,17 +96,21 @@ void BassEnhancerCfg_init(BassEnhancerCfg *cfg,
     cfg->h3_amp           = h3_amp;
     cfg->fs               = fs;
     cfg->release_secs     = release_secs;
-    cfg->limiter_release_secs = limiter_release_secs;
+    cfg->push_gain        = push_gain;
     cfg->pre_gain         = pre_gain;
 
-    /* Pre-compute release coefficients */
+    /* Pre-compute release coefficient */
     cfg->release_coeff = expf(-1.0f / (fs * release_secs));
-    cfg->limiter_release_coeff = expf(-1.0f / (fs * limiter_release_secs));
 
-    /* Design LP filters (first-order) */
-    cfg->lp_t2_alpha = 1.0f - expf(-2.0f * (float)M_PI * cutoff_hz / fs);
-    cfg->lp_t3_alpha = 1.0f - expf(-2.0f * (float)M_PI * cutoff_hz * 0.5f / fs);
-    bass_design_butter_hp(cutoff_hz, fs, cfg->hp_coeffs);
+    /* Pre-compute Chebyshev input scales */
+    float h_sum = h2_amp + h3_amp;
+    cfg->h2_scale = (h_sum > 1e-6f) ? h2_amp / h_sum : 0.0f;
+    cfg->h3_scale = (h_sum > 1e-6f) ? h3_amp / h_sum : 0.0f;
+
+    /* Design LR4 crossover LP/HP coefficients */
+    bass_design_lr4(cutoff_hz, fs, cfg->lp_cross_coeffs, cfg->hp_cross_coeffs);
+
+    /* Design HP for harmonics cleanup (2nd-order Butterworth) */
     bass_design_butter_hp(cutoff_hz, fs, cfg->hp_harm_coeffs);
 
     /* EQ settings */
@@ -74,7 +120,6 @@ void BassEnhancerCfg_init(BassEnhancerCfg *cfg,
     /* Loudness defaults: disabled */
     cfg->loudness_alpha    = 0.0f;
     cfg->loudness_boost    = 0.0f;
-    cfg->fundamental_bleed = 0.0f;
 }
 
 /* ── Loudness shelf setup ──────────────────────────────────────── */
@@ -98,16 +143,11 @@ void BassEnhancerCfg_set_loudness(BassEnhancerCfg *cfg,
 #endif
 
 void BassEnhancer_update_params(BassEnhancer *enh,
-                                float h2_amp, float h3_amp,
                                 float pre_gain,
-                                float loudness_boost,
-                                float fundamental_bleed)
+                                float loudness_boost)
 {
-    if (!isnan(h2_amp))            enh->cfg.h2_amp            = h2_amp;
-    if (!isnan(h3_amp))            enh->cfg.h3_amp            = h3_amp;
     if (!isnan(pre_gain))          enh->cfg.pre_gain          = pre_gain;
     if (!isnan(loudness_boost))    enh->cfg.loudness_boost    = loudness_boost;
-    if (!isnan(fundamental_bleed)) enh->cfg.fundamental_bleed = fundamental_bleed;
 }
 
 /* ── Enhancer init / reset ─────────────────────────────────────────── */
@@ -128,31 +168,38 @@ void BassEnhancer_init(BassEnhancer *enh,
         biquad_init(&eq_bqs_right[i], &cfg->eq_coeffs[i * 5]);
     }
 
-    /* Initialize LP filters */
-    lp_init(&enh->left.lp_t2,   cfg->lp_t2_alpha);
-    lp_init(&enh->left.lp_t3,   cfg->lp_t3_alpha);
-    lp_init(&enh->right.lp_t2,  cfg->lp_t2_alpha);
-    lp_init(&enh->right.lp_t3,  cfg->lp_t3_alpha);
+    /* Initialize LR4 crossover LP and HP biquads.
+     * Use enh->cfg (the persistent copy) for coefficient pointers,
+     * NOT &cfg which is stack-local and becomes dangling when this
+     * function returns (the biquad stores a pointer, not a copy). */
+    for (int i = 0; i < LR4_SECTIONS; i++) {
+        biquad_init(&enh->left.lp_cross[i],  &enh->cfg.lp_cross_coeffs[i * 5]);
+        biquad_init(&enh->right.lp_cross[i], &enh->cfg.lp_cross_coeffs[i * 5]);
+        biquad_init(&enh->left.hp_cross[i],  &enh->cfg.hp_cross_coeffs[i * 5]);
+        biquad_init(&enh->right.hp_cross[i], &enh->cfg.hp_cross_coeffs[i * 5]);
+        biquad_init(&enh->left.hp_lookahead[i],  &enh->cfg.hp_cross_coeffs[i * 5]);
+        biquad_init(&enh->right.hp_lookahead[i], &enh->cfg.hp_cross_coeffs[i * 5]);
+    }
 
-    /* Initialize HP biquads */
-    biquad_init(&enh->left.hp,      enh->cfg.hp_coeffs);
-    biquad_init(&enh->left.hp_harm, enh->cfg.hp_harm_coeffs);
-    biquad_init(&enh->right.hp,      enh->cfg.hp_coeffs);
+    /* Initialize HP for harmonics cleanup */
+    biquad_init(&enh->left.hp_harm,  enh->cfg.hp_harm_coeffs);
     biquad_init(&enh->right.hp_harm, enh->cfg.hp_harm_coeffs);
+
+    enh->left.env_smooth = 0.0f;
+    enh->right.env_smooth = 0.0f;
+    enh->left.w_slew = 0.0f;
+    enh->right.w_slew = 0.0f;
+    enh->left.harm_amp_slew = 0.0f;
+    enh->right.harm_amp_slew = 0.0f;
 
     /* Initialize DC blockers (5 Hz cutoff) */
     float dc_R = expf(-2.0f * (float)M_PI * 5.0f / cfg->fs);
     dc_blocker_init(&enh->left.dc_block,  dc_R);
     dc_blocker_init(&enh->right.dc_block, dc_R);
 
-    /* Initialize envelopes */
-    env_init(&enh->left.env_t2,   cfg->release_coeff);
-    env_init(&enh->left.env_t3,   cfg->release_coeff);
-    env_init(&enh->right.env_t2,  cfg->release_coeff);
-    env_init(&enh->right.env_t3,  cfg->release_coeff);
-
-    env_init(&enh->left.env_lim,  cfg->limiter_release_coeff);
-    env_init(&enh->right.env_lim, cfg->limiter_release_coeff);
+    /* Initialize envelope */
+    env_init(&enh->left.env,  cfg->release_coeff);
+    env_init(&enh->right.env, cfg->release_coeff);
 }
 
 void BassEnhancer_reset(BassEnhancer *enh) {
@@ -163,24 +210,40 @@ void BassEnhancer_reset(BassEnhancer *enh) {
         biquad_reset(&enh->right.eq_bqs[i]);
     }
 
-    lp_reset(&enh->left.lp_t2);
-    lp_reset(&enh->left.lp_t3);
-    lp_reset(&enh->right.lp_t2);
-    lp_reset(&enh->right.lp_t3);
-    biquad_reset(&enh->left.hp);
+    for (int i = 0; i < LR4_SECTIONS; i++) {
+        biquad_reset(&enh->left.lp_cross[i]);
+        biquad_reset(&enh->right.lp_cross[i]);
+        biquad_reset(&enh->left.hp_cross[i]);
+        biquad_reset(&enh->right.hp_cross[i]);
+        biquad_reset(&enh->left.hp_lookahead[i]);
+        biquad_reset(&enh->right.hp_lookahead[i]);
+    }
+
     biquad_reset(&enh->left.hp_harm);
-    biquad_reset(&enh->right.hp);
     biquad_reset(&enh->right.hp_harm);
 
     dc_blocker_reset(&enh->left.dc_block);
     dc_blocker_reset(&enh->right.dc_block);
 
-    enh->left.env_t2.peak   = 0.0f;
-    enh->left.env_t3.peak   = 0.0f;
-    enh->right.env_t2.peak  = 0.0f;
-    enh->right.env_t3.peak  = 0.0f;
-    enh->left.env_lim.peak  = 0.0f;
-    enh->right.env_lim.peak = 0.0f;
+    enh->left.env.peak  = 0.0f;
+    enh->right.env.peak = 0.0f;
+    enh->left.env_smooth  = 0.0f;
+    enh->right.env_smooth = 0.0f;
+    enh->left.w_slew  = 0.0f;
+    enh->right.w_slew = 0.0f;
+    enh->left.harm_amp_slew  = 0.0f;
+    enh->right.harm_amp_slew = 0.0f;
+
+    for (int i = 0; i < LOOKAHEAD_LEN; i++) {
+        enh->left.hp_ring[i]  = 0.0f;
+        enh->right.hp_ring[i] = 0.0f;
+        enh->left.eq_delay[i]  = 0.0f;
+        enh->right.eq_delay[i] = 0.0f;
+    }
+    enh->left.hp_ring_pos  = 0;
+    enh->right.hp_ring_pos = 0;
+    enh->left.delay_pos    = 0;
+    enh->right.delay_pos   = 0;
 
     enh->left.loudness_state  = 0.0f;
     enh->right.loudness_state = 0.0f;
@@ -203,7 +266,7 @@ void enhancer_profile_report(void) {
              (unsigned long long)(enh_profile.cycles_env / n));
     ESP_LOGI("enhancer", "  Chebyshev+scale: %llu cy/frame",
              (unsigned long long)(enh_profile.cycles_harm / n));
-    ESP_LOGI("enhancer", "  HP+mix+limiter: %llu cy/frame",
+    ESP_LOGI("enhancer", "  HP+mix+headroom: %llu cy/frame",
              (unsigned long long)(enh_profile.cycles_mix / n));
     ESP_LOGI("enhancer", "  I2S write: %llu cy/frame",
              (unsigned long long)(enh_profile.cycles_i2s / n));
@@ -244,77 +307,160 @@ static float enhancer_process_channel(BassEnhancerChan *ch,
 
     c1 = esp_cpu_get_cycle_count();
 
-    /* ── Stage 2: First-order LP at cutoff_hz for T2 path ──────── */
-    float lp_t2  = lp_tick(&ch->lp_t2, eq_out);
-    float env_t2 = env_tick(&ch->env_t2, lp_t2);
+    /* ── Lookahead: LR4 HP filter on current sample ──────────── */
+    float hp_now = biquad_cascade(ch->hp_lookahead, LR4_SECTIONS, eq_out);
+    ch->hp_ring[ch->hp_ring_pos] = fabsf(hp_now);
+    ch->hp_ring_pos = (ch->hp_ring_pos + 1) % LOOKAHEAD_LEN;
 
-    /* Floor envelope to 0.25 → 1/env capped at 4.0 (+12 dB) */
-    float env_t2_norm = env_t2 > 0.25f ? env_t2 : 0.25f;
-    float norm_t2;
-    if (env_t2 > 1e-6f) {
-        norm_t2 = lp_t2 / env_t2_norm;
-    } else {
-        norm_t2 = 0.0f;
+    /* Find upcoming peak */
+    float upcoming = 0.0f;
+    for (int i = 0; i < LOOKAHEAD_LEN; i++) {
+        if (ch->hp_ring[i] > upcoming) upcoming = ch->hp_ring[i];
     }
 
-    /* Scale by h2_amp and apply Chebyshev T2 */
-    float harm_scaled_t2;
-    if (cfg->h2_amp <= 0.0f) {
-        harm_scaled_t2 = 0.0f;
+    /* ── Delay line: get delayed eq_out, write current ──────────── */
+    float eq_delayed = ch->eq_delay[(ch->delay_pos + 1) % LOOKAHEAD_LEN];
+    ch->eq_delay[ch->delay_pos] = eq_out;
+    ch->delay_pos = (ch->delay_pos + 1) % LOOKAHEAD_LEN;
+
+    /* ── Process delayed signal: LR4 LP/HP split ─────────────── */
+    float lp_fund = biquad_cascade(ch->lp_cross, LR4_SECTIONS, eq_delayed);
+    float dry_hp   = biquad_cascade(ch->hp_cross, LR4_SECTIONS, eq_delayed);
+
+    /* Envelope for Chebyshev normalization */
+    float env = env_tick(&ch->env, lp_fund);
+    /* Smooth env to kill 2f ripple: ripple AM in norm contaminates
+     * the Chebyshev output with modulation sidebands that
+     * interfere with the dry_hp fundamental, creating buzz. */
+    ch->env_smooth += ENV_SMOOTH_ALPHA * (env - ch->env_smooth);
+    /* Adaptive blend: during steady state the smoothed envelope kills
+     * 2f ripple (ripple amplitude ≈ 0.077·A < 0.1 threshold).  During
+     * transients (sweeps, attacks) env jumps by >0.3 and the blend
+     * switches to near-instant tracking, preventing norm from spiking
+     * above 1.0 and kicking the Chebyshev or HP biquad states. */
+    float env_diff = fabsf(env - ch->env_smooth);
+    float blend = fminf(fmaxf((env_diff - 0.1f) * 5.0f, 0.0f), 1.0f);
+    float env_norm = ch->env_smooth * (1.0f - blend) + env * blend;
+    if (env_norm < 0.25f) env_norm = 0.25f;
+    float norm = (env > 1e-6f) ? lp_fund / env_norm : 0.0f;
+
+    /* ── Headroom budget ────────────────────────────────────────── */
+    float room = cfg->push_gain * (1.0f - upcoming);
+    if (room < 0.0f) room = 0.0f;
+
+    /* ── Crossfade: fundamental ↔ harmonics ──────────────────────
+     *
+     * target = env — smoothed bass level (envelope of lp_fund).
+     *    Using env (not |lp_fund|) avoids 2f AM modulation on
+     *    pure tones that would create intermodulation buzz.
+     * h      = h2_amp + h3_amp — harmonic perceptual efficiency.
+     *   A harmonic at unit physical amplitude delivers ~1/h times
+     *   the perceived loudness of a fundamental at unit amplitude.
+     *   (Small h → harmonics are efficient → less physical needed.)
+     * w      = fraction of bass loudness supplied by harmonics.
+     *
+     * When target ≤ room: pure fundamental (w=0).
+     * When target > room: blend to preserve perceived flatness.
+     *
+     * Output:  dry_hp + (1-w)·lp_fund + harm_out
+     *   dry_hp = LR4 HP (24 dB/oct)
+     *   lp_fund: LR4 LP (24 dB/oct)
+     *   Chebyshev amplitudes come from h2_amp/h3_amp (computed
+     *   by harmonic efficacy) — no separate budget clamp.
+     *   |fund_out| ≤ (1-w)·target
+     *   bass sum ≤ room by construction.
+     */
+    /* Perceived loudness is bounded by the tanh ceiling (1.0).
+     * When overboost pushes env >> 1, the tanh clamps the output
+     * and the extra level can't be perceived — cap target so the
+     * crossfade doesn't try to generate harmonics for inaudible headroom. */
+    float target = fminf(env, 1.0f);
+    float h = cfg->h2_amp + cfg->h3_amp;
+    float w_target;
+    if (target <= room || h >= 1.0f || target < 1e-6f) {
+        w_target = 0.0f;
     } else {
-        float cheb_in_t2 = norm_t2 * cfg->h2_amp;
-        float harm_t2 = cheb_t2(cheb_in_t2);
-        harm_scaled_t2 = harm_t2 * env_t2;
+        w_target = (target - room) / (target * (1.0f - h));
+        if (w_target > 1.0f) w_target = 1.0f;
     }
-
-    /* ── Stage 3: First-order LP at cutoff_hz/2 for T3 path ────── */
-    float lp_t3  = lp_tick(&ch->lp_t3, eq_out);
-    float env_t3 = env_tick(&ch->env_t3, lp_t3);
-
-    float env_t3_norm = env_t3 > 0.25f ? env_t3 : 0.25f;
-    float norm_t3;
-    if (env_t3 > 1e-6f) {
-        norm_t3 = lp_t3 / env_t3_norm;
+    /* Slew the crossfade weight to prevent the Chebyshev from turning
+     * on/off in one sample during sweeps — a sudden w jump kicks the
+     * HP harmonic biquad and sounds like a crackle.  Slew rate of
+     * 0.002 (~500 samples / 11 ms for full transition) is fast enough
+     * to track amplitude changes but slow enough to prevent clicks. */
+    float w = ch->w_slew;
+    float w_diff = w_target - w;
+    if (w_diff > 0.002f) {
+        w += 0.002f;
+    } else if (w_diff < -0.002f) {
+        w -= 0.002f;
     } else {
-        norm_t3 = 0.0f;
+        w = w_target;
     }
+    ch->w_slew = w;
 
-    float harm_scaled_t3;
-    if (cfg->h3_amp <= 0.0f) {
-        harm_scaled_t3 = 0.0f;
+    float fund_out = (1.0f - w) * lp_fund;
+
+    float harm_out = 0.0f;
+    if (w > 0.0f && h > 0.0f) {
+        /* Harmonics fill the headroom gap: target - room.
+         * Using the capped target ensures harmonics never exceed
+         * what the tanh can meaningfully reproduce.
+         * Slew harm_amp at the same rate as w to prevent the
+         * Chebyshev from turning on in one sample during sweeps. */
+        float harm_amp_target = target - room;
+        if (harm_amp_target < 0.0f) harm_amp_target = 0.0f;
+        float harm_amp = ch->harm_amp_slew;
+        float ha_diff = harm_amp_target - harm_amp;
+        if (ha_diff > 0.002f) {
+            harm_amp += 0.002f;
+        } else if (ha_diff < -0.002f) {
+            harm_amp -= 0.002f;
+        } else {
+            harm_amp = harm_amp_target;
+        }
+        ch->harm_amp_slew = harm_amp;
+
+        float harm_t2 = 0.0f;
+        if (cfg->h2_amp > 0.0f) {
+            harm_t2 = cheb_t2(norm * cfg->h2_scale) * harm_amp;
+        }
+        float harm_t3 = 0.0f;
+        if (cfg->h3_amp > 0.0f) {
+            harm_t3 = cheb_t3(norm * cfg->h3_scale) * harm_amp;
+            /* T3(x) = 4x³-3x.  With x = α·sin(ωt), fundamental =
+             * (3α³-3α)·sin(ωt).  Cancel this analytically.
+             * Scale the cancellation by harm_amp/env so it tracks
+             * the slewed harmonic amplitude — otherwise the full
+             * cancellation fires even when harm_amp ~ 0, injecting
+             * a phantom fundamental into the HP filter. */
+            float s = cfg->h3_scale;
+            float harm_ratio = harm_amp / fmaxf(env, 1e-10f);
+            if (harm_ratio > 1.0f) harm_ratio = 1.0f;
+            float t3_fund = 3.0f * s * (s * s - 1.0f) * lp_fund * harm_ratio;
+            harm_t3 -= t3_fund;
+        }
+
+        harm_out = biquad_tick(&ch->hp_harm, harm_t2 + harm_t3);
     } else {
-        float cheb_in_t3 = norm_t3 * cfg->h3_amp;
-        float harm_t3 = cheb_t3(cheb_in_t3);
-        harm_scaled_t3 = harm_t3 * env_t3;
-    }
-
-    /* ── Stage 3a: Fundamental bleed ────────────────────────────── */
-    float fundamental = 0.0f;
-    if (cfg->fundamental_bleed != 0.0f) {
-        fundamental = lp_t2 * cfg->fundamental_bleed;
+        ch->harm_amp_slew = 0.0f;
     }
 
     c2 = esp_cpu_get_cycle_count();
 
-    /* ── Stage 4: Mix ───────────────────────────────────────────── */
-    float harm_sum = harm_scaled_t2 + harm_scaled_t3 + fundamental;
-    float harm_hp  = biquad_tick(&ch->hp_harm, harm_sum);
-    float dry_hp   = biquad_tick(&ch->hp, eq_out);
-    float out = dry_hp + harm_hp;
+    float out = dry_hp + fund_out + harm_out;
 
-    /* ── Harmonic AGC limiter ──────────────────────────────────── */
-    float env_lim  = env_tick(&ch->env_lim, out);
-    float env_peak = env_lim > 1.0f ? env_lim : 1.0f;
-    float lim_gain = 1.0f / env_peak;
-    harm_hp *= lim_gain;
-    out = dry_hp + harm_hp;
-
-    /* ── Stage 5: Loudness shelf (one-pole low shelf, after limiter) ── */
+    /* ── Loudness shelf (one-pole low shelf) ────────────────────── */
     if (cfg->loudness_boost != 0.0f) {
         float diff = out - ch->loudness_state;
         ch->loudness_state += cfg->loudness_alpha * diff;
         out += ch->loudness_state * cfg->loudness_boost;
     }
+
+    /* ── Soft output clamp (tanh) — overboost may push dry_hp
+     *    or harmonics beyond [-1, 1].  tanh saturates musically
+     *    instead of hard-clipping, producing benign harmonics. ── */
+    out = tanhf(out);
 
     c3 = esp_cpu_get_cycle_count();
 
