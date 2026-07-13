@@ -16,7 +16,7 @@ pipeline is the C implementation exposed through enhancer_ffi.
 
 import numpy as np
 from dataclasses import dataclass
-from typing import Tuple
+from typing import List, Tuple
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2nd-order Butterworth biquad filters (bilinear transform)
@@ -140,3 +140,44 @@ class BassEnhancerConfig:
     fs: float = 44100.0        # sample rate
     limiter_release_ms: float = 50.0   # ms — output limiter release
     limiter_threshold: float = 1.0     # linear — peak threshold for harmonic attenuation
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# dB conversion helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def db_to_ratio(db: float) -> float:
+    return 10.0 ** (db / 20.0)
+
+
+def ratio_to_db(ratio: float) -> float:
+    return 20.0 * np.log10(np.maximum(ratio, 1e-20))
+
+
+def pre_gain_from_max_gain(max_gain_db: float) -> float:
+    """Attenuation factor that keeps biquad internal states below overflow.
+
+    Input is attenuated by this factor before the biquad cascade;
+    biquads fit the full (unshifted) correction curve and boost
+    back up to unity at peak-gain frequencies.
+    """
+    return 1.0 / max(1.0, db_to_ratio(max_gain_db))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Default EQ coefficients (flat 3-HP cascade)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def build_default_eq_coeffs(fs: float = 44100.0) -> List[float]:
+    """Build a flat 3-HP-cascade default EQ as float list."""
+    coeffs = []
+    for fc in [25, 35, 45]:
+        omega = np.tan(np.pi * fc / fs)
+        c = 1.0 + SQRT2 * omega + omega * omega
+        b0 = 1.0 / c
+        b1 = -2.0 / c
+        b2 = 1.0 / c
+        a1 = (2.0 * (omega * omega - 1.0)) / c
+        a2 = (1.0 - SQRT2 * omega + omega * omega) / c
+        coeffs.extend([b0, b1, b2, a1, a2])
+    return coeffs

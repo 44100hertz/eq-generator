@@ -1,10 +1,9 @@
 """
-Compatibility shim — all DSP is now float. No more Q4.28/Q16 integer math.
+Deprecated compatibility shim — all DSP is now float.
 
-The BiquadQ28 class and associated functions are retained as thin wrappers
-that pass float coefficients through unchanged. Old code that imports from
-here will continue to work without modification.
-"""
+All functions here are identity passthroughs. Import from eqgen.eq_fit
+(BiquadCoeffs) or eqgen.pipeline (pre_gain_from_max_gain) directly
+instead. This module will be removed in a future cleanup."""
 
 import numpy as np
 from dataclasses import dataclass

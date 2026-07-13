@@ -18,7 +18,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from eqgen import enhancer_ffi as effi
-from eqgen.pipeline import build_default_eq_coeffs
+from eqgen.dsp import build_default_eq_coeffs
 from eqgen.analysis import generate_test_sine, goertzel_magnitude
 
 

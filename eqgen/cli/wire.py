@@ -32,7 +32,8 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from eqgen.pipeline import run_pipeline, design_eq, pre_gain_from_max_gain
+from eqgen.pipeline import run_pipeline, design_eq
+from eqgen.dsp import pre_gain_from_max_gain
 from eqgen.eq_fit import cascade_response_db, BiquadCoeffs
 from eqgen.presets import MAX_IIR_BANDS, get_house_curve
 

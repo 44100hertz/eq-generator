@@ -1,245 +1,42 @@
 """
-Shared pipeline: Welch FFT → CV-weighted smoothing → correction → IIR fit → C DSP.
+Shared pipeline: Welch FFT \u2192 CV-weighted smoothing \u2192 correction \u2192 IIR fit \u2192 C DSP.
 
 This module is the single source of truth for the EQ design and audio processing
 pipeline.  All CLI entry points (eqgen, audition, wire, export) delegate here.
 
 Exports:
-  run_pipeline()   — WAV inputs → (freqs, gains_db, sample_rate, max_gain_db, efficacy)
-  design_eq()      — EQ curve → quantized biquad coefficients
-  process_track()  — audio file → C enhancer → WAV
-  curve_to_json()  — serialise (freqs, gains_db) for JSON output
+  run_pipeline()   \u2014 WAV inputs \u2192 (freqs, gains_db, sample_rate, max_gain_db, efficacy)
+  design_eq()      \u2014 EQ curve \u2192 biquad coefficients
+  curve_to_json()  \u2014 serialise (freqs, gains_db) for JSON output
 """
 
 import json
-import os
-import random
-import struct
-import subprocess
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from eqgen.eq_fit import BiquadCoeffs, cascade_response_db, fit_eq_curve
 from eqgen.presets import MAX_IIR_BANDS
-from eqgen import enhancer_ffi
-from eqgen.dsp import first_order_lp_mag
+from eqgen.io import read_wav
+from eqgen.dsp import ratio_to_db, pre_gain_from_max_gain
+from eqgen.analysis import (
+    welch_stats,
+    _find_viable_range,
+    _smooth_kernel,
+    BOTTOM_F,
+    TOP_F,
+)
+
 ROOT = Path(__file__).resolve().parent.parent
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Constants
-# ═══════════════════════════════════════════════════════════════════════════════
-
-BOTTOM_F = 20.0       # Hz — lowest frequency analyzed
-TOP_F = 14000.0       # Hz — highest frequency analyzed
-WELCH_FFT_SIZE = 16384
-WELCH_OVERLAP = 0.5
-
-# Evaluation grid for the output curve — matches the IIR fitter's internal
+# Evaluation grid for the output curve \u2014 matches the IIR fitter's internal
 # log-spaced grid so no re-interpolation is needed downstream.
 N_EVAL = 512
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# dB conversion helpers
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def db_to_ratio(db: float) -> float:
-    return 10.0 ** (db / 20.0)
-
-
-def ratio_to_db(ratio: float) -> float:
-    return 20.0 * np.log10(np.maximum(ratio, 1e-20))
-
-
-def pre_gain_from_max_gain(max_gain_db: float) -> float:
-    """Attenuation factor that keeps biquad internal states below overflow.
-
-    Input is attenuated by this factor before the biquad cascade;
-    biquads fit the full (unshifted) correction curve and boost
-    back up to unity at peak-gain frequencies.
-    """
-    return 1.0 / max(1.0, db_to_ratio(max_gain_db))
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# WAV I/O
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def read_wav(path: str) -> Tuple[np.ndarray, float]:
-    """Read a mono or stereo WAV, returning mono float64 samples in [-1, 1]."""
-    from scipy.io import wavfile
-
-    rate, data = wavfile.read(path)
-
-    if data.dtype == np.int16:
-        data = data.astype(np.float64) / 32768.0
-    elif data.dtype == np.int32:
-        data = data.astype(np.float64) / 2147483648.0
-    elif data.dtype == np.uint8:
-        data = (data.astype(np.float64) - 128.0) / 128.0
-    elif data.dtype == np.float32:
-        data = data.astype(np.float64)
-    else:
-        raise ValueError(f"Unsupported WAV dtype: {data.dtype}")
-
-    if data.ndim == 2:
-        data = data.mean(axis=1)
-    elif data.ndim != 1:
-        raise ValueError(f"Unexpected WAV shape: {data.shape}")
-
-    return np.ascontiguousarray(data, dtype=np.float64), float(rate)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Welch's method FFT
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def welch_stats(samples: np.ndarray, sample_rate: float) -> List[dict]:
-    """Run Welch's method and return per-bin mean magnitude, power, and CV."""
-    fft_size = WELCH_FFT_SIZE
-    noverlap = int(fft_size * WELCH_OVERLAP)
-
-    step = fft_size - noverlap
-    win = np.hanning(fft_size)
-    bin_count = fft_size // 2 + 1
-
-    raw_sum = np.zeros(bin_count)
-    raw_sum_sq = np.zeros(bin_count)
-    norm_sum = np.zeros(bin_count)
-    norm_sum_sq = np.zeros(bin_count)
-    window_count = 0
-
-    for start in range(0, len(samples) - fft_size + 1, step):
-        segment = samples[start:start + fft_size] * win
-        spectrum = np.fft.rfft(segment)
-        mags_window = np.abs(spectrum) / fft_size
-        raw_sum += mags_window
-        raw_sum_sq += mags_window * mags_window
-
-        mean_mag = np.mean(mags_window)
-        if mean_mag > 0:
-            nm = mags_window / mean_mag
-            norm_sum += nm
-            norm_sum_sq += nm * nm
-        else:
-            norm_sum += 1.0
-            norm_sum_sq += 1.0
-        window_count += 1
-
-    n = float(window_count)
-    out_freqs = np.fft.rfftfreq(fft_size, 1.0 / sample_rate)
-
-    results = []
-    for i in range(bin_count):
-        f = out_freqs[i]
-        if f < BOTTOM_F or f > TOP_F:
-            continue
-        mean_val = max(raw_sum[i] / n, 0.0)
-        mean_sq = max(raw_sum_sq[i] / n, 0.0)
-        norm_mean = norm_sum[i] / n
-        norm_var = (norm_sum_sq[i] / n) - (norm_mean * norm_mean)
-        cv = (np.sqrt(norm_var) / norm_mean) if norm_mean > 0 else float('inf')
-        results.append({
-            "freq": f,
-            "count": window_count,
-            "mean": mean_val,
-            "mean_sq": mean_sq,
-            "cv": cv,
-        })
-    return results
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# CV-weighted kernel smoother
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _find_viable_range(freqs: np.ndarray, cv: np.ndarray,
-                       cv_threshold: float = 2.0,
-                       margin_oct: float = 0.25) -> Tuple[float, float]:
-    """Find the frequency range where CV stays below *cv_threshold*.
-
-    Works outward from the middle: the last frequency where a running
-    maximum of CV (over ~⅓ octave) exceeds the threshold defines the
-    boundary.  A *margin_oct* pad is subtracted to stay safely inside.
-    If no shelf is found, returns the full range.
-    """
-    log_f = np.log2(freqs)
-    n = len(freqs)
-
-    # Running max over ~⅓ octave to catch sustained CV shelves, not single-bin spikes
-    bin_width = (log_f[-1] - log_f[0]) / (n - 1) if n > 1 else 0.0
-    radius = max(1, int(np.ceil((1.0 / 3.0) / bin_width))) if bin_width > 0 else 1
-    kernel = np.ones(2 * radius + 1)
-    cv_smooth = np.convolve(np.maximum(cv, 0), kernel, mode='same') / len(kernel)
-
-    mid = n // 2
-    margin_bins = int(np.ceil(margin_oct / bin_width)) if bin_width > 0 else 0
-
-    # Low boundary: walk left from middle, find first bin exceeding threshold
-    lo = 0
-    for i in range(mid, 0, -1):
-        if cv_smooth[i] > cv_threshold:
-            lo = min(i + 1 + margin_bins, n - 1)
-            break
-
-    # High boundary: walk right from middle
-    hi = n - 1
-    for i in range(mid, n):
-        if cv_smooth[i] > cv_threshold:
-            hi = max(i - 1 - margin_bins, 0)
-            break
-
-    return freqs[lo], freqs[hi]
-
-
-def _smooth_kernel(bin_freqs: np.ndarray, bin_values: np.ndarray,
-                   bin_cv: np.ndarray, eval_freqs: np.ndarray,
-                   bandwidth_oct = 0.5) -> np.ndarray:
-    """Evaluate a CV-weighted kernel smoother on a log-spaced grid.
-
-    Each output point is a weighted average of input bins within
-    ±bandwidth_oct octaves.  *bandwidth_oct* may be a scalar or a
-    per-evaluation-point array.  Distance weight (tricube) decays to
-    zero at the bandwidth edge.  Confidence weight is 1/CV, so low-CV
-    bins dominate their local region while high-CV bins are averaged out.
-
-    Unlike a cubic spline, this cannot oscillate below zero or collapse
-    to a flat line — the output is always a convex combination of input
-    values.
-    """
-    bandwidth_oct = np.asarray(bandwidth_oct, dtype=float)
-    scalar_bw = bandwidth_oct.ndim == 0
-
-    n_out = len(eval_freqs)
-    log_freqs = np.log2(bin_freqs)
-    log_eval = np.log2(eval_freqs)
-    conf = 1.0 / np.clip(bin_cv, 0.01, None)
-
-    result = np.empty(n_out)
-    # Process one point at a time since bandwidth may vary per point
-    for i in range(n_out):
-        d = np.abs(log_eval[i] - log_freqs)
-        bw = float(bandwidth_oct) if scalar_bw else float(bandwidth_oct[i])
-        if bw <= 0.0:
-            # Zero bandwidth — nearest-bin interpolation
-            j = np.argmin(d)
-            result[i] = bin_values[j]
-            continue
-        d_norm = d / bw
-        w_dist = np.where(d_norm < 1.0, (1.0 - d_norm ** 3) ** 3, 0.0)
-        w = w_dist * conf
-        w_sum = w.sum()
-        if w_sum > 0:
-            result[i] = np.average(bin_values, weights=w)
-        else:
-            result[i] = np.average(bin_values, weights=conf)
-    return np.maximum(result, 0.0)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Core pipeline: WAV inputs → EQ curve
+# Core pipeline: WAV inputs \u2192 EQ curve
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def run_pipeline(
@@ -316,22 +113,21 @@ def run_pipeline(
         assert noise_rate == sample_rate
         noise_stats = welch_stats(noise_samples, sample_rate)
 
-        # 4a. max() merge — high-CV intermittent noise dominates
+        # 4a. max() merge \u2014 high-CV intermittent noise dominates
         for i in range(min(len(pooled), len(noise_stats))):
             pooled[i]["cv"] = max(pooled[i]["cv"], noise_stats[i]["cv"])
 
-        # 4b. Noise-floor inflation — stationary noise with poor SNR
+        # 4b. Noise-floor inflation \u2014 stationary noise with poor SNR
         for i in range(len(pooled)):
             P_meas = max(pooled[i]["mean_sq"], 1e-20)
             P_noise = max(noise_stats[i]["mean_sq"], 1e-20)
             cv_n = noise_stats[i]["cv"]
-            # Inflate noise power by 1σ — accounts for peak, not mean, noise
+            # Inflate noise power by 1\u03c3 \u2014 accounts for peak, not mean, noise
             effective_noise = P_noise * (1.0 + cv_n)
             noise_ratio = min(0.99, effective_noise / P_meas)
             pooled[i]["cv"] = pooled[i]["cv"] / np.sqrt(max(0.01, 1.0 - noise_ratio))
 
     # 5. CV-weighted kernel smoothing on measurement only.
-    # Bandwidth scales with local CV: at the Rayleigh floor (0.52) it
     meas_freqs = np.array([s["freq"] for s in pooled])
     meas_raw = np.array([s["mean"] for s in pooled])
     meas_cv = np.array([s["cv"] for s in pooled])
@@ -341,7 +137,7 @@ def run_pipeline(
         targ_freqs = np.array([s["freq"] for s in target_stats])
         targ_raw_db = ratio_to_db(np.array([s["mean"] for s in target_stats]))
     else:
-        # No target WAV — use a flat 0 dB line spanning the measurement range
+        # No target WAV \u2014 use a flat 0 dB line spanning the measurement range
         target_stats = None
         targ_freqs = np.array([BOTTOM_F, TOP_F])
         targ_raw_db = np.array([0.0, 0.0])
@@ -355,9 +151,7 @@ def run_pipeline(
         noise_cv = np.array([s["cv"] for s in noise_stats])
 
     # 6. CV-weighted kernel smoothing on uniform log-spaced grid.
-    # Bandwidth scales with local CV: at the Rayleigh floor (0.52) it
-    # is tiny (essentially no smoothing); at CV=2+ it widens significantly.
-    MIN_CV = 0.52   # Rayleigh CV — the noise floor for stationary signals
+    MIN_CV = 0.52   # Rayleigh CV \u2014 the noise floor for stationary signals
     BASE_BW = 0.08  # octaves at MIN_CV (~3 FFT bins at 400 Hz)
 
     eval_freqs = np.logspace(np.log10(BOTTOM_F), np.log10(TOP_F), n_eval)
@@ -398,10 +192,6 @@ def run_pipeline(
         corr = np.where(meas_vals > 1e-20, target_vals / meas_vals, 1e6)
 
     # 8. Bass enhancer efficacy: compute h2/h3 from measurement data.
-    #    The EQ curve itself is NOT modified — the enhancer fills headroom
-    #    at runtime using a predictive lookahead, so the correction just
-    #    flattens the raw speaker response.
-    #    LP fundamental is always mixed 1:1 (clamped by headroom budget).
     efficacy = {"h2_amp": 0.0, "h3_amp": 0.0}
     if bass_enhancer_cutoff is not None and bass_enhancer_cutoff > 0:
         from eqgen.model import compute_harmonic_efficacy
@@ -409,9 +199,6 @@ def run_pipeline(
                                              bass_enhancer_cutoff)
 
     # 9. Clamp correction flat outside the CV-defined viable range.
-    # CV shelves (sudden sustained increases) indicate frequencies where
-    # the measurement is too unreliable to correct — hold the correction
-    # constant beyond those boundaries.
     lo_f, hi_f = _find_viable_range(meas_freqs, meas_cv)
     lo_idx = int(np.searchsorted(eval_freqs, lo_f))
     hi_idx = int(np.searchsorted(eval_freqs, hi_f))
@@ -424,44 +211,28 @@ def run_pipeline(
     gains_db = ratio_to_db(corr)
 
     # Normalize: re-center correction so midrange mean = 0 dB.
-    # Raw FFT magnitudes are uncalibrated — measurement and target WAVs
-    # may have different recording levels, creating a spurious DC offset
-    # in the correction curve.  Subtracting the midrange mean gives the
-    # IIR fitter a balanced mix of positive and negative peaks around
-    # 0 dB instead of an all-positive curve with a large offset.
     mid_mask = (freqs >= 500.0) & (freqs <= 2000.0)
     if np.any(mid_mask):
         mid_mean = float(np.mean(gains_db[mid_mask]))
         gains_db = gains_db - mid_mean
 
     # Pre-gain: the max positive gain of the *normalized* correction curve.
-    # By applying this as a uniform gain before the EQ biquads, the
-    # fitted EQ curve only needs cuts (negative gains), avoiding
-    # internal clipping from large boosts in the biquad cascade.
-    # Must be computed AFTER normalization so recording-level offsets
-    # don't inflate the pre-gain.
     max_gain_db = max(0.0, float(np.max(gains_db)))
 
     if detailed:
-        # Raw measurement (Welch bins)
         raw_resp = [{"freq": float(s["freq"]), "db": ratio_to_db(s["mean"])}
                     for s in pooled]
-        # Raw target (Welch bins from WAV, or empty if no target WAV)
         if target_stats is not None:
             raw_target = [{"freq": float(s["freq"]), "db": ratio_to_db(s["mean"])}
                           for s in target_stats]
         else:
             raw_target = []
-        # CV per bin (after merge + inflation)
         cv_data = [{"freq": p["freq"], "cv": p["cv"]} for p in pooled]
-        # Noise floor CV
         noise_data = []
         if noise_stats is not None:
             noise_data = [{"freq": s["freq"], "cv": s["cv"]} for s in noise_stats]
-        # Subtracted measurement (eval grid)
         meas_sub = [{"freq": float(f), "db": ratio_to_db(v)}
                     for f, v in zip(eval_freqs, meas_vals)]
-        # Target = linear fit (eval grid, dB)
         targ_sub = [{"freq": float(f), "db": float(d)}
                     for f, d in zip(eval_freqs, targ_db_eval)]
 
@@ -495,7 +266,7 @@ def curve_to_json(freqs: np.ndarray, gains_db: np.ndarray) -> list:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# IIR design: EQ curve → biquad coefficients
+# IIR design: EQ curve \u2192 biquad coefficients
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def design_eq(
@@ -508,9 +279,6 @@ def design_eq(
     """Design an IIR EQ to match a target curve using cascaded biquads.
 
     Returns (coeffs_flat, bands, freqs, fit_target_db, fitted_db).
-    fit_target_db is the curve actually fitted.
-    coeffs_flat is a flat list of float coefficients:
-    [b0, b1, b2, a1, a2, b0, b1, b2, a1, a2, ...].
     """
     fit = fit_eq_curve(freqs, target_db, fs, max_bands=max_bands,
                        min_freq=freqs[0], max_freq=freqs[-1],
@@ -523,219 +291,3 @@ def design_eq(
     fitted_db = cascade_response_db(fit.biquads, freqs, fs)
 
     return coeffs, fit.bands, freqs, target_db, fitted_db
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Default EQ coefficients (flat 3-HP cascade)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def build_default_eq_coeffs(fs: float = 44100.0) -> List[float]:
-    """Build a flat 3-HP-cascade default EQ as float list."""
-    coeffs = []
-    SQRT2 = np.sqrt(2.0)
-    for fc in [25, 35, 45]:
-        omega = np.tan(np.pi * fc / fs)
-        c = 1.0 + SQRT2 * omega + omega * omega
-        b0 = 1.0 / c
-        b1 = -2.0 / c
-        b2 = 1.0 / c
-        a1 = (2.0 * (omega * omega - 1.0)) / c
-        a2 = (1.0 - SQRT2 * omega + omega * omega) / c
-        coeffs.extend([b0, b1, b2, a1, a2])
-    return coeffs
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Smart volume simulation: model the correction curve at different volume levels
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# Constants matching eq_coeffs.h / firmware
-SV_LOUDNESS_FC = 200.0    # Hz — one-pole shelf corner
-SV_SHELF_MAX_DB = 8.0     # dB — max shelf boost at vol→0
-
-
-def compute_smart_volume_curves(
-    freqs: np.ndarray,
-    correction_db: np.ndarray,
-    pre_gain_db_loud: float = 0.0,
-    speaker_level_db: int = 60,
-    overboost_db: float = 0.0,
-) -> dict:
-    """Compute effective curves at different smart-volume levels.
-
-    Matches the C firmware (smart_volume.h) exactly:
-      - Shelf boost: cube-root power law (equal-loudness contours)
-      - Pre-gain: linear interpolation pg_quiet → pg_loud
-      - Volume LUT: attenuation mapped through speaker_level
-
-    Volume attenuation happens BEFORE the enhancer — this creates
-    headroom that the enhancer fills with bleed/harmonics.  The
-    effective curve shows the net perceived response.
-
-    Returns dict with keys: curves, shelf_curves, lut_db, params.
-    """
-    max_shelf_linear = 10.0 ** (SV_SHELF_MAX_DB / 20.0)
-    pg_loud_linear = 10.0 ** (pre_gain_db_loud / 20.0)
-
-    # Volume LUT: linear-in-dB mapping from sv_db_floor → overboost_db
-    sv_db_floor = float(-speaker_level_db)
-    if sv_db_floor > -24.0:
-        sv_db_floor = -24.0
-    if sv_db_floor < -80.0:
-        sv_db_floor = -80.0
-
-    # Precompute per-step data (0, 32, 64, 96, 127)
-    steps = [0, 32, 64, 96, 127]
-    curves = []
-    shelf_curves = []
-    lut_db = []
-
-    for vol in steps:
-        # Volume attenuation (matches smart_volume_rebuild_lut)
-        vol_db = sv_db_floor + (float(vol) / 127.0) * (-sv_db_floor) + overboost_db
-        if vol_db > overboost_db:
-            vol_db = overboost_db
-
-        # Smart volume: cube-root shelf (matches smart_volume_compute)
-        t = float(vol) / 127.0
-        atten_norm = 1.0 - t
-        shelf_db_val = SV_SHELF_MAX_DB * (atten_norm ** 0.33)
-        shelf_linear = 10.0 ** (shelf_db_val / 20.0)
-        boost = shelf_linear - 1.0  # matches C: out->boost
-
-        # Pre-gain (matches smart_volume_compute)
-        pg_quiet = pg_loud_linear / max_shelf_linear
-        pre_gain_linear = pg_quiet + t * (pg_loud_linear - pg_quiet)
-        pre_gain_db = 20.0 * np.log10(max(pre_gain_linear, 1e-12))
-
-        # Shelf response: one-pole low shelf at 200 Hz
-        if shelf_db_val > 0.01:
-            shelf_gain = np.array([
-                1.0 + (shelf_linear - 1.0) * first_order_lp_mag(f, SV_LOUDNESS_FC)
-                for f in freqs
-            ])
-            shelf_db_arr = 20.0 * np.log10(np.maximum(shelf_gain, 1e-12))
-        else:
-            shelf_db_arr = np.zeros_like(freqs)
-
-        # Effective: correction + shelf + pre_gain + volume attenuation.
-        # Volume is applied BEFORE the enhancer — it creates headroom.
-        effective_db = correction_db + shelf_db_arr + pre_gain_db + vol_db
-
-        label = f"vol={vol}" if vol > 0 else "vol→0"
-        curves.append({
-            "label": label,
-            "vol": vol,
-            "t": round(t, 2),
-            "vol_db": round(vol_db, 1),
-            "pre_gain_db": round(pre_gain_db, 1),
-            "shelf_max_db": round(shelf_db_val, 1),
-            "freqs": freqs.tolist(),
-            "effective_db": effective_db.tolist(),
-        })
-        shelf_curves.append({
-            "label": label,
-            "vol": vol,
-            "t": round(t, 2),
-            "freqs": freqs.tolist(),
-            "shelf_db": shelf_db_arr.tolist(),
-        })
-        lut_db.append(round(vol_db, 1))
-
-    return {
-        "curves": curves,
-        "shelf_curves": shelf_curves,
-        "vol_steps": steps,
-        "lut_db": lut_db,
-        "params": {
-            "fc": float(SV_LOUDNESS_FC),
-            "shelf_max_db": float(SV_SHELF_MAX_DB),
-            "pre_gain_db_loud": round(pre_gain_db_loud, 1),
-            "speaker_level_db": speaker_level_db,
-            "sv_db_floor": round(sv_db_floor, 1),
-            "overboost_db": round(overboost_db, 1),
-        },
-    }
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Audio processing: file → C enhancer → WAV
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def process_track(
-    input_path: str,
-    output_path: str,
-    coeffs: List[float],
-    n_biquads: int,
-    cutoff_hz: float = 60.0,
-    h2_amp: float = 0.5,
-    h3_amp: float = 1.0,
-    pre_gain: float = 1.0,
-    start_sec: float = 30.0,
-    duration_sec: float = 40.0,
-    release_secs: float = 0.2,
-) -> bool:
-    """Decode audio via ffmpeg, process through C enhancer, write WAV.
-
-    Returns True on success.
-    """
-    cmd = ["ffmpeg", "-y", "-v", "error",
-           "-ss", str(start_sec), "-t", str(duration_sec),
-           "-i", input_path,
-           "-f", "s16le", "-acodec", "pcm_s16le",
-           "-ar", "44100", "-ac", "2", "pipe:1"]
-    result = subprocess.run(cmd, capture_output=True)
-    if result.returncode != 0 or len(result.stdout) < 4:
-        print(f"  ffmpeg failed")
-        return False
-
-    pcm = result.stdout
-    n_frames = len(pcm) // 4
-    print(f"  44100Hz stereo, {n_frames} frames ({n_frames/44100:.1f}s)")
-
-    enh = enhancer_ffi.create_enhancer(
-        cutoff_hz=cutoff_hz, h2_amp=h2_amp, h3_amp=h3_amp,
-        release_secs=release_secs,
-        pre_gain=pre_gain,
-        fs=44100.0, coeffs=coeffs)
-
-    out_data = bytearray(len(pcm))
-    peak_in = 0
-    peak_out = 0
-    for i in range(0, len(pcm), 4):
-        l = struct.unpack_from('<h', pcm, i)[0]
-        r = struct.unpack_from('<h', pcm, i+2)[0]
-        l_out, r_out = enhancer_ffi.process_stereo_frame(enh, l, r)
-        struct.pack_into('<hh', out_data, i, l_out, r_out)
-        if abs(l_out) > peak_out: peak_out = abs(l_out)
-        if abs(r_out) > peak_out: peak_out = abs(r_out)
-        if abs(l) > peak_in: peak_in = abs(l)
-        if abs(r) > peak_in: peak_in = abs(r)
-
-    enhancer_ffi.destroy_enhancer(enh)
-
-    datasize = len(out_data)
-    wav = bytearray(44 + datasize)
-    wav[0:4] = b'RIFF'
-    struct.pack_into('<I', wav, 4, 36 + datasize)
-    wav[8:16] = b'WAVEfmt '
-    struct.pack_into('<I', wav, 16, 16)
-    struct.pack_into('<H', wav, 20, 1)
-    struct.pack_into('<H', wav, 22, 2)
-    struct.pack_into('<I', wav, 24, 44100)
-    struct.pack_into('<I', wav, 28, 44100 * 4)
-    struct.pack_into('<H', wav, 32, 4)
-    struct.pack_into('<H', wav, 34, 16)
-    wav[36:40] = b'data'
-    struct.pack_into('<I', wav, 40, datasize)
-    wav[44:] = out_data
-
-    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
-    with open(output_path, 'wb') as f:
-        f.write(wav)
-
-    gain_db = 20.0 * np.log10(max(peak_out, 1) / max(peak_in, 1))
-    print(f"  Peak: in={peak_in} out={peak_out} ({gain_db:+.1f} dB) → {output_path}")
-    if peak_out >= 32767:
-        print("  ⚠️  CLIPPING")
-    return True

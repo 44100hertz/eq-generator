@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from eqgen import enhancer_ffi as effi
 from eqgen.analysis import goertzel_magnitude
 from eqgen.model import compute_harmonic_efficacy
-from eqgen.pipeline import build_default_eq_coeffs
+from eqgen.dsp import build_default_eq_coeffs
 from eqgen import sweep
 
 

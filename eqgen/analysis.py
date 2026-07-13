@@ -9,7 +9,7 @@ Includes:
 """
 
 import numpy as np
-from typing import Tuple, List
+from typing import List, Optional, Tuple
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -273,3 +273,159 @@ def generate_test_sine(
         out[1, :] = signal * 0.95  # slightly lower right channel
         return out
     return signal
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Welch FFT constants
+# ═══════════════════════════════════════════════════════════════════════════════
+
+WELCH_FFT_SIZE = 16384
+WELCH_OVERLAP = 0.5
+BOTTOM_F = 20.0       # Hz — lowest frequency analyzed
+TOP_F = 14000.0       # Hz — highest frequency analyzed
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Welch's method FFT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def welch_stats(samples: np.ndarray, sample_rate: float) -> List[dict]:
+    """Run Welch's method and return per-bin mean magnitude, power, and CV."""
+    fft_size = WELCH_FFT_SIZE
+    noverlap = int(fft_size * WELCH_OVERLAP)
+
+    step = fft_size - noverlap
+    win = np.hanning(fft_size)
+    bin_count = fft_size // 2 + 1
+
+    raw_sum = np.zeros(bin_count)
+    raw_sum_sq = np.zeros(bin_count)
+    norm_sum = np.zeros(bin_count)
+    norm_sum_sq = np.zeros(bin_count)
+    window_count = 0
+
+    for start in range(0, len(samples) - fft_size + 1, step):
+        segment = samples[start:start + fft_size] * win
+        spectrum = np.fft.rfft(segment)
+        mags_window = np.abs(spectrum) / fft_size
+        raw_sum += mags_window
+        raw_sum_sq += mags_window * mags_window
+
+        mean_mag = np.mean(mags_window)
+        if mean_mag > 0:
+            nm = mags_window / mean_mag
+            norm_sum += nm
+            norm_sum_sq += nm * nm
+        else:
+            norm_sum += 1.0
+            norm_sum_sq += 1.0
+        window_count += 1
+
+    n = float(window_count)
+    out_freqs = np.fft.rfftfreq(fft_size, 1.0 / sample_rate)
+
+    results = []
+    for i in range(bin_count):
+        f = out_freqs[i]
+        if f < BOTTOM_F or f > TOP_F:
+            continue
+        mean_val = max(raw_sum[i] / n, 0.0)
+        mean_sq = max(raw_sum_sq[i] / n, 0.0)
+        norm_mean = norm_sum[i] / n
+        norm_var = (norm_sum_sq[i] / n) - (norm_mean * norm_mean)
+        cv = (np.sqrt(norm_var) / norm_mean) if norm_mean > 0 else float('inf')
+        results.append({
+            "freq": f,
+            "count": window_count,
+            "mean": mean_val,
+            "mean_sq": mean_sq,
+            "cv": cv,
+        })
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CV-weighted kernel smoother
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _find_viable_range(freqs: np.ndarray, cv: np.ndarray,
+                       cv_threshold: float = 2.0,
+                       margin_oct: float = 0.25) -> Tuple[float, float]:
+    """Find the frequency range where CV stays below *cv_threshold*.
+
+    Works outward from the middle: the last frequency where a running
+    maximum of CV (over ~⅓ octave) exceeds the threshold defines the
+    boundary.  A *margin_oct* pad is subtracted to stay safely inside.
+    If no shelf is found, returns the full range.
+    """
+    log_f = np.log2(freqs)
+    n = len(freqs)
+
+    # Running max over ~⅓ octave to catch sustained CV shelves, not single-bin spikes
+    bin_width = (log_f[-1] - log_f[0]) / (n - 1) if n > 1 else 0.0
+    radius = max(1, int(np.ceil((1.0 / 3.0) / bin_width))) if bin_width > 0 else 1
+    kernel = np.ones(2 * radius + 1)
+    cv_smooth = np.convolve(np.maximum(cv, 0), kernel, mode='same') / len(kernel)
+
+    mid = n // 2
+    margin_bins = int(np.ceil(margin_oct / bin_width)) if bin_width > 0 else 0
+
+    # Low boundary: walk left from middle, find first bin exceeding threshold
+    lo = 0
+    for i in range(mid, 0, -1):
+        if cv_smooth[i] > cv_threshold:
+            lo = min(i + 1 + margin_bins, n - 1)
+            break
+
+    # High boundary: walk right from middle
+    hi = n - 1
+    for i in range(mid, n):
+        if cv_smooth[i] > cv_threshold:
+            hi = max(i - 1 - margin_bins, 0)
+            break
+
+    return freqs[lo], freqs[hi]
+
+
+def _smooth_kernel(bin_freqs: np.ndarray, bin_values: np.ndarray,
+                   bin_cv: np.ndarray, eval_freqs: np.ndarray,
+                   bandwidth_oct = 0.5) -> np.ndarray:
+    """Evaluate a CV-weighted kernel smoother on a log-spaced grid.
+
+    Each output point is a weighted average of input bins within
+    ±bandwidth_oct octaves.  *bandwidth_oct* may be a scalar or a
+    per-evaluation-point array.  Distance weight (tricube) decays to
+    zero at the bandwidth edge.  Confidence weight is 1/CV, so low-CV
+    bins dominate their local region while high-CV bins are averaged out.
+
+    Unlike a cubic spline, this cannot oscillate below zero or collapse
+    to a flat line — the output is always a convex combination of input
+    values.
+    """
+    bandwidth_oct = np.asarray(bandwidth_oct, dtype=float)
+    scalar_bw = bandwidth_oct.ndim == 0
+
+    n_out = len(eval_freqs)
+    log_freqs = np.log2(bin_freqs)
+    log_eval = np.log2(eval_freqs)
+    conf = 1.0 / np.clip(bin_cv, 0.01, None)
+
+    result = np.empty(n_out)
+    # Process one point at a time since bandwidth may vary per point
+    for i in range(n_out):
+        d = np.abs(log_eval[i] - log_freqs)
+        bw = float(bandwidth_oct) if scalar_bw else float(bandwidth_oct[i])
+        if bw <= 0.0:
+            # Zero bandwidth — nearest-bin interpolation
+            j = np.argmin(d)
+            result[i] = bin_values[j]
+            continue
+        d_norm = d / bw
+        w_dist = np.where(d_norm < 1.0, (1.0 - d_norm ** 3) ** 3, 0.0)
+        w = w_dist * conf
+        w_sum = w.sum()
+        if w_sum > 0:
+            result[i] = np.average(bin_values, weights=w)
+        else:
+            result[i] = np.average(bin_values, weights=conf)
+    return np.maximum(result, 0.0)

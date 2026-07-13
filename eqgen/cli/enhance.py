@@ -19,7 +19,8 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from eqgen.pipeline import build_default_eq_coeffs, process_track
+from eqgen.dsp import build_default_eq_coeffs
+from eqgen.process import process_track
 
 
 def main():

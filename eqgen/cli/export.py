@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from eqgen.eq_fit import fit_eq_curve
-from eqgen.pipeline import run_pipeline, pre_gain_from_max_gain
+from eqgen.pipeline import run_pipeline
+from eqgen.dsp import pre_gain_from_max_gain
 from eqgen.presets import MAX_IIR_BANDS
 
 

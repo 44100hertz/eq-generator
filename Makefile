@@ -4,7 +4,6 @@
 #   make                  build enhancer.so (Python FFI)
 #   make all              build enhancer.so + LADSPA
 #   make test             run all Python tests
-#   make graph-check      full pipeline report → HTML graphs (via ARGS)
 #   make clean            remove build artifacts
 #   make eqgen            design EQ curve (JSON)
 #   make audition         audition through C DSP -> WAV
@@ -13,7 +12,7 @@
 #   make export           export coeffs for ESP32
 #   make server           start web UI server (preset management)
 
-.PHONY: all clean test graph-check eqgen audition wire-setup wire-teardown export server flash
+.PHONY: all clean test eqgen audition wire-setup wire-teardown export server flash
 
 # -- C DSP build -------------------------------------------------------
 
@@ -28,9 +27,6 @@ clean:
 
 test:
 	python -m eqgen.tests.run_all
-
-graph-check:
-	python -m eqgen.cli.graph_check $(ARGS)
 
 # -- Pipeline entry points ---------------------------------------------
 # Usage: make eqgen ARGS="-m meas.wav -t target.wav -o eq.json"

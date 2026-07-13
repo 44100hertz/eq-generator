@@ -18,7 +18,8 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from eqgen.presets import PresetManager
-from eqgen.pipeline import run_pipeline, design_eq, pre_gain_from_max_gain
+from eqgen.pipeline import run_pipeline, design_eq
+from eqgen.dsp import pre_gain_from_max_gain
 from eqgen.sweep import run_sine_sweep, build_vol_lut, compute_smart_volume
 from eqgen.analysis import magnitude_spectrum, find_peaks
 
