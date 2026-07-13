@@ -198,12 +198,11 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
 
 # ── Apply to System (PipeWire) ────────────────────────────────────────
 
-def _apply_preset_to_system(preset_dict: dict, task_id: str):
+def _apply_preset_to_system(preset_name: str, task_id: str):
     """Run pipeline, generate eq_coeffs.h, rebuild, restart PipeWire chain.
 
-    Delegates pipeline, header generation, and wiring to eqgen.cli.wire.
-    setup_wiring() correctly tears down any existing chain before recreating
-    it — no orphaned pw-cat or filter processes.
+    Loads the preset by name from PresetManager, then delegates pipeline,
+    header generation, and wiring to eqgen.cli.wire.
     """
     with _pipeline_lock:
         _pipeline_results[task_id] = {"status": "running", "started": time.time()}
@@ -214,24 +213,16 @@ def _apply_preset_to_system(preset_dict: dict, task_id: str):
             setup_wiring, SRC_DIR,
         )
 
-        preset = Preset.from_dict(preset_dict)
-        meas_paths = preset.resolve_measurements()
-        target_path = preset.resolve_target()
-        noise_path = preset.resolve_noise()
+        preset = pm.load(preset_name)
 
-        if not meas_paths or (not target_path and not preset.house_curve):
-            raise ValueError("Missing measurement or target paths")
+        curve_data = get_house_curve(preset.house_curve) if preset.house_curve else None
 
-        curve_data = None
-        if preset.house_curve:
-            curve_data = get_house_curve(preset.house_curve)
-
-        # 1-2. Run pipeline + IIR fit (delegates to wire.py)
+        # 1-2. Run pipeline + IIR fit
         (eq_freqs, bq_q28_44, bq_q28_48, bands_44, bands_48,
          cfg, coeffs_flat) = run_full_pipeline(
-            meas_paths=meas_paths,
-            target_path=target_path or "",
-            noise_path=noise_path,
+            meas_paths=preset.resolve_measurements(),
+            target_path=preset.resolve_target() or "",
+            noise_path=preset.resolve_noise(),
             fc=preset.fc or 60.0,
             max_bands=preset.max_bands,
             smooth_exponent=preset.smooth_exponent,
@@ -241,7 +232,7 @@ def _apply_preset_to_system(preset_dict: dict, task_id: str):
         )
         cfg["release_secs"] = preset.release
 
-        # 3. Generate eq_coeffs.h + sfx_data.h (delegates to wire.py)
+        # 3. Generate eq_coeffs.h + sfx_data.h
         generate_eq_header(bq_q28_44, bq_q28_48, bands_44, bands_48, cfg,
                           bluetooth_id=preset.bluetooth_id or None,
                           speaker_level=preset.speaker_level)
@@ -258,8 +249,7 @@ def _apply_preset_to_system(preset_dict: dict, task_id: str):
             raise RuntimeError(f"Build failed:\n{r.stderr}")
         logger.info("Rebuilt eqgen_filter")
 
-        # 5. Wire — kill any stale processes first, then let setup_wiring
-        #    handle the full teardown + recreation cycle.
+        # 5. Wire — kill stale processes, then setup_wiring
         subprocess.run(["pkill", "-9", "-f", "pw-cat.*--target"], capture_output=True)
         subprocess.run(["pkill", "-9", "-f", "eqgen_filter"], capture_output=True)
         time.sleep(0.3)
@@ -313,7 +303,7 @@ def _find_esp32_port() -> Optional[str]:
     return None
 
 
-def _flash_esp32(preset_dict: dict, task_id: str):
+def _flash_esp32(preset_name: str, task_id: str):
     """Run pipeline, generate eq_coeffs.h, idf.py build flash."""
     with _pipeline_lock:
         _pipeline_results[task_id] = {"status": "running", "started": time.time()}
@@ -321,24 +311,16 @@ def _flash_esp32(preset_dict: dict, task_id: str):
     try:
         from eqgen.cli.wire import run_full_pipeline, generate_eq_header, generate_sfx_header, SRC_DIR
 
-        preset = Preset.from_dict(preset_dict)
-        meas_paths = preset.resolve_measurements()
-        target_path = preset.resolve_target()
-        noise_path = preset.resolve_noise()
+        preset = pm.load(preset_name)
 
-        if not meas_paths or (not target_path and not preset.house_curve):
-            raise ValueError("Missing measurement or target paths")
-
-        curve_data = None
-        if preset.house_curve:
-            curve_data = get_house_curve(preset.house_curve)
+        curve_data = get_house_curve(preset.house_curve) if preset.house_curve else None
 
         # 1. Run pipeline + IIR fit
         (eq_freqs, bq_q28_44, bq_q28_48, bands_44, bands_48,
          cfg, coeffs_flat) = run_full_pipeline(
-            meas_paths=meas_paths,
-            target_path=target_path or "",
-            noise_path=noise_path,
+            meas_paths=preset.resolve_measurements(),
+            target_path=preset.resolve_target() or "",
+            noise_path=preset.resolve_noise(),
             fc=preset.fc or 60.0,
             max_bands=preset.max_bands,
             smooth_exponent=preset.smooth_exponent,
@@ -489,11 +471,13 @@ def api_apply_pipeline(data: dict):
     """Start a full apply (build + PipeWire) in the background."""
     import uuid
     task_id = data.get("task_id") or str(uuid.uuid4())[:8]
-    preset_dict = data.get("preset", data)
+    preset_name = data.get("preset_name")
+    if not preset_name:
+        raise ValueError("preset_name required")
 
     thread = threading.Thread(
         target=_apply_preset_to_system,
-        args=(preset_dict, task_id),
+        args=(preset_name, task_id),
         daemon=True,
     )
     thread.start()
@@ -504,11 +488,13 @@ def api_flash_esp32(data: dict):
     """Start an ESP32 flash (pipeline + header + idf.py build flash)."""
     import uuid
     task_id = data.get("task_id") or str(uuid.uuid4())[:8]
-    preset_dict = data.get("preset", data)
+    preset_name = data.get("preset_name")
+    if not preset_name:
+        raise ValueError("preset_name required")
 
     thread = threading.Thread(
         target=_flash_esp32,
-        args=(preset_dict, task_id),
+        args=(preset_name, task_id),
         daemon=True,
     )
     thread.start()

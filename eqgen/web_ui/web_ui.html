@@ -259,6 +259,12 @@ async function applyToSystem() {
     setStatus('Measurement and target paths required', 'error'); return;
   }
 
+  // Save form state to temp preset, then apply by name only
+  await api('/api/presets', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({...p, name: '_web_apply'})
+  });
+
   const btn = document.getElementById('btnApply');
   btn.disabled = true;
   btn.textContent = '\u26A1 Applying...';
@@ -268,7 +274,7 @@ async function applyToSystem() {
     const resp = await api('/api/apply', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({preset: p})
+      body: JSON.stringify({preset_name: '_web_apply'})
     });
     state.applyTaskId = resp.task_id;
     pollApplyStatus();
@@ -292,6 +298,12 @@ async function flashESP32() {
 
   if (!confirm('Flash ESP32 with this EQ curve? This will rebuild the firmware and flash via USB.')) return;
 
+  // Save form state to temp preset, then flash by name only
+  await api('/api/presets', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({...p, name: '_web_apply'})
+  });
+
   const btn = document.getElementById('btnFlash');
   btn.disabled = true;
   btn.textContent = '\u1F4E1 Flashing...';
@@ -301,7 +313,7 @@ async function flashESP32() {
     const resp = await api('/api/flash', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({preset: p})
+      body: JSON.stringify({preset_name: '_web_apply'})
     });
     state.flashTaskId = resp.task_id;
     pollFlashStatus();
