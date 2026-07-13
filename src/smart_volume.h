@@ -18,23 +18,30 @@ extern "C" {
 
 /* ── Compile-time constants from eq_coeffs.h ──────────────────────── */
 
-#if !defined(EQGEN_QUIET_SHELF_DB) || !defined(EQGEN_HARMONIC_BLEED_CROSSFADE_LO_T)
+#if !defined(EQGEN_QUIET_SHELF_DB)
 #  error "smart_volume.h requires eq_coeffs.h to be included first"
+#endif
+
+#ifndef EQGEN_OVERBOOST_DB
+#  define EQGEN_OVERBOOST_DB  0.0f
 #endif
 
 /* ── Results of a smart-volume interpolation ─────────────────────── */
 
 typedef struct {
-    float   h2_amp;
-    float   h3_amp;
     float   pre_gain;
     float   boost;      /* (G-1) for loudness shelf */
-    float   bleed;      /* fundamental bleed amount */
     float   shelf_db;
     float   fft_pre_gain;
 } SmartVolumeParams;
 
-/* ── Interpolate between quiet and loud presets ──────────────────── */
+/* ── Compute shelf boost and pre-gain for a given volume level ────
+ *
+ * h2_amp, h3_amp, and fundamental_bleed are now compile-time
+ * constants (EQGEN_H2_AMP, EQGEN_H3_AMP, EQGEN_BLEED_CAP) set at
+ * enhancer init and never changed at runtime.  Volume only affects
+ * the loudness shelf and its compensating pre-gain.
+ * ──────────────────────────────────────────────────────────────── */
 
 static inline void smart_volume_compute(uint8_t vol,
                                         float pg_loud,
@@ -42,36 +49,7 @@ static inline void smart_volume_compute(uint8_t vol,
 {
     float t = (float)vol / 127.0f;   /* 0=quietest, 1=loudest */
 
-    /* 1. Harmonic → bleed crossfade.
-     *
-     * At low volumes (t ≤ LO_T, vol ≤ 25): harmonics fully cut,
-     * replaced by fundamental bleed.  The bleed signal comes from
-     * the same EQ-preprocessed LP(fc) as T2 harmonics, so the EQ
-     * correction is still applied — we just skip Chebyshev shaping.
-     * At -45 dBFS, EQ errors are inaudible anyway.
-     *
-     * At high volumes (t ≥ HI_T, vol ≥ 63): full preset, no bleed.
-     * Bit-identical to the old linear-interpolation behaviour.
-     *
-     * Between: linear crossfade. */
-    if (t >= EQGEN_HARMONIC_BLEED_CROSSFADE_HI_T) {
-        out->h2_amp = EQGEN_H2_AMP;
-        out->h3_amp = EQGEN_H3_AMP;
-        out->bleed  = 0.0f;
-    } else if (t <= EQGEN_HARMONIC_BLEED_CROSSFADE_LO_T) {
-        out->h2_amp = 0.0f;
-        out->h3_amp = 0.0f;
-        out->bleed  = EQGEN_QUIET_FUNDAMENTAL_BLEED;
-    } else {
-        float xfade = (t - EQGEN_HARMONIC_BLEED_CROSSFADE_LO_T)
-                    / (EQGEN_HARMONIC_BLEED_CROSSFADE_HI_T
-                       - EQGEN_HARMONIC_BLEED_CROSSFADE_LO_T);
-        out->h2_amp = xfade * EQGEN_H2_AMP;
-        out->h3_amp = xfade * EQGEN_H3_AMP;
-        out->bleed  = (1.0f - xfade) * EQGEN_QUIET_FUNDAMENTAL_BLEED;
-    }
-
-    /* 2. Shelf boost: power-law (cube root) tracks equal-loudness contours.
+    /* 1. Shelf boost: power-law (cube root) tracks equal-loudness contours.
      * The ear's bass sensitivity drops steeply in the first ~15 dB of
      * attenuation, then saturates.  A linear mapping would put only 50%
      * shelf at -30 dB attenuation — far too slow. */
@@ -91,19 +69,23 @@ static inline void smart_volume_compute(uint8_t vol,
 
 static inline void smart_volume_rebuild_lut(float vol_lut[128],
                                             float compensation_db,
-                                            float speaker_level_db)
+                                            float speaker_level_db,
+                                            float overboost_db)
 {
     /* System-gain floor: vol=1 sits at -speaker_level dB.
      * speaker_level_db is roughly total system gain (speaker+amp)
-     * in dB.  Typical: 40 = sensitive/high-gain, 60 = quiet. */
+     * in dB.  Typical: 40 = sensitive/high-gain, 60 = quiet.
+     *
+     * overboost_db: additional gain at vol=127.  Drives the enhancer
+     * input above 0 dBFS → crossfade converts excess into harmonics. */
     float sv_db_floor = -speaker_level_db;
     if (sv_db_floor > -24.0f) sv_db_floor = -24.0f;   /* clamp minimum range */
     if (sv_db_floor < -80.0f) sv_db_floor = -80.0f;   /* sanity ceiling   */
 
     for (int i = 1; i < 128; i++) {
         float db = ((float)i / 127.0f) * (-sv_db_floor) + sv_db_floor
-                   + compensation_db;
-        if (db > 0.0f) db = 0.0f;
+                   + compensation_db + overboost_db;
+        if (db > overboost_db) db = overboost_db;
         vol_lut[i] = powf(10.0f, db / 20.0f);
     }
     vol_lut[0] = 0.0f;

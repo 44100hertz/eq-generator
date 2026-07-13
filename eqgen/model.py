@@ -173,6 +173,59 @@ def ear_sensitivity(f: float) -> float:
     return 1.0
 
 
+# ── Harmonic efficacy: compute h2/h3 from measurement data ────
+
+def compute_harmonic_efficacy(
+    freqs: np.ndarray,
+    correction_db: np.ndarray,
+    fc: float,
+) -> dict:
+    """Compute h2_amp, h3_amp from speaker measurement data.
+
+    For each harmonic n (2 or 3), average over the bass band (f < fc/2):
+
+        h_amp = avg( Correction(n·f) / Correction(f) · Ear(f) / Ear(n·f) )
+
+    Correction(f) = 10^(correction_db/20) — EQ gain at f
+    Ear(f) = ear sensitivity at f
+
+    When the speaker rolls off sharply, Correction(f) ≫ Correction(n·f)
+    → denominator dominates → h is small → harmonics are perceptually less
+    needed (the fundamental gets through fine at n·f frequencies).
+
+    When the speaker has flat bass, Correction(f) ≈ Correction(n·f)
+    → ratio ≈ Ear(f)/Ear(n·f) ≈ 0.35 — pure psychoacoustic rolloff.
+    """
+    correction_ratio = 10.0 ** (correction_db / 20.0)
+
+    mask = freqs <= fc / 2.0
+    if not mask.any():
+        return {"h2_amp": 0.0, "h3_amp": 0.0}
+
+    bass_f = freqs[mask]
+
+    def avg_ratio(mult):
+        vals = []
+        for f in bass_f:
+            hf = f * mult
+            if hf > freqs[-1]:
+                continue
+            cr_f  = np.interp(f,  freqs, correction_ratio)
+            cr_hf = np.interp(hf, freqs, correction_ratio)
+            ear_f  = ear_sensitivity(f)
+            ear_hf = ear_sensitivity(hf)
+            vals.append(cr_hf / cr_f * ear_f / ear_hf)
+        return float(np.mean(vals)) if vals else 0.0
+
+    h2 = avg_ratio(2)
+    h3 = avg_ratio(3)
+
+    return {
+        "h2_amp": round(float(np.clip(h2, 0.0, 0.5)), 4),
+        "h3_amp": round(float(np.clip(h3, 0.0, 0.5)), 4),
+    }
+
+
 # ── Example speaker models ────────────────────────────────────────────
 
 def flat_speaker(f: float) -> float:

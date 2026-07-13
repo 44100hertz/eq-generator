@@ -5,7 +5,7 @@ This module is the single source of truth for the EQ design and audio processing
 pipeline.  All CLI entry points (eqgen, audition, wire, export) delegate here.
 
 Exports:
-  run_pipeline()   — WAV inputs → (freqs, gains_db, sample_rate)
+  run_pipeline()   — WAV inputs → (freqs, gains_db, sample_rate, max_gain_db, efficacy)
   design_eq()      — EQ curve → quantized biquad coefficients
   process_track()  — audio file → C enhancer → WAV
   curve_to_json()  — serialise (freqs, gains_db) for JSON output
@@ -247,8 +247,6 @@ def run_pipeline(
     target_path: str,
     noise_path: Optional[str] = None,
     bass_enhancer_cutoff: Optional[float] = None,
-    h2: float = 1.0,
-    h3: float = 1.0,
     sample_rate_override: Optional[float] = None,
     smooth_exponent: float = 1.0,
     detailed: bool = False,
@@ -257,7 +255,7 @@ def run_pipeline(
 ):
     """Run the full EQ correction pipeline.
 
-    Without detailed: returns (freqs_hz, gains_db, sample_rate).
+    Without detailed: returns (freqs_hz, gains_db, sample_rate, max_gain_db, efficacy).
     With detailed=True: returns a dict with all intermediate data for
     visualization.
 
@@ -270,7 +268,7 @@ def run_pipeline(
       6. Target = linear fit of raw target (dB vs log-freq),
          shifted to measurement midrange level
       7. Correction = target / measurement
-      8. Bass enhancer preprocessing (if cutoff provided)
+      8. Compute harmonic efficacy from correction curve (if cutoff provided)
     """
 
     # 1. Read & validate
@@ -399,32 +397,16 @@ def run_pipeline(
     with np.errstate(divide='ignore', invalid='ignore'):
         corr = np.where(meas_vals > 1e-20, target_vals / meas_vals, 1e6)
 
-    # 8. Bass enhancer preprocessing (skip if cutoff ≤ 0 — bypass)
+    # 8. Bass enhancer efficacy: compute h2/h3 from measurement data.
+    #    The EQ curve itself is NOT modified — the enhancer fills headroom
+    #    at runtime using a predictive lookahead, so the correction just
+    #    flattens the raw speaker response.
+    #    LP fundamental is always mixed 1:1 (clamped by headroom budget).
+    efficacy = {"h2_amp": 0.0, "h3_amp": 0.0}
     if bass_enhancer_cutoff is not None and bass_enhancer_cutoff > 0:
-        fc = bass_enhancer_cutoff
-        from eqgen.model import model_gain_needed
-
-        def meas_at(f: float) -> float:
-            """Measurement magnitude (kernel-smoothed) at frequency f."""
-            if f <= 0 or f > TOP_F:
-                return 0.0
-            return float(_smooth_kernel(meas_freqs, meas_raw, meas_cv,
-                                         np.array([f]), bandwidth_oct=0.08).item())
-
-        # Compute flat correction value at fc/2 before modifying corr
-        idx_fc2 = int(np.searchsorted(eval_freqs, fc / 2.0))
-        m_fc2 = meas_at(fc / 2.0)
-        G_flat = model_gain_needed(fc / 2.0, corr[idx_fc2] * m_fc2, fc, h2, h3, meas_at)
-        flat_val = min(G_flat, corr[idx_fc2])
-
-        for i, f in enumerate(eval_freqs):
-            G = model_gain_needed(f, corr[i] * meas_at(f), fc, h2, h3, meas_at)
-            if G > 1e-12:
-                corr[i] = min(G, corr[i])
-
-        # Below fc/2 the enhancer handles bass perception via harmonics.
-        # Hold correction flat at the model gain computed at fc/2.
-        corr[:idx_fc2 + 1] = flat_val
+        from eqgen.model import compute_harmonic_efficacy
+        efficacy = compute_harmonic_efficacy(eval_freqs, ratio_to_db(corr),
+                                             bass_enhancer_cutoff)
 
     # 9. Clamp correction flat outside the CV-defined viable range.
     # CV shelves (sudden sustained increases) indicate frequencies where
@@ -488,6 +470,7 @@ def run_pipeline(
             "gains_db": gains_db.tolist(),
             "sample_rate": sample_rate,
             "max_gain_db": max_gain_db,
+            "efficacy": efficacy,
             "raw_measurement": raw_resp,
             "raw_target": raw_target,
             "noise_cv": cv_data,
@@ -496,7 +479,7 @@ def run_pipeline(
             "target_resampled": targ_sub,
         }
 
-    return freqs, gains_db, sample_rate, max_gain_db
+    return freqs, gains_db, sample_rate, max_gain_db, efficacy
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -569,89 +552,108 @@ def build_default_eq_coeffs(fs: float = 44100.0) -> List[float]:
 # Constants matching eq_coeffs.h / firmware
 SV_LOUDNESS_FC = 200.0    # Hz — one-pole shelf corner
 SV_SHELF_MAX_DB = 8.0     # dB — max shelf boost at vol→0
-SV_BLEED_MAX = 0.25       # linear — max LP bleed at vol→0
 
 
 def compute_smart_volume_curves(
     freqs: np.ndarray,
     correction_db: np.ndarray,
-    h2: float,
-    h3: float,
     pre_gain_db_loud: float = 0.0,
+    speaker_level_db: int = 60,
+    overboost_db: float = 0.0,
 ) -> dict:
-    """Compute effective correction curves at different smart-volume levels.
+    """Compute effective curves at different smart-volume levels.
 
-    The correction_db is already normalized (midrange mean = 0 dB).
-    The effective curve shows correction + shelf only — pre-gain is reported
-    as absolute text, not applied to the curve.
+    Matches the C firmware (smart_volume.h) exactly:
+      - Shelf boost: cube-root power law (equal-loudness contours)
+      - Pre-gain: linear interpolation pg_quiet → pg_loud
+      - Volume LUT: attenuation mapped through speaker_level
 
-    Returns dict with keys: vol_levels, curves, shelf_curves, params.
+    Volume attenuation happens BEFORE the enhancer — this creates
+    headroom that the enhancer fills with bleed/harmonics.  The
+    effective curve shows the net perceived response.
+
+    Returns dict with keys: curves, shelf_curves, lut_db, params.
     """
-    levels = [
-        ("Quiet (vol→0)", 0.0),
-        ("25% vol", 0.25),
-        ("50% vol", 0.5),
-        ("75% vol", 0.75),
-        ("Loud (vol→127)", 1.0),
-    ]
-
     max_shelf_linear = 10.0 ** (SV_SHELF_MAX_DB / 20.0)
+    pg_loud_linear = 10.0 ** (pre_gain_db_loud / 20.0)
 
+    # Volume LUT: linear-in-dB mapping from sv_db_floor → overboost_db
+    sv_db_floor = float(-speaker_level_db)
+    if sv_db_floor > -24.0:
+        sv_db_floor = -24.0
+    if sv_db_floor < -80.0:
+        sv_db_floor = -80.0
+
+    # Precompute per-step data (0, 32, 64, 96, 127)
+    steps = [0, 32, 64, 96, 127]
     curves = []
     shelf_curves = []
+    lut_db = []
 
-    for label, t in levels:
-        boost_db = SV_SHELF_MAX_DB * (1.0 - t)
+    for vol in steps:
+        # Volume attenuation (matches smart_volume_rebuild_lut)
+        vol_db = sv_db_floor + (float(vol) / 127.0) * (-sv_db_floor) + overboost_db
+        if vol_db > overboost_db:
+            vol_db = overboost_db
 
-        # Absolute pre-gain: pg_loud / [1/max + t*(1 - 1/max)]
-        pg_fraction = 1.0 / max_shelf_linear + t * (1.0 - 1.0 / max_shelf_linear)
-        pg_db_abs = pre_gain_db_loud + 20.0 * np.log10(max(pg_fraction, 1e-12))
+        # Smart volume: cube-root shelf (matches smart_volume_compute)
+        t = float(vol) / 127.0
+        atten_norm = 1.0 - t
+        shelf_db_val = SV_SHELF_MAX_DB * (atten_norm ** 0.33)
+        shelf_linear = 10.0 ** (shelf_db_val / 20.0)
+        boost = shelf_linear - 1.0  # matches C: out->boost
 
-        # Shelf contribution: one-pole low shelf at 200 Hz
-        if boost_db > 0.01:
-            gain_linear = 10.0 ** (boost_db / 20.0)
+        # Pre-gain (matches smart_volume_compute)
+        pg_quiet = pg_loud_linear / max_shelf_linear
+        pre_gain_linear = pg_quiet + t * (pg_loud_linear - pg_quiet)
+        pre_gain_db = 20.0 * np.log10(max(pre_gain_linear, 1e-12))
+
+        # Shelf response: one-pole low shelf at 200 Hz
+        if shelf_db_val > 0.01:
             shelf_gain = np.array([
-                1.0 + (gain_linear - 1.0) * first_order_lp_mag(f, SV_LOUDNESS_FC)
+                1.0 + (shelf_linear - 1.0) * first_order_lp_mag(f, SV_LOUDNESS_FC)
                 for f in freqs
             ])
-            shelf_db = 20.0 * np.log10(np.maximum(shelf_gain, 1e-12))
+            shelf_db_arr = 20.0 * np.log10(np.maximum(shelf_gain, 1e-12))
         else:
-            shelf_db = np.zeros_like(freqs)
+            shelf_db_arr = np.zeros_like(freqs)
 
-        # Effective: correction + shelf + absolute pre_gain.
-        # This shifts the entire curve so you can see that at t=0,
-        # bass stays at the loud pre-gain level (−4.8 dB) because
-        # shelf (+8) + pre_gain (−12.8) = −4.8 dB — same as loud.
-        effective_db = correction_db + shelf_db + pg_db_abs
+        # Effective: correction + shelf + pre_gain + volume attenuation.
+        # Volume is applied BEFORE the enhancer — it creates headroom.
+        effective_db = correction_db + shelf_db_arr + pre_gain_db + vol_db
 
+        label = f"vol={vol}" if vol > 0 else "vol→0"
         curves.append({
             "label": label,
+            "vol": vol,
             "t": round(t, 2),
-            "pre_gain_db": round(pg_db_abs, 1),
-            "shelf_max_db": round(boost_db, 1),
+            "vol_db": round(vol_db, 1),
+            "pre_gain_db": round(pre_gain_db, 1),
+            "shelf_max_db": round(shelf_db_val, 1),
             "freqs": freqs.tolist(),
             "effective_db": effective_db.tolist(),
         })
         shelf_curves.append({
             "label": label,
+            "vol": vol,
             "t": round(t, 2),
             "freqs": freqs.tolist(),
-            "shelf_db": shelf_db.tolist(),
+            "shelf_db": shelf_db_arr.tolist(),
         })
+        lut_db.append(round(vol_db, 1))
 
     return {
-        "vol_levels": [(lbl, t) for lbl, t in levels],
         "curves": curves,
         "shelf_curves": shelf_curves,
+        "vol_steps": steps,
+        "lut_db": lut_db,
         "params": {
             "fc": float(SV_LOUDNESS_FC),
             "shelf_max_db": float(SV_SHELF_MAX_DB),
-            "bleed_max": float(SV_BLEED_MAX),
-            "h2_loud": float(h2),
-            "h2_quiet": float(h2 * 0.5),
-            "h3_loud": float(h3),
-            "h3_quiet": float(h3 * 0.5),
             "pre_gain_db_loud": round(pre_gain_db_loud, 1),
+            "speaker_level_db": speaker_level_db,
+            "sv_db_floor": round(sv_db_floor, 1),
+            "overboost_db": round(overboost_db, 1),
         },
     }
 
@@ -666,8 +668,8 @@ def process_track(
     coeffs: List[float],
     n_biquads: int,
     cutoff_hz: float = 60.0,
-    h2: float = 0.5,
-    h3: float = 1.0,
+    h2_amp: float = 0.5,
+    h3_amp: float = 1.0,
     pre_gain: float = 1.0,
     start_sec: float = 30.0,
     duration_sec: float = 40.0,
@@ -692,7 +694,7 @@ def process_track(
     print(f"  44100Hz stereo, {n_frames} frames ({n_frames/44100:.1f}s)")
 
     enh = enhancer_ffi.create_enhancer(
-        cutoff_hz=cutoff_hz, h2_amp=h2, h3_amp=h3,
+        cutoff_hz=cutoff_hz, h2_amp=h2_amp, h3_amp=h3_amp,
         release_secs=release_secs,
         pre_gain=pre_gain,
         fs=44100.0, coeffs=coeffs)

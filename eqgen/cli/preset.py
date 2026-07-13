@@ -7,7 +7,7 @@ Usage:
     python -m eqgen.cli.preset show <name>
     python -m eqgen.cli.preset create <name> [--from-dir DIR]
     python -m eqgen.cli.preset delete <name>
-    python -m eqgen.cli.preset set <name> --fc 50 --h2 0.5 --h3 1.0
+    python -m eqgen.cli.preset set <name> --fc 50
     python -m eqgen.cli.preset run <name>
 """
 
@@ -28,13 +28,13 @@ def cmd_list(pm: PresetManager):
     if not names:
         print("No presets found.")
         return
-    print(f"{'NAME':<30} {'FC':>6} {'H2':>6} {'H3':>6}  DESCRIPTION")
+    print(f"{'NAME':<30} {'FC':>6}  DESCRIPTION")
     print("-" * 70)
     for name in names:
         try:
             p = pm.load(name)
             fc = f"{p.fc:.0f}" if p.fc else ""
-            print(f"{p.name:<30} {fc:>6} {p.h2:>6.2f} {p.h3:>6.2f}  {p.description or ''}")
+            print(f"{p.name:<30} {fc:>6}  {p.description or ''}")
         except Exception as e:
             print(f"{name:<30} {'ERROR':>6}  {e}")
 
@@ -106,9 +106,9 @@ def cmd_run(pm: PresetManager, name: str):
     from eqgen.pipeline import run_pipeline
 
     print(f"Running pipeline for '{name}'...")
-    freqs, gains_db, sample_rate, max_gain_db = run_pipeline(
+    freqs, gains_db, sample_rate, max_gain_db, _efficacy = run_pipeline(
         meas_paths, target_path, noise_path,
-        bass_enhancer_cutoff=p.fc, h2=p.h2, h3=p.h3,
+        bass_enhancer_cutoff=p.fc,
         smooth_exponent=p.smooth_exponent,
     )
 
@@ -128,7 +128,7 @@ Examples:
     eqgen-preset list
     eqgen-preset show technics-standing
     eqgen-preset create my-speaker --from-dir technics/standing
-    eqgen-preset set my-speaker --fc 50 --h2 0.5
+    eqgen-preset set my-speaker --fc 50
     eqgen-preset run my-speaker
         """,
     )
@@ -156,8 +156,6 @@ Examples:
     p_set = sub.add_parser("set", help="Update preset parameters")
     p_set.add_argument("name", help="Preset name")
     p_set.add_argument("--fc", type=float, default=None, help="Bass enhancer cutoff")
-    p_set.add_argument("--h2", type=float, default=None, help="2nd harmonic amplitude")
-    p_set.add_argument("--h3", type=float, default=None, help="3rd harmonic amplitude")
     p_set.add_argument("--max-bands", type=int, default=None, help="Max IIR biquad bands")
     p_set.add_argument("--smooth-exponent", type=float, default=None, help="CV smoothing")
     p_set.add_argument("--release", type=float, default=None, help="Envelope release (s)")
@@ -180,7 +178,7 @@ Examples:
         cmd_delete(pm, args.name)
     elif args.command == "set":
         cmd_set(pm, args.name,
-                fc=args.fc, h2=args.h2, h3=args.h3,
+                fc=args.fc,
                 max_bands=getattr(args, 'max_bands', None),
                 smooth_exponent=args.smooth_exponent,
                 release=args.release,

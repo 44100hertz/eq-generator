@@ -111,7 +111,7 @@ static void *eqgen_instantiate(const void *desc, unsigned long fs)
                          EQGEN_H3_AMP,
                          EQGEN_RELEASE_SECS,
                          (float)fs,
-                         EQGEN_LIMITER_RELEASE_SECS,
+                         EQGEN_PUSH_GAIN,
 #ifdef EQGEN_PRE_GAIN
                          EQGEN_PRE_GAIN,
 #else
@@ -193,7 +193,7 @@ static void eqgen_run(void *handle, unsigned long nframes)
                              EQGEN_H3_AMP,
                              release,
                              inst->fs,
-                             EQGEN_LIMITER_RELEASE_SECS,
+                             EQGEN_PUSH_GAIN,
 #ifdef EQGEN_PRE_GAIN
                              EQGEN_PRE_GAIN,
 #else

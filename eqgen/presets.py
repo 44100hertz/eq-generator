@@ -40,14 +40,12 @@ class Preset:
     house_curve: str = ""           # house curve name (from house_curves.json), added on top of target
     noise: Optional[str] = None
     fc: Optional[float] = None          # bass enhancer cutoff Hz
-    h2: float = 0.5                      # 2nd harmonic amplitude
-    h3: float = 1.0                      # 3rd harmonic amplitude
     max_bands: int = MAX_IIR_BANDS       # max IIR biquad bands
     smooth_exponent: float = 1.0         # CV smoothing aggressiveness
     release: float = 0.2                 # envelope release (s)
-    limiter_release: float = 0.049       # harmonic limiter release (s)
     bluetooth_id: str = ""               # Bluetooth device ID for speaker identity
     speaker_level: int = 60              # total system gain (speaker+amp) in dB
+    overboost_db: float = 0.0            # extra gain at vol=127 to drive harmonics
     high_rolloffs: List[List[float]] = field(default_factory=list)
     low_rolloffs: List[List[float]] = field(default_factory=list)
     pre_gain: Optional[float] = None     # computed pre-gain override
@@ -206,8 +204,6 @@ class PresetManager:
             target=str(target_wav.relative_to(ROOT)),
             noise=str(noise_wav.relative_to(ROOT)) if noise_wav else None,
             fc=60.0,
-            h2=0.5,
-            h3=1.0,
         )
 
 

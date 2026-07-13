@@ -419,4 +419,18 @@ def _search_band_params(f0: float, residual_at_f0: float,
     return best_gain, best_Q, best_err
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Benchmark protocol adapter
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fit_bands(freqs: np.ndarray, target_db: np.ndarray, fs: float,
+              max_bands: int = 24) -> Tuple[List[BiquadCoeffs], dict]:
+    """Adapter for benchmark harness.
+
+    Returns (list_of_BiquadCoeffs, metadata).
+    """
+    fit = fit_eq_curve(freqs, target_db, fs, max_bands=max_bands,
+                       min_freq=freqs[0], max_freq=freqs[-1],
+                       min_peaking_freq=freqs[0])
+    return fit.biquads, {"name": "greedy", "bands": fit.bands}
 

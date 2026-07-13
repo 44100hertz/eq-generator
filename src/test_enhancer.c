@@ -138,7 +138,7 @@ static int test_enhancer_pipeline(void) {
                          0.33f,   /* h3_amp */
                          0.2f,    /* release_secs */
                          FS,
-                         0.049f,  /* limiter_release_secs */
+                         1.0f,    /* push_gain */
                          1.0f,    /* pre_gain */
                          1,       /* eq_n_biquads */
                          eq_coeffs);
@@ -189,7 +189,7 @@ static int test_cpu_budget(void) {
     bass_design_butter_hp(40.0f, FS, eq_coeffs);
 
     BassEnhancerCfg cfg;
-    BassEnhancerCfg_init(&cfg, 60.0f, 0.33f, 0.33f, 0.2f, FS, 0.049f, 1.0f, 1, eq_coeffs);
+    BassEnhancerCfg_init(&cfg, 60.0f, 0.33f, 0.33f, 0.2f, FS, 1.0f, 1.0f, 1, eq_coeffs);
 
     Biquad eq_left[1], eq_right[1];
     BassEnhancer enh;

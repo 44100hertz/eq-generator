@@ -69,7 +69,7 @@ int main(int argc, char *argv[]) {
 
     /* Volume LUT — mirrors ESP32 rebuild_vol_lut() exactly. */
     float vol_lut[128];
-    smart_volume_rebuild_lut(vol_lut, 0.0f, EQGEN_SPEAKER_LEVEL_DB);
+    smart_volume_rebuild_lut(vol_lut, 0.0f, EQGEN_SPEAKER_LEVEL_DB, EQGEN_OVERBOOST_DB);
 
     BassEnhancerCfg_init(&cfg,
                          EQGEN_CUTOFF_HZ,
@@ -77,7 +77,7 @@ int main(int argc, char *argv[]) {
                          EQGEN_H3_AMP,
                          EQGEN_RELEASE_SECS,
                          fs,
-                         EQGEN_LIMITER_RELEASE_SECS,
+                         EQGEN_PUSH_GAIN,
                          pre_gain_f,
                          n_bq,
                          coeffs);
@@ -115,18 +115,15 @@ int main(int argc, char *argv[]) {
                     SmartVolumeParams svp;
                     smart_volume_compute(vol, pg_ref, &svp);
 
-                    smart_volume_rebuild_lut(vol_lut, svp.shelf_db, EQGEN_SPEAKER_LEVEL_DB);
+                    smart_volume_rebuild_lut(vol_lut, svp.shelf_db, EQGEN_SPEAKER_LEVEL_DB, EQGEN_OVERBOOST_DB);
 
-                    BassEnhancer_update_params(&enh, svp.h2_amp, svp.h3_amp,
-                                               svp.pre_gain, svp.boost, svp.bleed);
+                    BassEnhancer_update_params(&enh,
+                                               svp.pre_gain, svp.boost);
 
-                    fprintf(stderr, "filter: vol=%u h2=%.3f h3=%.3f pg=%.3f shelf=%.1f dB bleed=%.3f\n",
+                    fprintf(stderr, "filter: vol=%u pg=%.3f shelf=%.1f dB\n",
                             (unsigned)vol,
-                            (double)svp.h2_amp,
-                            (double)svp.h3_amp,
                             (double)svp.pre_gain,
-                            (double)svp.shelf_db,
-                            (double)svp.bleed);
+                            (double)svp.shelf_db);
                 }
             }
             if (nr == 0 || (nr < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
@@ -159,10 +156,15 @@ int main(int argc, char *argv[]) {
             float l = buf_interleaved[i * 2];
             float r = buf_interleaved[i * 2 + 1];
 
+            /* Volume scaling before enhancer so the limiter
+             * only engages at high volumes. */
+            l *= vol_gain;
+            r *= vol_gain;
+
             BassEnhancer_process_stereo(&enh, &l, &r);
 
-            buf_interleaved[i * 2]     = l * vol_gain;
-            buf_interleaved[i * 2 + 1] = r * vol_gain;
+            buf_interleaved[i * 2]     = l;
+            buf_interleaved[i * 2 + 1] = r;
         }
 
         size_t nwritten = fwrite(buf_interleaved, frame_sz, nread, stdout);

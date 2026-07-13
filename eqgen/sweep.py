@@ -1,23 +1,24 @@
 """
-Sweep-based analysis through the C enhancer pipeline.
+Sweep-based analysis through the C enhancer pipeline — full speaker path.
 
-Instead of a psychoacoustic model predicting enhancer behavior, this
-module runs actual sine sweeps through the C DSP (via enhancer_ffi)
-and measures the output — fundamental, 2nd harmonic, 3rd harmonic —
-at the output of the real pipeline.
+Runs actual audio through the real C DSP stack including volume LUT (overboost),
+smart volume pre-gain, and loudness shelf — the exact pipeline that runs on
+the ESP32 firmware and the desktop PipeWire filter.
 
-This replaces the model.py preprocess_eq_curve approach: the pipeline
-IS the response, and sweeps measure what actually comes out.
+This is the single source of truth for end-to-end pipeline analysis.
+Replace ad-hoc sine→pack→enhancer→unpack code in tests with calls here.
 """
 
 import struct
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
-from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
 
 from eqgen import enhancer_ffi as effi
 from eqgen.analysis import goertzel_magnitude
 
+
+# ── Pipeline runner: configure DSP → run tone(s) → measure ────────────
 
 def run_sine_sweep(
     freqs_hz: List[float],
@@ -29,28 +30,29 @@ def run_sine_sweep(
     amplitude: float = 0.001,
     duration_sec: float = 1.0,
     release_secs: float = 0.2,
+    vol_gain: float = 1.0,
+    pre_gain: Optional[float] = None,
+    loudness_boost: float = 0.0,
 ) -> Dict[float, Dict[str, float]]:
     """Run sine tones through the C enhancer and measure output harmonics.
 
-    For each frequency in freqs_hz:
-      1. Generate a pure sine at `amplitude`
-      2. Pass through the C enhancer (with EQ + bass enhancement)
-      3. Measure fundamental, H2, H3 amplitudes via Goertzel
+    The FULL pipeline:
+      1. Multiply by vol_gain (BT volume LUT — includes overboost on speaker)
+      2. enhancer_process_stereo: DC blocker → pre_gain → EQ → LP/HP split →
+         crossfade → loudness shelf → tanh clamp
+
+    For each frequency in freqs_hz, measures fundamental, H2, H3 amplitudes.
 
     Returns:
-        dict mapping freq → {
-            "fundamental": linear amplitude at f,
-            "h2": linear amplitude at 2f,
-            "h3": linear amplitude at 3f,
-            "rms": total RMS of output,
-        }
+        dict mapping freq → {"fundamental", "h2", "h3", "rms"}
     """
     n_samples = int(duration_sec * fs)
-    steady_start = n_samples // 4  # skip startup transient
+    steady_start = n_samples // 4
 
     enh = effi.create_enhancer(
         cutoff_hz=fc, h2_amp=h2, h3_amp=h3,
         release_secs=release_secs, fs=fs,
+        pre_gain=pre_gain if pre_gain is not None else 1.0,
         coeffs=eq_coeffs,
     )
 
@@ -59,7 +61,7 @@ def run_sine_sweep(
         t = np.arange(n_samples) / fs
         sine = amplitude * np.sin(2.0 * np.pi * f_test * t)
 
-        # Convert to int16 stereo PCM
+        # int16 stereo PCM (matches real audio path)
         pcm = bytearray(n_samples * 4)
         for i in range(n_samples):
             v = int(np.clip(sine[i] * 32767, -32768, 32767))
@@ -69,10 +71,14 @@ def run_sine_sweep(
         for i in range(0, len(pcm), 4):
             l = struct.unpack_from('<h', pcm, i)[0]
             r = struct.unpack_from('<h', pcm, i + 2)[0]
-            l_out, r_out = effi.process_stereo_frame(enh, l, r)
-            struct.pack_into('<hh', pcm, i, l_out, r_out)
 
-        # Decode steady-state
+            # Full signal chain: vol_gain → enhancer
+            lf = (l / 32768.0) * vol_gain
+            rf = (r / 32768.0) * vol_gain
+            lf, rf = effi.process_stereo_frame(enh, lf, rf)
+
+            struct.pack_into('<hh', pcm, i, int(np.clip(lf * 32767, -32768, 32767)), int(np.clip(rf * 32767, -32768, 32767)))
+
         out_float = np.array([
             struct.unpack_from('<h', pcm, i * 4)[0] / 32768.0
             for i in range(steady_start, n_samples)
@@ -80,8 +86,8 @@ def run_sine_sweep(
 
         rms_out = float(np.sqrt(np.mean(out_float ** 2)))
         fund_amp = float(goertzel_magnitude(out_float, f_test, fs))
-        h2_amp = float(goertzel_magnitude(out_float, 2 * f_test, fs)) if 2 * f_test < fs / 2 else 0.0
-        h3_amp = float(goertzel_magnitude(out_float, 3 * f_test, fs)) if 3 * f_test < fs / 2 else 0.0
+        h2_amp = float(goertzel_magnitude(out_float, 2 * f_test, fs)) if 2 * f_test < fs / 2 else 0
+        h3_amp = float(goertzel_magnitude(out_float, 3 * f_test, fs)) if 3 * f_test < fs / 2 else 0
 
         results[f_test] = {
             "fundamental": fund_amp,
@@ -98,16 +104,12 @@ def sweep_report(
     results: Dict[float, Dict[str, float]],
     amplitude_in: float = 0.001,
 ) -> str:
-    """Generate a human-readable report from sweep results.
-
-    Returns a multi-line string showing per-frequency harmonic levels
-    and flatness metrics.
-    """
+    """Generate a human-readable report from sweep results."""
     lines = []
     amp_db = 20.0 * np.log10(amplitude_in)
 
     lines.append(f"  Input amplitude: {amplitude_in:.4f} ({amp_db:+.0f} dBFS)")
-    lines.append(f"")
+    lines.append("")
     header = (f"  {'Freq':>6s}  {'RMS':>8s}  {'dBFS':>7s}  "
               f"{'Fund':>9s}  {'H2 rel':>9s}  {'H3 rel':>9s}")
     lines.append(header)
@@ -128,25 +130,16 @@ def sweep_report(
         rms_db = 20.0 * np.log10(max(rms, 1e-12))
 
         lines.append(f"  {f:6.0f}  {rms:8.4f}  {rms_db:+6.1f}  "
-                      f"{fund_db:+8.1f}  {h2_rel:+8.1f}  {h3_rel:+8.1f}")
+                     f"{fund_db:+8.1f}  {h2_rel:+8.1f}  {h3_rel:+8.1f}")
 
-    # Flatness summary
+    # Flatness
     rmss = np.array([results[f]["rms"] for f in freqs])
     if len(rmss) > 0:
         ref = float(np.mean(rmss))
         spread = 20.0 * np.log10(max(np.max(rmss), 1e-6) / max(np.min(rmss), 1e-6))
-        lines.append(f"")
+        lines.append("")
         lines.append(f"  ── Flatness ──")
-        lines.append(f"  Mean output RMS: {ref:.4f} ({20*np.log10(ref):+.1f} dBFS)")
-        lines.append(f"  Min/Max spread:  {spread:.1f} dB")
-
-        # Per-region
-        bass = [results[f]["rms"] for f in freqs if f <= 120]
-        treble = [results[f]["rms"] for f in freqs if f > 120]
-        if bass:
-            lines.append(f"  Bass (≤120 Hz):   {20*np.log10(max(bass)/max(min(bass),1e-6)):.1f} dB spread")
-        if treble:
-            lines.append(f"  Treble (>120 Hz): {20*np.log10(max(treble)/max(min(treble),1e-6)):.1f} dB spread")
+        lines.append(f"  Mean RMS: {ref:.4f} ({20*np.log10(ref):+.1f} dBFS)  spread: {spread:.1f} dB")
 
     return "\n".join(lines)
 
@@ -158,28 +151,28 @@ def measure_harmonics_vs_amplitude(
     h3: float = 1.0,
     fs: float = 44100.0,
     amplitudes: Optional[List[float]] = None,
-    eq_coeffs_q28: Optional[List[int]] = None,
+    eq_coeffs: Optional[List[float]] = None,
     duration_sec: float = 0.5,
+    vol_gain: float = 1.0,
+    pre_gain: Optional[float] = None,
 ) -> List[Dict[str, float]]:
-    """Measure 2nd and 3rd harmonic levels vs input amplitude at a single frequency.
+    """Measure harmonic levels vs input amplitude through full pipeline.
 
-    Sweeps input amplitude and records the fundamental, H2, and H3 levels
-    at the enhancer output.  Useful for verifying harmonic linearity.
-
-    Returns list of dicts with keys: amplitude, fundamental, h2, h3, rms.
+    Returns list of dicts: {"amplitude", "fundamental", "h2", "h3", "rms"}.
     """
     if amplitudes is None:
         amplitudes = [1.0, 0.7, 0.5, 0.35, 0.25, 0.18, 0.125, 0.09]
-
-    if eq_coeffs_q28 is None:
-        eq_coeffs_q28 = []
+    if eq_coeffs is None:
+        eq_coeffs = []
 
     n_samples = int(duration_sec * fs)
     steady_start = n_samples // 4
 
     enh = effi.create_enhancer(
         cutoff_hz=fc, h2_amp=h2, h3_amp=h3,
-        release_secs=0.2, fs=fs, coeffs_q28=eq_coeffs_q28,
+        release_secs=0.2, fs=fs,
+        pre_gain=pre_gain if pre_gain is not None else 1.0,
+        coeffs=eq_coeffs,
     )
 
     results = []
@@ -196,8 +189,12 @@ def measure_harmonics_vs_amplitude(
         for i in range(0, len(pcm), 4):
             l = struct.unpack_from('<h', pcm, i)[0]
             r = struct.unpack_from('<h', pcm, i + 2)[0]
-            l_out, r_out = effi.process_stereo_frame(enh, l, r)
-            struct.pack_into('<hh', pcm, i, l_out, r_out)
+            lf = (l / 32768.0) * vol_gain
+            rf = (r / 32768.0) * vol_gain
+            lf, rf = effi.process_stereo_frame(enh, lf, rf)
+            struct.pack_into('<hh', pcm, i,
+                int(np.clip(lf * 32767, -32768, 32767)),
+                int(np.clip(rf * 32767, -32768, 32767)))
 
         out_float = np.array([
             struct.unpack_from('<h', pcm, i * 4)[0] / 32768.0
@@ -206,8 +203,8 @@ def measure_harmonics_vs_amplitude(
 
         rms_out = float(np.sqrt(np.mean(out_float ** 2)))
         fund_amp = float(goertzel_magnitude(out_float, freq, fs))
-        h2_amp = float(goertzel_magnitude(out_float, 2 * freq, fs)) if 2 * freq < fs / 2 else 0.0
-        h3_amp = float(goertzel_magnitude(out_float, 3 * freq, fs)) if 3 * freq < fs / 2 else 0.0
+        h2_amp = float(goertzel_magnitude(out_float, 2 * freq, fs)) if 2 * freq < fs / 2 else 0
+        h3_amp = float(goertzel_magnitude(out_float, 3 * freq, fs)) if 3 * freq < fs / 2 else 0
 
         results.append({
             "amplitude": amp,
@@ -219,3 +216,63 @@ def measure_harmonics_vs_amplitude(
 
     effi.destroy_enhancer(enh)
     return results
+
+
+# ── Volume LUT: exact mirror of smart_volume.h / firmware ─────────────
+
+def build_vol_lut(
+    vol: int,
+    speaker_level_db: int = 60,
+    overboost_db: float = 0.0,
+    compensation_db: float = 0.0,
+) -> float:
+    """Compute vol_lut[vol] exactly as the C firmware does."""
+    if vol <= 0:
+        return 0.0
+
+    sv_db_floor = float(-speaker_level_db)
+    if sv_db_floor > -24.0:
+        sv_db_floor = -24.0
+    if sv_db_floor < -80.0:
+        sv_db_floor = -80.0
+
+    db = (float(vol) / 127.0) * (-sv_db_floor) + sv_db_floor + compensation_db + overboost_db
+    if db > overboost_db:
+        db = overboost_db
+    return 10.0 ** (db / 20.0)
+
+
+def build_full_vol_lut(
+    speaker_level_db: int = 60,
+    overboost_db: float = 0.0,
+    compensation_db: float = 0.0,
+) -> np.ndarray:
+    """Build the full 128-entry vol_lut matching firmware."""
+    lut = np.zeros(128, dtype=np.float64)
+    for v in range(1, 128):
+        lut[v] = build_vol_lut(v, speaker_level_db, overboost_db, compensation_db)
+    return lut
+
+
+def compute_smart_volume(
+    vol: int,
+    pg_loud: float = 1.0,
+    quiet_shelf_db: float = 8.0,
+) -> dict:
+    """Compute pre_gain/loudness_boost for a volume level (matches smart_volume.h)."""
+    t = float(vol) / 127.0
+
+    atten_norm = 1.0 - t
+    shelf_db = quiet_shelf_db * (atten_norm ** 0.33)
+    shelf_linear = 10.0 ** (shelf_db / 20.0)
+    boost = shelf_linear - 1.0
+
+    max_shelf_linear = 10.0 ** (quiet_shelf_db / 20.0)
+    pg_quiet = pg_loud / max_shelf_linear
+    pre_gain = pg_quiet + t * (pg_loud - pg_quiet)
+
+    return {
+        "pre_gain": pre_gain,
+        "shelf_db": shelf_db,
+        "boost": boost,
+    }

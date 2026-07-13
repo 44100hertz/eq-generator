@@ -7,8 +7,6 @@
   "target": "measurements/technics/standing/target.wav",
   "noise": "measurements/technics/standing/noise.wav",
   "fc": 60,
-  "h2": 0.5,
-  "h3": 1,
   "max_bands": 8,
   "smooth_exponent": 1,
   "release": 0.2,

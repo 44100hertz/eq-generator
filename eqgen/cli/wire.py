@@ -81,10 +81,11 @@ def generate_eq_header(biquads_44, biquads_48, bands_44, bands_48, cfg,
     lines.append("#pragma once")
     lines.append("")
     lines.append(f"#define EQGEN_CUTOFF_HZ            {cfg['cutoff_hz']:.1f}f")
-    lines.append(f"#define EQGEN_H2_AMP               {cfg['h2_amp']:.3f}f")
-    lines.append(f"#define EQGEN_H3_AMP               {cfg['h3_amp']:.3f}f")
+    lines.append(f"#define EQGEN_H2_AMP               {cfg['h2_amp']:.4f}f")
+    lines.append(f"#define EQGEN_H3_AMP               {cfg['h3_amp']:.4f}f")
+    lines.append(f"#define EQGEN_PUSH_GAIN            {cfg['push_gain']:.3f}f")
+    lines.append(f"#define EQGEN_OVERBOOST_DB          {cfg.get('overboost_db', 0.0):.2f}f")
     lines.append(f"#define EQGEN_RELEASE_SECS         {cfg['release_secs']:.3f}f")
-    lines.append(f"#define EQGEN_LIMITER_RELEASE_SECS {cfg['limiter_release_secs']:.3f}f")
     pre_gain = cfg.get('pre_gain', 1.0)
     lines.append(f"#define EQGEN_PRE_GAIN             {pre_gain:.6f}f")
     lines.append(f"#define EQGEN_FS_44100              44100")
@@ -99,11 +100,8 @@ def generate_eq_header(biquads_44, biquads_48, bands_44, bands_48, cfg,
     lines.append("/* ── Smart volume (AVRCP-based loudness compensation) ────────────── */")
     lines.append("#define EQGEN_LOUDNESS_FC_HZ         200.0f  /* one-pole shelf corner freq  */")
     lines.append("#define EQGEN_QUIET_SHELF_DB           8.0f  /* boost at DC when vol → 0   */")
-    lines.append("#define EQGEN_QUIET_FUNDAMENTAL_BLEED  0.40f /* max LP bleed when harmonics fully cut */")
     lines.append("")
-    lines.append("/* Harmonic→bleed crossfade thresholds (t = vol/127) */")
-    lines.append("#define EQGEN_HARMONIC_BLEED_CROSSFADE_LO_T  0.20f  /* vol≤25: h2/h3=0, bleed=max */")
-    lines.append("#define EQGEN_HARMONIC_BLEED_CROSSFADE_HI_T  0.50f  /* vol≥63: h2/h3=full, bleed=0 */")
+    lines.append("/* Headroom-based enhancer: LP fundamental + harmonics fill available space. */")
     lines.append("")
     # 44100 Hz coefficients
     def _write_coeffs(name, biquads, bands):
@@ -219,10 +217,10 @@ def generate_sfx_header():
 # ── Pipeline ──────────────────────────────────────────────────────────
 
 def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
-                       target_path=None, fc=60.0, h2=0.5, h3=1.0,
+                       target_path=None, fc=60.0,
                        max_bands=MAX_IIR_BANDS, smooth_exponent=1.0,
                        target_fs=None, bluetooth_id=None,
-                       house_curve=None):
+                       house_curve=None, overboost_db=0.0):
     """Run pipeline + IIR fit at both 44100 and 48000, return biquads and config."""
     if speaker_name:
         meas_dir = MEAS_DIR / speaker_name
@@ -247,9 +245,9 @@ def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
             sys.exit("ERROR: need --measurement, --target (or speaker name)")
 
     print(f"\n── EQ pipeline (Welch + adaptive points + model)...")
-    eq_freqs, target_db, fs, max_gain_db = run_pipeline(
+    eq_freqs, target_db, fs, max_gain_db, efficacy = run_pipeline(
         meas_paths, target_path, noise_path,
-        bass_enhancer_cutoff=fc, h2=h2, h3=h3,
+        bass_enhancer_cutoff=fc,
         house_curve=house_curve,
     )
 
@@ -293,8 +291,12 @@ def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
     pre_gain = pre_gain_from_max_gain(max_gain_db)
 
     cfg = {
-        "cutoff_hz": fc, "h2_amp": h2, "h3_amp": h3,
-        "release_secs": 0.2, "limiter_release_secs": 0.049,
+        "cutoff_hz": fc,
+        "h2_amp": efficacy["h2_amp"],
+        "h3_amp": efficacy["h3_amp"],
+        "release_secs": 0.2,
+        "push_gain": 1.0,
+        "overboost_db": overboost_db,
         "pre_gain": pre_gain,
         "fs": float(fs),
     }
@@ -596,7 +598,6 @@ def main():
             noise_path=str(ROOT / preset.noise) if preset.noise else None,
             target_path=str(ROOT / preset.target) if preset.target else None,
             fc=preset.fc or 60.0,
-            h2=preset.h2, h3=preset.h3,
             smooth_exponent=preset.smooth_exponent,
             max_bands=preset.max_bands,
             bluetooth_id=preset.bluetooth_id or None,
@@ -605,7 +606,6 @@ def main():
 
         eq_freqs, biquads_44, biquads_48, bands_44, bands_48, cfg, coeffs_flat = result
         cfg["release_secs"] = preset.release
-        cfg["limiter_release_secs"] = preset.limiter_release
 
         print(f"\n── Generating headers...")
         generate_eq_header(biquads_44, biquads_48, bands_44, bands_48, cfg,
@@ -631,7 +631,6 @@ def main():
             noise_path=str(ROOT / preset.noise) if preset.noise else None,
             target_path=str(ROOT / preset.target) if preset.target else None,
             fc=preset.fc or 60.0,
-            h2=preset.h2, h3=preset.h3,
             smooth_exponent=preset.smooth_exponent,
             max_bands=preset.max_bands,
             bluetooth_id=preset.bluetooth_id or None,
@@ -639,7 +638,6 @@ def main():
         )
         eq_freqs, biquads_44, biquads_48, bands_44, bands_48, cfg, coeffs_flat = result
         cfg["release_secs"] = preset.release
-        cfg["limiter_release_secs"] = preset.limiter_release
         generate_eq_header(biquads_44, biquads_48, bands_44, bands_48, cfg,
                           bluetooth_id=preset.bluetooth_id,
                           speaker_level=preset.speaker_level)

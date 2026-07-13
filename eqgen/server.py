@@ -87,7 +87,6 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
         detailed = run_pipeline(
             meas_paths, target_path or "", noise_path,
             bass_enhancer_cutoff=preset.fc,
-            h2=preset.h2, h3=preset.h3,
             smooth_exponent=preset.smooth_exponent,
             detailed=True,
             house_curve=curve_data,
@@ -150,8 +149,10 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
         # ── Smart volume: compute effective curves at different volume levels ─
         from eqgen.pipeline import compute_smart_volume_curves, pre_gain_from_max_gain
         pg_db_loud = 20.0 * np.log10(pre_gain_from_max_gain(max_gain_db))
-        sv_result = compute_smart_volume_curves(freqs, gains_db, preset.h2, preset.h3,
-                                                  pre_gain_db_loud=float(pg_db_loud))
+        sv_result = compute_smart_volume_curves(freqs, gains_db,
+                                                  pre_gain_db_loud=float(pg_db_loud),
+                                                  speaker_level_db=preset.speaker_level,
+                                                  overboost_db=preset.overboost_db)
 
         result = {
             "status": "complete",
@@ -162,8 +163,9 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
                 "bass_err": float(np.max(np.abs(err_arr[err_freqs <= 250]))),
                 "mid_err": float(np.max(np.abs(err_arr[(err_freqs > 250) & (err_freqs <= 2000)]))),
                 "treble_err": float(np.max(np.abs(err_arr[err_freqs > 2000]))),
-                "fc": preset.fc, "h2": preset.h2, "h3": preset.h3,
+                "fc": preset.fc,
                 "fs": fs, "max_gain_db": max_gain_db,
+                "efficacy": detailed.get("efficacy", {}),
             },
             "raw_measurement": raw_meas,
             "raw_target": targ_db,
@@ -229,15 +231,13 @@ def _apply_preset_to_system(preset_dict: dict, task_id: str):
             target_path=target_path or "",
             noise_path=noise_path,
             fc=preset.fc or 60.0,
-            h2=preset.h2,
-            h3=preset.h3,
             max_bands=preset.max_bands,
             smooth_exponent=preset.smooth_exponent,
             bluetooth_id=preset.bluetooth_id or None,
             house_curve=curve_data,
+            overboost_db=preset.overboost_db,
         )
         cfg["release_secs"] = preset.release
-        cfg["limiter_release_secs"] = preset.limiter_release
 
         # 3. Generate eq_coeffs.h + sfx_data.h (delegates to wire.py)
         generate_eq_header(bq_q28_44, bq_q28_48, bands_44, bands_48, cfg,
@@ -338,15 +338,13 @@ def _flash_esp32(preset_dict: dict, task_id: str):
             target_path=target_path or "",
             noise_path=noise_path,
             fc=preset.fc or 60.0,
-            h2=preset.h2,
-            h3=preset.h3,
             max_bands=preset.max_bands,
             smooth_exponent=preset.smooth_exponent,
             bluetooth_id=preset.bluetooth_id or None,
             house_curve=curve_data,
+            overboost_db=preset.overboost_db,
         )
         cfg["release_secs"] = preset.release
-        cfg["limiter_release_secs"] = preset.limiter_release
 
         # 2. Generate eq_coeffs.h + sfx_data.h
         generate_eq_header(bq_q28_44, bq_q28_48, bands_44, bands_48, cfg,
@@ -1134,9 +1132,7 @@ function renderPresetList() {
   el.innerHTML = state.presets.map(p => {
     const active = state.activePreset && state.activePreset.name === p.name ? ' active' : '';
     const fcStr = p.fc != null ? `fc=${esc(String(p.fc))}` : '';
-    const h2Str = p.h2 != null ? `h2=${esc(String(p.h2))}` : '';
-    const h3Str = p.h3 != null ? `h3=${esc(String(p.h3))}` : '';
-    const paramStr = [fcStr, h2Str, h3Str].filter(Boolean).join(' ');
+    const paramStr = fcStr || 'no parameters';
     return `<div class="preset-item${active}" onclick="loadPreset('${esc(p.name)}')">
       <div><div class="name">${esc(p.name)}</div>
         ${paramStr ? `<div class="desc">${paramStr}</div>` : '<div class="desc">no parameters</div>'}
@@ -1157,14 +1153,12 @@ function readForm() {
     house_curve: document.getElementById('fHouseCurve')?.value || '',
     noise: document.getElementById('fNoise')?.value || null,
     fc: numVal('fFc'),
-    h2: numVal('fH2', 0.5),
-    h3: numVal('fH3', 1.0),
     max_bands: intVal('fMaxBands', __MAX_IIR_BANDS__),
     smooth_exponent: numVal('fSmooth', 1.0),
     release: numVal('fRelease', 0.2),
-    limiter_release: numVal('fLimiter', 0.049),
     bluetooth_id: document.getElementById('fBtId')?.value || '',
     speaker_level: intVal('fSpkLevel', 60),
+    overboost_db: numVal('fOverboost', 0.0),
     high_rolloffs: [],
     low_rolloffs: [],
   };
@@ -1227,14 +1221,12 @@ function renderEditor() {
       <div class="form-group"><label>Target WAV</label><input id="fTarget" value="${esc(p.target || '')}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Noise WAV (optional)</label><input id="fNoise" value="${esc(p.noise || '')}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Cutoff fc (Hz)</label><input id="fFc" type="number" step="1" min="20" max="200" value="${p.fc ?? ''}" oninput="scheduleAnalyze()"></div>
-      <div class="form-group"><label>H2 Amp</label><input id="fH2" type="number" step="0.01" min="0" max="2" value="${p.h2 ?? 0.5}" oninput="scheduleAnalyze()"></div>
-      <div class="form-group"><label>H3 Amp</label><input id="fH3" type="number" step="0.01" min="0" max="2" value="${p.h3 ?? 1.0}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Max Bands</label><input id="fMaxBands" type="number" step="1" min="1" max="8" value="${p.max_bands ?? __MAX_IIR_BANDS__}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Smooth Exponent</label><input id="fSmooth" type="number" step="0.1" min="0" max="4" value="${p.smooth_exponent ?? 1.0}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Release (s)</label><input id="fRelease" type="number" step="0.01" min="0.01" max="2" value="${p.release ?? 0.2}" oninput="scheduleAnalyze()"></div>
-      <div class="form-group"><label>Limiter Release (s)</label><input id="fLimiter" type="number" step="0.001" min="0.01" max="0.5" value="${p.limiter_release ?? 0.049}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Bluetooth ID</label><input id="fBtId" value="${esc(p.bluetooth_id || '')}" placeholder="e.g. Living Room Speaker" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Speaker Level (dB)</label><input id="fSpkLevel" type="number" step="1" min="20" max="100" value="${p.speaker_level ?? 60}" oninput="scheduleAnalyze()"></div>
+      <div class="form-group"><label>Overboost (dB)</label><input id="fOverboost" type="number" step="0.5" min="0" max="12" value="${p.overboost_db ?? 0}" oninput="scheduleAnalyze()"></div>
     </div>
   `;
 }
@@ -1285,7 +1277,7 @@ function onHouseCurveChange() {
 }
 
 function newPreset() {
-  state.activePreset = { name: 'new-preset', measurements: [], target: '', house_curve: 'flat', fc: 60, h2: 0.5, h3: 1.0, max_bands: __MAX_IIR_BANDS__, smooth_exponent: 1.0, release: 0.2, limiter_release: 0.049, bluetooth_id: '', speaker_level: 60 };
+  state.activePreset = { name: 'new-preset', measurements: [], target: '', house_curve: 'flat', fc: 60, max_bands: __MAX_IIR_BANDS__, smooth_exponent: 1.0, release: 0.2, bluetooth_id: '', speaker_level: 60, overboost_db: 0 };
   state.pipelineResult = null;
   document.getElementById('results').innerHTML = '';
   document.getElementById('presetList').querySelectorAll('.active').forEach(el => el.classList.remove('active'));
@@ -1313,6 +1305,10 @@ function renderResults() {
     return;
   }
   const n_bands = (r.metrics && r.metrics.n_bands) || '—';
+  const eff = (r.metrics && r.metrics.efficacy) || {};
+  const h2 = eff.h2_amp != null ? eff.h2_amp.toFixed(4) : '—';
+  const h3 = eff.h3_amp != null ? eff.h3_amp.toFixed(4) : '—';
+  const h   = (eff.h2_amp != null && eff.h3_amp != null) ? (eff.h2_amp + eff.h3_amp).toFixed(4) : '—';
   const sv = r.smart_volume || null;
 
   let svHtml = '';
@@ -1337,6 +1333,13 @@ function renderResults() {
   }
 
   resultsDiv.innerHTML = `
+    <div class="chart"><h3>Enhancer Efficacy (computed from measurement)</h3>
+      <div style="display:flex;gap:24px;padding:8px 0;font-size:13px;color:var(--muted)">
+        <span>h<sub>2</sub> = ${h2}</span>
+        <span>h<sub>3</sub> = ${h3}</span>
+        <span style="color:var(--fg)">h = ${h}</span>
+        <span style="margin-left:auto;font-size:11px">h → 0: pure fundamental &nbsp; h → 1: pure harmonics</span>
+      </div></div>
     <div class="chart"><h3>1. Measurement &amp; Target</h3><canvas id="cMeas"></canvas>
       <div class="legend"><span><i class="swatch" style="background:#58a6ff"></i> Raw measurement</span><span><i class="swatch" style="background:#58a6ff;height:0;border-bottom:1px dashed #58a6ff"></i> Meas. smoothed</span><span><i class="swatch" style="background:#d2991d"></i> Target (fit)</span></div></div>
     <div class="chart"><h3>2. IIR EQ Fit (${n_bands} biquad bands)</h3><canvas id="cFft"></canvas>
@@ -1380,21 +1383,20 @@ function onSvSlider(vol) {
 
   const pgLabel = document.getElementById('svPgLabel');
 
-  const t = vol / 127;
-
   const curves = sv.curves;
   let idxLo = 0, idxHi = sv.curves.length - 1;
   for (let i = 0; i < curves.length - 1; i++) {
-    if (t >= curves[i].t && t <= curves[i + 1].t) {
+    if (vol >= curves[i].vol && vol <= curves[i + 1].vol) {
       idxLo = i; idxHi = i + 1; break;
     }
   }
-  const a = (t - curves[idxLo].t) / (curves[idxHi].t - curves[idxLo].t + 0.0001);
+  const a = (vol - curves[idxLo].vol) / (curves[idxHi].vol - curves[idxLo].vol + 0.0001);
   const pgDb = curves[idxLo].pre_gain_db + a * (curves[idxHi].pre_gain_db - curves[idxLo].pre_gain_db);
   const sdb = curves[idxLo].shelf_max_db + a * (curves[idxHi].shelf_max_db - curves[idxLo].shelf_max_db);
+  const vdb = curves[idxLo].vol_db + a * (curves[idxHi].vol_db - curves[idxLo].vol_db);
 
   if (pgLabel) {
-    pgLabel.textContent = 'pre-gain: ' + pgDb.toFixed(1) + ' dB  |  shelf boost: +' + sdb.toFixed(1) + ' dB';
+    pgLabel.textContent = 'attn: ' + vdb.toFixed(0) + ' dB  |  shelf: +' + sdb.toFixed(1) + ' dB  |  pre-gain: ' + pgDb.toFixed(1) + ' dB';
   }
 
   const freqs = curves[idxLo].freqs;

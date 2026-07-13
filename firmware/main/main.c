@@ -77,7 +77,7 @@ static void dsp_init(int rate)
                          EQGEN_H3_AMP,
                          EQGEN_RELEASE_SECS,
                          fs,
-                         EQGEN_LIMITER_RELEASE_SECS,
+                         EQGEN_PUSH_GAIN,
 #ifdef EQGEN_PRE_GAIN
                          EQGEN_PRE_GAIN,
 #else
@@ -262,16 +262,17 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
         float l = (float)in[i * 2]     / 32768.0f;
         float r = (float)in[i * 2 + 1] / 32768.0f;
 
+        /* Apply BT system volume before enhancer so the limiter
+         * only engages at high volumes. */
+        l *= vol_f;
+        r *= vol_f;
+
         BassEnhancer_process_stereo(&enhancer, &l, &r);
 
         /* Safety net: if enhancer produced NaN/Inf, zero it.
          * This prevents undefined behavior in the float→int cast. */
         if (!isfinite(l)) l = 0.0f;
         if (!isfinite(r)) r = 0.0f;
-
-        /* Apply BT system volume */
-        l *= vol_f;
-        r *= vol_f;
 
         /* float → int16 with first-order error feedback.
          * Leaky integrator diffuses truncation error into HF
@@ -341,21 +342,18 @@ static void update_smart_volume(int rate, uint8_t vol)
     SmartVolumeParams svp;
     smart_volume_compute(vol, pg_loud, &svp);
 
-    BassEnhancer_update_params(&enhancer, svp.h2_amp, svp.h3_amp,
-                               svp.pre_gain, svp.boost, svp.bleed);
+    BassEnhancer_update_params(&enhancer,
+                               svp.pre_gain, svp.boost);
 
-    smart_volume_rebuild_lut(vol_lut, svp.shelf_db, EQGEN_SPEAKER_LEVEL_DB);
+    smart_volume_rebuild_lut(vol_lut, svp.shelf_db, EQGEN_SPEAKER_LEVEL_DB, EQGEN_OVERBOOST_DB);
 
     last_vol = vol;
 
-    ESP_LOGI(TAG, "Smart vol: vol=%u t=%.2f h2=%.3f h3=%.3f shelf=%.1f dB pg=%.3f bleed=%.3f",
+    ESP_LOGI(TAG, "Smart vol: vol=%u t=%.2f shelf=%.1f dB pg=%.3f",
              (unsigned)vol,
              (double)(float)vol / 127.0,
-             (double)svp.h2_amp,
-             (double)svp.h3_amp,
              (double)svp.shelf_db,
-             (double)svp.pre_gain,
-             (double)svp.bleed);
+             (double)svp.pre_gain);
 }
 
 /* ────────────────────────────────────────────────────────────────
@@ -369,7 +367,7 @@ void app_main(void)
     bt_a2dp_set_event_callback(bt_event_handler);
     bt_a2dp_sink_init(EQGEN_BT_DEVICE_NAME, audio_data_handler);
 
-    smart_volume_rebuild_lut(vol_lut, 0.0f, EQGEN_SPEAKER_LEVEL_DB);
+    smart_volume_rebuild_lut(vol_lut, 0.0f, EQGEN_SPEAKER_LEVEL_DB, EQGEN_OVERBOOST_DB);
 
     ESP_LOGI(TAG, "Firmware running — pair your phone now.");
 }

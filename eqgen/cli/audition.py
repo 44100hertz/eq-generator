@@ -5,7 +5,7 @@ Offline audition: speaker measurement → IIR fit → C DSP → processed WAV.
 Usage:
     python -m eqgen.cli.audition technics/standing /tmp/out
     python -m eqgen.cli.audition technics/standing /tmp/out --tracks song.flac
-    python -m eqgen.cli.audition cardboard /tmp/out --fc 50 --h2 0.5 --h3 1.0
+    python -m eqgen.cli.audition cardboard /tmp/out --fc 50
 """
 
 import argparse
@@ -29,7 +29,7 @@ MEAS_DIR = ROOT / "measurements"
 
 
 def run_speaker(speaker_name: str, out_dir: str, music_dir: str = None,
-                fc: float = 60.0, h2: float = 0.5, h3: float = 1.0,
+                fc: float = 60.0,
                 max_bands: int = MAX_IIR_BANDS, smooth_exponent: float = 1.0,
                  tracks: list = None):
     """Design EQ for a speaker and process music tracks through it."""
@@ -50,15 +50,15 @@ def run_speaker(speaker_name: str, out_dir: str, music_dir: str = None,
     target = str(target_path)
 
     print("=" * 70)
-    print(f"  SPEAKER: {speaker_name}  |  fc={fc} h2={h2} h3={h3}")
+    print(f"  SPEAKER: {speaker_name}  |  fc={fc}")
     print(f"  Measurement: {os.path.basename(meas_path)}")
     print("=" * 70)
 
     # ── EQ pipeline ────────────────────────────────────────────────
     print(f"\n── EQ pipeline (Welch + adaptive points + model)...")
-    eq_freqs, target_db, fs, max_gain_db = run_pipeline(
+    eq_freqs, target_db, fs, max_gain_db, _efficacy = run_pipeline(
         [meas_path], target,
-        bass_enhancer_cutoff=fc, h2=h2, h3=h3)
+        bass_enhancer_cutoff=fc)
 
     print(f"  {len(eq_freqs)} adaptive EQ points, {eq_freqs[0]:.0f}–{eq_freqs[-1]:.0f} Hz")
     pre_gain = pre_gain_from_max_gain(max_gain_db)
@@ -115,7 +115,7 @@ def run_speaker(speaker_name: str, out_dir: str, music_dir: str = None,
             out_dir, f"{speaker_name.replace('/', '_')}_{safe}.wav")
         print(f"  [{processed+1}/{max_tracks}] {name}")
         if process_track(path, out_path, coeffs, len(bands),
-                         cutoff_hz=fc, h2=h2, h3=h3, pre_gain=pre_gain):
+                         cutoff_hz=fc, pre_gain=pre_gain):
             processed += 1
         print()
 
@@ -133,10 +133,6 @@ def main():
                     help="Specific audio files to process")
     ap.add_argument("--fc", type=float, default=60.0,
                     help="Bass enhancer cutoff Hz [60]")
-    ap.add_argument("--h2", type=float, default=0.5,
-                    help="2nd harmonic amplitude [0.5]")
-    ap.add_argument("--h3", type=float, default=1.0,
-                    help="3rd harmonic amplitude [1.0]")
     ap.add_argument("--smooth-exponent", type=float, default=1.0,
                     help="CV smoothing aggressiveness [1.0]")
     ap.add_argument("--max-bands", type=int, default=MAX_IIR_BANDS,
@@ -145,7 +141,7 @@ def main():
 
     run_speaker(args.speaker, args.out_dir,
                 music_dir=args.music_dir,
-                fc=args.fc, h2=args.h2, h3=args.h3,
+                fc=args.fc,
                 max_bands=args.max_bands, tracks=args.tracks)
 
 

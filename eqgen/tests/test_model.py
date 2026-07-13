@@ -30,7 +30,7 @@ def verify_c_enhancer(fc=60.0, h2=0.5, h3=1.0, fs=44100.0):
     eq_coeffs = build_default_eq_coeffs(fs)
     enh = effi.create_enhancer(
         cutoff_hz=fc, h2_amp=h2, h3_amp=h3,
-        release_secs=0.2, fs=fs, coeffs_q28=eq_coeffs,
+        release_secs=0.2, fs=fs, coeffs=eq_coeffs,
     )
 
     freqs = [30, 40, 50, 60, 80, 100, 150, 200]
@@ -60,7 +60,7 @@ def verify_c_enhancer(fc=60.0, h2=0.5, h3=1.0, fs=44100.0):
             l = struct.unpack_from('<h', pcm, i)[0]
             r = struct.unpack_from('<h', pcm, i + 2)[0]
             l_out, r_out = effi.process_stereo_frame(enh, l, r)
-            struct.pack_into('<hh', pcm, i, l_out, r_out)
+            struct.pack_into('<hh', pcm, i, int(l_out), int(r_out))
 
         # Decode steady-state mono
         start = pad + len(signal) // 2

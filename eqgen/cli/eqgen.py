@@ -7,7 +7,7 @@ can be fed to the audition / wire / export pipelines.
 
 Usage:
     python -m eqgen.cli.eqgen -m meas.wav -t target.wav -o curve.json
-    python -m eqgen.cli.eqgen -m meas.wav -t target.wav --fc 50 --h2 0.5
+    python -m eqgen.cli.eqgen -m meas.wav -t target.wav --fc 50
 """
 
 import argparse
@@ -45,19 +45,14 @@ Examples:
                     help="Output JSON file (default: stdout)")
     ap.add_argument("--bass-enhancer-cutoff", "--fc", type=float, default=None,
                     dest="fc", help="Bass enhancer cutoff Hz")
-    ap.add_argument("--h2", type=float, default=1.0,
-                    help="2nd harmonic amplitude")
-    ap.add_argument("--h3", type=float, default=1.0,
-                    help="3rd harmonic amplitude")
     ap.add_argument("--smooth-exponent", type=float, default=1.0,
                     help="CV smoothing aggressiveness. 0=fixed, 1=linear, 2=amplified [1.0]")
 
     args = ap.parse_args()
 
-    freqs, gains_db, sample_rate, max_gain_db = run_pipeline(
+    freqs, gains_db, sample_rate, max_gain_db, _efficacy = run_pipeline(
         args.measurement, args.target, args.noise,
         bass_enhancer_cutoff=args.fc,
-        h2=args.h2, h3=args.h3,
         smooth_exponent=args.smooth_exponent,
     )
 

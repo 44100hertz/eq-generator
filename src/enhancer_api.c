@@ -43,7 +43,7 @@ EnhancerHandle *enhancer_create(const EnhancerParams *p) {
     BassEnhancerCfg_init(&cfg,
                          p->cutoff_hz, p->h2_amp, p->h3_amp,
                          p->release_secs, p->fs,
-                         p->limiter_release_secs,
+                         p->push_gain,
                          p->pre_gain,
                          p->eq_n_biquads, p->eq_coeffs);
 

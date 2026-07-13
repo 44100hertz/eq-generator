@@ -23,7 +23,7 @@ print(f"  technics/standing — IIR fit from measurement pipeline")
 print("="*70)
 
 # Run pipeline: measurement → correction curve (no model preprocessing)
-freqs, target_db, fs, _max_gain = run_pipeline([mp], tp)
+freqs, target_db, fs, _max_gain, _efficacy = run_pipeline([mp], tp)
 
 nyquist = min(16000.0, fs/2 * 0.95)
 

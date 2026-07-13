@@ -60,3 +60,8 @@ DON'T: Identify a random problem, say "Fixed", and call it done.
 A function is called in state A, but in theory it could be called in state B which would break it.
 DO: Assert that the function is not in state B early on.
 DON'T: Trace through every single logical path.
+
+If I say there's a bug, ALWAYS RUN THE FULL PIPELINE, THE REAL PIPELINE END-TO-END.
+
+Don't isolate a part of the pipeline until you've identified the problem by running
+what actually runs on the DSP box. THEN you can bisect things down.

@@ -5,14 +5,15 @@
     "measurements/technics/standing/measurement2.wav"
   ],
   "target": "measurements/technics/standing/target.wav",
+  "house_curve": "midsize-bright",
   "noise": "measurements/technics/standing/noise2.wav",
-  "fc": 50,
-  "h2": 0.5,
-  "h3": 1,
-  "max_bands": 8,
+  "fc": 70,
+  "max_bands": 32,
   "smooth_exponent": 1,
   "release": 0.2,
-  "limiter_release": 0.049,
+  "bluetooth_id": "",
+  "speaker_level": 60,
+  "overboost_db": 12,
   "high_rolloffs": [],
   "low_rolloffs": []
 }

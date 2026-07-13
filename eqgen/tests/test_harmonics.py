@@ -40,7 +40,7 @@ def pipeline_sweep(cutoff=60.0, h2=0.5, h3=1.0, fs=44100.0):
 
     results = sweep.run_sine_sweep(
         freqs_hz=test_freqs,
-        eq_coeffs_q28=eq_coeffs,
+        eq_coeffs=eq_coeffs,
         fc=cutoff, h2=h2, h3=h3, fs=fs,
         amplitude=0.001,
         duration_sec=1.0,
@@ -68,7 +68,7 @@ def harmonic_linearity(freq=50.0, cutoff=60.0, h2=0.5, h3=1.0, fs=44100.0):
     results = sweep.measure_harmonics_vs_amplitude(
         freq=freq, fc=cutoff, h2=h2, h3=h3, fs=fs,
         amplitudes=amplitudes,
-        eq_coeffs_q28=eq_coeffs,
+        eq_coeffs=eq_coeffs,
     )
 
     print(f"\n  {'In dBFS':>8s}  {'Fund dBFS':>10s}  "
@@ -137,14 +137,14 @@ def tone_purity(freq=50.0, amp=0.5, cutoff=60.0, h2=0.5, h3=1.0, fs=44100.0):
 
     enh = effi.create_enhancer(
         cutoff_hz=cutoff, h2_amp=h2, h3_amp=h3,
-        release_secs=0.2, fs=fs, coeffs_q28=eq_coeffs,
+        release_secs=0.2, fs=fs, coeffs=eq_coeffs,
     )
 
     for i in range(0, len(pcm), 4):
         l = struct.unpack_from('<h', pcm, i)[0]
         r = struct.unpack_from('<h', pcm, i + 2)[0]
         l_out, r_out = effi.process_stereo_frame(enh, l, r)
-        struct.pack_into('<hh', pcm, i, l_out, r_out)
+        struct.pack_into('<hh', pcm, i, int(l_out), int(r_out))
 
     effi.destroy_enhancer(enh)
 

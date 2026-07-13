@@ -22,7 +22,7 @@ mp = str(ROOT/"measurements/technics/standing/measurement2.wav")
 tp = str(ROOT/"measurements/technics/standing/target.wav")
 
 # Run pipeline: measurement → correction curve
-freqs, gains_db, fs, _max_gain = run_pipeline([mp], tp)
+freqs, gains_db, fs, _max_gain, _efficacy = run_pipeline([mp], tp)
 
 # Fit IIR biquads to the correction curve
 fit = fit_eq_curve(freqs, gains_db, FS, max_bands=MAX_BANDS,
@@ -41,7 +41,7 @@ print("="*70)
 # ── Build enhancer ────────────────────────────────────────────────────
 enh = effi.create_enhancer(
     cutoff_hz=FC, h2_amp=H2, h3_amp=H3,
-    release_secs=0.2, fs=FS, coeffs_q28=coeffs,
+    release_secs=0.2, fs=FS, coeffs=coeffs,
 )
 
 # ── Sweep ─────────────────────────────────────────────────────────────
@@ -76,7 +76,7 @@ for f_test in test_freqs:
         l = struct.unpack_from('<h', pcm, i)[0]
         r = struct.unpack_from('<h', pcm, i+2)[0]
         l_out, r_out = effi.process_stereo_frame(enh, l, r)
-        struct.pack_into('<hh', pcm, i, l_out, r_out)
+        struct.pack_into('<hh', pcm, i, int(l_out), int(r_out))
 
     # Decode steady-state
     out_float = np.array([struct.unpack_from('<h', pcm, i*4)[0]/32768.0

@@ -53,7 +53,7 @@ class EnhancerParams(Structure):
         ("h2_amp", c_float),
         ("h3_amp", c_float),
         ("release_secs", c_float),
-        ("limiter_release_secs", c_float),
+        ("push_gain", c_float),
         ("pre_gain", c_float),
         ("fs", c_float),
         ("eq_n_biquads", c_int32),
@@ -96,7 +96,7 @@ def create_enhancer(
     h2_amp: float = 0.33,
     h3_amp: float = 0.33,
     release_secs: float = 0.2,
-    limiter_release_secs: float = 0.049,
+    push_gain: float = 1.0,
     pre_gain: float = 1.0,
     fs: float = 44100.0,
     coeffs: List[float] | None = None,
@@ -107,7 +107,7 @@ def create_enhancer(
         cutoff_hz: bass crossover frequency (Hz).
         h2_amp, h3_amp: 2nd/3rd harmonic amplitudes (0…1).
         release_secs: envelope release for harmonic linearisation (s).
-        limiter_release_secs: AGC limiter release time (s, typ. 0.049).
+        push_gain: headroom fill strength (1.0 = fill to 0 dBFS).
         pre_gain: linear gain applied before EQ (default 1.0).
         fs: sample rate (Hz).
         coeffs: flat list of float biquad coefficients [b0,b1,b2,a1,a2,...].
@@ -126,7 +126,7 @@ def create_enhancer(
         h2_amp=h2_amp,
         h3_amp=h3_amp,
         release_secs=release_secs,
-        limiter_release_secs=limiter_release_secs,
+        push_gain=push_gain,
         pre_gain=pre_gain,
         fs=fs,
         eq_n_biquads=n_biquads,

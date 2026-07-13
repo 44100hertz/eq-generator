@@ -22,7 +22,7 @@ typedef struct {
     float   h2_amp;
     float   h3_amp;
     float   release_secs;
-    float   limiter_release_secs;
+    float   push_gain;     /* headroom fill strength (1.0 = 0 dBFS) */
     float   pre_gain;      /* linear gain applied before EQ (typ. 1.0) */
     float   fs;
     int     eq_n_biquads;

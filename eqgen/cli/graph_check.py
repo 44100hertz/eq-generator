@@ -33,7 +33,7 @@ MEAS_DIR = ROOT / "measurements"
 # ── Pipeline wrapper ──────────────────────────────────────────────────
 
 def gather_all(speaker_name=None, meas_paths=None, noise_path=None,
-               target_path=None, fc=60.0, h2=0.5, h3=1.0, smooth_exponent=1.0,
+               target_path=None, fc=60.0, smooth_exponent=1.0,
                max_bands=MAX_IIR_BANDS):
     """Run pipeline + IIR fit + harmonic model; return everything as a dict for JSON."""
     if speaker_name:
@@ -61,7 +61,7 @@ def gather_all(speaker_name=None, meas_paths=None, noise_path=None,
     # ── Run pipeline with detailed intermediate data ──────────────────
     detailed = run_pipeline(
         meas_paths, target_path, noise_path,
-        bass_enhancer_cutoff=fc, h2=h2, h3=h3,
+        bass_enhancer_cutoff=fc,
         smooth_exponent=smooth_exponent,
         detailed=True,
     )
@@ -128,7 +128,7 @@ def gather_all(speaker_name=None, meas_paths=None, noise_path=None,
         "bass_err": float(np.max(np.abs(err_arr[err_freqs <= 250]))),
         "mid_err": float(np.max(np.abs(err_arr[(err_freqs > 250) & (err_freqs <= 2000)]))),
         "treble_err": float(np.max(np.abs(err_arr[err_freqs > 2000]))),
-        "fc": fc, "h2": h2, "h3": h3,
+        "fc": fc,
         "fs": fs, "speaker": speaker_name or "custom",
         "align_db": round(align_db, 1),
     }
@@ -190,7 +190,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </head>
 <body>
 <h1>EQGen Pipeline Report</h1>
-<div class="subtitle">__SPEAKER__ &mdash; fc=__FC__Hz h2=__H2__ h3=__H3__ &mdash; __N_BANDS__ biquads @ __FS__Hz &mdash; alignment __ALIGN_DB__ dB</div>
+<div class="subtitle">__SPEAKER__ &mdash; fc=__FC__Hz &mdash; __N_BANDS__ biquads @ __FS__Hz &mdash; alignment __ALIGN_DB__ dB</div>
 
 <div class="metrics">
   <div class="metric"><div class="label">RMS Error</div><div class="value __RMS_ERR_CLS__">__RMS_ERR__ dB</div></div>
@@ -424,8 +424,6 @@ def generate_html(data: dict) -> str:
     html = html.replace("__JSON_DATA__", json.dumps(data, indent=2))
     html = html.replace("__SPEAKER__", str(m.get("speaker", "custom")))
     html = html.replace("__FC__", str(m["fc"]))
-    html = html.replace("__H2__", str(m["h2"]))
-    html = html.replace("__H3__", str(m["h3"]))
     html = html.replace("__N_BANDS__", str(m["n_bands"]))
     html = html.replace("__FS__", f'{m["fs"]:.0f}')
     html = html.replace("__ALIGN_DB__", f'{m.get("align_db", 0):+.1f}')
@@ -450,8 +448,6 @@ def main():
     ap.add_argument("-t", "--target", default=None, help="Target WAV file")
     ap.add_argument("-o", "--output", default=None, help="Output HTML path")
     ap.add_argument("--fc", type=float, default=60.0, help="Bass enhancer cutoff Hz")
-    ap.add_argument("--h2", type=float, default=0.5, help="2nd harmonic amplitude")
-    ap.add_argument("--h3", type=float, default=1.0, help="3rd harmonic amplitude")
     ap.add_argument("--smooth-exponent", type=float, default=1.0,
                     help="CV smoothing aggressiveness [1.0]")
     ap.add_argument("--max-bands", type=int, default=MAX_IIR_BANDS)
@@ -467,7 +463,7 @@ def main():
         meas_paths=args.measurement,
         noise_path=args.noise,
         target_path=args.target,
-        fc=args.fc, h2=args.h2, h3=args.h3, smooth_exponent=args.smooth_exponent,
+        fc=args.fc, smooth_exponent=args.smooth_exponent,
         max_bands=args.max_bands,
     )
 
