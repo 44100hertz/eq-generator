@@ -22,7 +22,6 @@ from eqgen.io import read_wav
 from eqgen.dsp import ratio_to_db, pre_gain_from_max_gain
 from eqgen.analysis import (
     welch_stats,
-    _find_viable_range,
     _smooth_kernel,
     BOTTOM_F,
     TOP_F,
@@ -151,22 +150,26 @@ def run_pipeline(
         noise_cv = np.array([s["cv"] for s in noise_stats])
 
     # 6. CV-weighted kernel smoothing on uniform log-spaced grid.
-    MIN_CV = 0.52   # Rayleigh CV \u2014 the noise floor for stationary signals
+    MIN_CV = 0.52   # Rayleigh CV — the noise floor for stationary signals
     BASE_BW = 0.08  # octaves at MIN_CV (~3 FFT bins at 400 Hz)
+    CV_PENALTY = 1.0 / 0.75  # bins with CV ≥ 0.75 (σ_dB ≈ 6.5) get zero weight
 
     eval_freqs = np.logspace(np.log10(BOTTOM_F), np.log10(TOP_F), n_eval)
 
     # Estimate local CV at each eval point to scale bandwidth
+    # (no penalty here — we need true local CV for bandwidth decisions)
     cv_at_eval = _smooth_kernel(meas_freqs, meas_cv, meas_cv, eval_freqs,
                                 bandwidth_oct=0.3)
     bw_meas = np.maximum(BASE_BW * (cv_at_eval / MIN_CV) ** smooth_exponent, 0.01)
     meas_vals = _smooth_kernel(meas_freqs, meas_raw, meas_cv, eval_freqs,
-                               bandwidth_oct=bw_meas)
+                               bandwidth_oct=bw_meas, cv_penalty=CV_PENALTY)
 
-    # Spectral subtraction
+    # Spectral subtraction (power domain — correct for uncorrelated noise)
     if noise_freqs is not None:
-        noise_vals = _smooth_kernel(noise_freqs, noise_raw, noise_cv, eval_freqs)
-        meas_vals = np.maximum(meas_vals - noise_vals, meas_vals * 0.01)
+        noise_vals = _smooth_kernel(noise_freqs, noise_raw, noise_cv, eval_freqs,
+                                    cv_penalty=CV_PENALTY)
+        meas_vals = np.sqrt(np.maximum(meas_vals**2 - noise_vals**2,
+                                       meas_vals**2 * 0.0001))
 
     # 6. Target from WAV (linear fit in dB vs log-freq) or flat 0 dB line.
     #    House curve is an additive adjustment applied on top.
@@ -198,14 +201,6 @@ def run_pipeline(
         efficacy = compute_harmonic_efficacy(eval_freqs, ratio_to_db(corr),
                                              bass_enhancer_cutoff)
 
-    # 9. Clamp correction flat outside the CV-defined viable range.
-    lo_f, hi_f = _find_viable_range(meas_freqs, meas_cv)
-    lo_idx = int(np.searchsorted(eval_freqs, lo_f))
-    hi_idx = int(np.searchsorted(eval_freqs, hi_f))
-    if lo_idx > 0:
-        corr[:lo_idx] = corr[lo_idx]
-    if hi_idx < len(corr) - 1:
-        corr[hi_idx + 1:] = corr[hi_idx]
 
     freqs = eval_freqs
     gains_db = ratio_to_db(corr)

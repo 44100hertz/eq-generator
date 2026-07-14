@@ -389,18 +389,26 @@ def _find_viable_range(freqs: np.ndarray, cv: np.ndarray,
 
 def _smooth_kernel(bin_freqs: np.ndarray, bin_values: np.ndarray,
                    bin_cv: np.ndarray, eval_freqs: np.ndarray,
-                   bandwidth_oct = 0.5) -> np.ndarray:
+                   bandwidth_oct = 0.5, cv_penalty = 0.0) -> np.ndarray:
     """Evaluate a CV-weighted kernel smoother on a log-spaced grid.
 
     Each output point is a weighted average of input bins within
     ±bandwidth_oct octaves.  *bandwidth_oct* may be a scalar or a
     per-evaluation-point array.  Distance weight (tricube) decays to
-    zero at the bandwidth edge.  Confidence weight is 1/CV, so low-CV
-    bins dominate their local region while high-CV bins are averaged out.
+    zero at the bandwidth edge.  Confidence weight is max(0, 1/CV −
+    *cv_penalty*), so low-CV bins dominate while bins with CV ≥
+    1/*cv_penalty* are excluded entirely.  Gaps where no bin
+    contributes are bridged via log-linear interpolation from the
+    nearest valid neighbours.
+
+    With *cv_penalty* = 0 (the default) the smoother behaves exactly
+    as the original 1/CV-weighted version — every bin inside the
+    distance window gets non-zero weight proportional to its
+    confidence.
 
     Unlike a cubic spline, this cannot oscillate below zero or collapse
     to a flat line — the output is always a convex combination of input
-    values.
+    values (or an interpolation between such combinations).
     """
     bandwidth_oct = np.asarray(bandwidth_oct, dtype=float)
     scalar_bw = bandwidth_oct.ndim == 0
@@ -408,9 +416,10 @@ def _smooth_kernel(bin_freqs: np.ndarray, bin_values: np.ndarray,
     n_out = len(eval_freqs)
     log_freqs = np.log2(bin_freqs)
     log_eval = np.log2(eval_freqs)
-    conf = 1.0 / np.clip(bin_cv, 0.01, None)
+    conf = np.maximum(0.0, 1.0 / np.clip(bin_cv, 0.01, None) - cv_penalty)
 
     result = np.empty(n_out)
+    any_zeroed = cv_penalty > 0.0
     # Process one point at a time since bandwidth may vary per point
     for i in range(n_out):
         d = np.abs(log_eval[i] - log_freqs)
@@ -426,6 +435,24 @@ def _smooth_kernel(bin_freqs: np.ndarray, bin_values: np.ndarray,
         w_sum = w.sum()
         if w_sum > 0:
             result[i] = np.average(bin_values, weights=w)
+        elif any_zeroed:
+            # All bins within reach have zero confidence — bridge via interpolation
+            result[i] = np.nan
         else:
             result[i] = bin_values[np.argmin(d)]
+
+    # Bridge gaps: log-linear interpolation across NaN spans
+    nan_mask = np.isnan(result)
+    if nan_mask.any():
+        valid = ~nan_mask
+        if valid.any():
+            result[nan_mask] = np.interp(
+                np.log10(eval_freqs[nan_mask]),
+                np.log10(eval_freqs[valid]),
+                result[valid],
+            )
+        else:
+            # All bins zeroed everywhere — fall back to unpenalised behaviour
+            result[:] = bin_values[np.argmin(np.abs(log_eval[:, None] - log_freqs), axis=1)]
+
     return np.maximum(result, 0.0)
