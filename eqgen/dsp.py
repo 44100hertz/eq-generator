@@ -163,6 +163,64 @@ def pre_gain_from_max_gain(max_gain_db: float) -> float:
     return 1.0 / max(1.0, db_to_ratio(max_gain_db))
 
 
+def compute_overboost_ceiling(
+    h2_amp: float, h3_amp: float,
+    fc: float, coeffs: List[float],
+    pre_gain: float, fs: float = 44100.0,
+    push_gain: float = 0.3,
+    test_freq: float = 50.0,
+    nominal_amp: float = 0.5,
+    n_iters: int = 10,
+) -> float:
+    """Find max safe overboost (dB) by sweeping input amplitude.
+
+    Fixes push_gain low enough that harmonics engage, then binary-searches
+    input amplitude to find where the bass-sum limiter begins to clip.
+    Returns overboost_db = 20·log10(amp_at_boundary / nominal_amp).
+    """
+    from eqgen import enhancer_ffi as effi
+
+    def _measure(amp: float) -> float:
+        """Return peak output for a sine at test_freq with given amplitude."""
+        duration = 0.5
+        n_samples = int(duration * fs)
+        t = np.arange(n_samples) / fs
+        sine = amp * np.sin(2.0 * np.pi * test_freq * t)
+        eq_coeffs = list(coeffs) if coeffs else []
+
+        enh = effi.create_enhancer(
+            cutoff_hz=fc, h2_amp=h2_amp, h3_amp=h3_amp,
+            release_secs=0.2, fs=fs, pre_gain=pre_gain,
+            push_gain=push_gain, coeffs=eq_coeffs,
+        )
+        out = np.zeros(len(sine), dtype=np.float64)
+        for i, x in enumerate(sine):
+            lf, _rf = effi.process_stereo_frame(enh, float(x), float(x))
+            out[i] = float(lf)
+        effi.destroy_enhancer(enh)
+
+        settle = int(0.05 * fs)
+        return float(np.max(np.abs(out[settle:])))
+
+    lo_amp, hi_amp = nominal_amp, 8.0
+    # Expand hi_amp until we find clipping
+    for _ in range(4):
+        if _measure(hi_amp) >= 1.0:
+            break
+        hi_amp *= 2.0
+
+    safe_amp = lo_amp
+    for _ in range(n_iters):
+        mid_amp = np.sqrt(lo_amp * hi_amp)
+        if _measure(mid_amp) >= 1.0:
+            hi_amp = mid_amp
+        else:
+            safe_amp = mid_amp
+            lo_amp = mid_amp
+
+    return float(20.0 * np.log10(safe_amp / nominal_amp))
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Default EQ coefficients (flat 3-HP cascade)
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -55,6 +55,7 @@ typedef struct {
     /* Pre-computed coefficients */
     float   release_coeff;      /* exp(-1/(fs*release))                */
     float   env_smooth_alpha;   /* smoothed envelope tracking rate     */
+    float   lim_release_coeff;  /* limiter release (49ms) one-pole coeff */
     float   pre_gain;           /* gain before EQ                      */
     float   h2_scale;           /* h2_amp / (h2_amp + h3_amp)        */
     float   h3_scale;           /* h3_amp / (h2_amp + h3_amp)        */
@@ -95,6 +96,9 @@ typedef struct {
     /* Crossfade slew state */
     float       w_slew;           /* low-passed crossfade weight       */
     float       harm_amp_slew;    /* low-passed harmonic amplitude     */
+
+    /* Bass-sum limiter */
+    float       bass_gain_red;    /* gain reduction factor, 0..1       */
 
     /* Lookahead */
     float       hp_ring[LOOKAHEAD_LEN];  /* |dry_hp| window         */

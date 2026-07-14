@@ -102,6 +102,8 @@ void BassEnhancerCfg_init(BassEnhancerCfg *cfg,
     cfg->release_coeff = expf(-1.0f / (fs * release_secs));
     cfg->env_smooth_alpha = 2.0f * (float)M_PI * cutoff_hz / (3.0f * fs);
 
+    /* Pre-compute limiter release (49 ms) */
+    cfg->lim_release_coeff = 1.0f - expf(-1.0f / (fs * 0.049f));
     /* Pre-compute Chebyshev input scales */
     float h_sum = h2_amp + h3_amp;
     cfg->h2_scale = (h_sum > 1e-6f) ? h2_amp / h_sum : 0.0f;
@@ -186,11 +188,12 @@ void BassEnhancer_init(BassEnhancer *enh,
     biquad_init(&enh->right.hp_harm, enh->cfg.hp_harm_coeffs);
 
     enh->left.env_smooth = 0.0f;
-    enh->right.env_smooth = 0.0f;
     enh->left.w_slew = 0.0f;
     enh->right.w_slew = 0.0f;
     enh->left.harm_amp_slew = 0.0f;
     enh->right.harm_amp_slew = 0.0f;
+    enh->left.bass_gain_red = 1.0f;
+    enh->right.bass_gain_red = 1.0f;
 
     /* Initialize DC blockers (5 Hz cutoff) */
     float dc_R = expf(-2.0f * (float)M_PI * 5.0f / cfg->fs);
@@ -226,13 +229,12 @@ void BassEnhancer_reset(BassEnhancer *enh) {
     dc_blocker_reset(&enh->right.dc_block);
 
     enh->left.env.peak  = 0.0f;
-    enh->right.env.peak = 0.0f;
-    enh->left.env_smooth  = 0.0f;
-    enh->right.env_smooth = 0.0f;
     enh->left.w_slew  = 0.0f;
     enh->right.w_slew = 0.0f;
     enh->left.harm_amp_slew  = 0.0f;
     enh->right.harm_amp_slew = 0.0f;
+    enh->left.bass_gain_red  = 1.0f;
+    enh->right.bass_gain_red = 1.0f;
 
     for (int i = 0; i < LOOKAHEAD_LEN; i++) {
         enh->left.hp_ring[i]  = 0.0f;
@@ -459,7 +461,34 @@ static float enhancer_process_channel(BassEnhancerChan *ch,
 
     c2 = esp_cpu_get_cycle_count();
 
-    float out = dry_hp + fund_out + harm_out;
+    /* ── Bass-sum limiter (replaces tanh) ────────────────────────
+     * When dry_hp + bass_sum would exceed 1.0, attenuate only the
+     * bass (fundamental + harmonics).  Dry HF passes through clean.
+     * Instant attack / 49ms release — catches kick drum transients
+     * without pumping.                                        */
+    float bass_sum = fund_out + harm_out;
+    float total_abs = fabsf(dry_hp + bass_sum);
+
+    float target_gain = 1.0f;
+    if (total_abs > 1.0f) {
+        float hp_abs = fabsf(dry_hp);
+        if (hp_abs >= 1.0f) {
+            target_gain = 0.0f;
+        } else {
+            target_gain = (1.0f - hp_abs) / fmaxf(fabsf(bass_sum), 1e-10f);
+            if (target_gain < 0.0f) target_gain = 0.0f;
+        }
+    }
+
+    /* Envelope: instant attack, smoothed release toward 1.0 */
+    if (target_gain < ch->bass_gain_red) {
+        ch->bass_gain_red = target_gain;
+    } else {
+        ch->bass_gain_red += (1.0f - ch->bass_gain_red) * cfg->lim_release_coeff;
+    }
+
+    bass_sum *= ch->bass_gain_red;
+    float out = dry_hp + bass_sum;
 
     /* ── Loudness shelf (one-pole low shelf) ────────────────────── */
     if (cfg->loudness_boost != 0.0f) {
@@ -468,13 +497,7 @@ static float enhancer_process_channel(BassEnhancerChan *ch,
         out += ch->loudness_state * cfg->loudness_boost;
     }
 
-    /* ── Soft output clamp (tanh) — overboost may push dry_hp
-     *    or harmonics beyond [-1, 1].  tanh saturates musically
-     *    instead of hard-clipping, producing benign harmonics. ── */
-    out = tanhf(out);
-
     c3 = esp_cpu_get_cycle_count();
-
     /* ── Accumulate profile ─────────────────────────────────────── */
     enh_profile.frames++;
     enh_profile.cycles_total += (c3 - c0);

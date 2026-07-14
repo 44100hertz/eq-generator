@@ -143,8 +143,21 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
         err_arr = np.array([e["db"] for e in error])
         err_freqs = np.array([e["freq"] for e in error])
 
+        # ── Overboost ceiling: max safe overboost_db before limiter clips ─
+        from eqgen.dsp import pre_gain_from_max_gain, compute_overboost_ceiling
+        efficacy = detailed.get("efficacy", {})
+        h2_amp = efficacy.get("h2_amp", 0.0)
+        h3_amp = efficacy.get("h3_amp", 0.0)
+        pre_gain_lin = float(pre_gain_from_max_gain(max_gain_db))
+        coeffs_flat = [v for bc in fit_result.biquads
+                       for v in [bc.b0, bc.b1, bc.b2, bc.a1, bc.a2]]
+        overboost_ceiling_db = compute_overboost_ceiling(
+            h2_amp=h2_amp, h3_amp=h3_amp,
+            fc=preset.fc, coeffs=coeffs_flat,
+            pre_gain=pre_gain_lin, fs=fs,
+        )
+
         # ── Smart volume: compute effective curves at different volume levels ─
-        from eqgen.dsp import pre_gain_from_max_gain
         from eqgen.smart_volume import compute_smart_volume_curves
         pg_db_loud = 20.0 * np.log10(pre_gain_from_max_gain(max_gain_db))
         sv_result = compute_smart_volume_curves(freqs, gains_db,
@@ -164,6 +177,7 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
                 "fc": preset.fc,
                 "fs": fs, "max_gain_db": max_gain_db,
                 "efficacy": detailed.get("efficacy", {}),
+                "overboost_ceiling_db": round(overboost_ceiling_db, 1),
             },
             "raw_measurement": raw_meas,
             "raw_target": targ_db,

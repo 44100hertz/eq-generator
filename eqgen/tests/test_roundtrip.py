@@ -99,6 +99,7 @@ def _measure_enhancer_output(
     fc: float, h2: float, h3: float,
     fs: float = 44100.0,
     pre_gain: float = 1.0,
+    push_gain: float = 1.0,
     amplitude: float = 0.5,
     duration: float = 0.5,
 ) -> dict:
@@ -115,7 +116,7 @@ def _measure_enhancer_output(
         enh = effi.create_enhancer(
             cutoff_hz=fc, h2_amp=float(h2), h3_amp=float(h3),
             release_secs=0.2, fs=fs, pre_gain=pre_gain,
-            coeffs=eq_coeffs,
+            push_gain=push_gain, coeffs=eq_coeffs,
         )
 
         # Process stereo (mono duplicated)
@@ -260,6 +261,72 @@ def test_roundtrip_small_speaker():
         assert results[f]["peak"] <= 1.0, f"Peak {results[f]['peak']:.3f} > 1.0 at {f} Hz — clipping"
 
     print(f"\n  ✅ Round-trip passed — speaker corrected to ±{max_dev:.1f} dB flatness")
+
+    # ── Harmonic stress: find maximum safe overboost ──
+    # Fix push_gain low enough that the crossfade engages harmonics
+    # for all bass signals, then sweep input amplitude (simulating
+    # overboost_db) to find where the output peaks at 0 dBFS.
+    # The amplitude at the clipping boundary, divided by 0.5 (the
+    # nominal level used in the flatness test), gives the overboost
+    # headroom in linear ratio → 20*log10 = overboost_db ceiling.
+    print(f"\n  {'='*60}")
+    print(f"  HARMONIC STRESS: finding max safe overboost")
+    print(f"  {'='*60}")
+
+    stress_freq = 50.0
+    stress_freqs = [stress_freq]
+    # Low push_gain forces crossfade engagement — harmonics always active.
+    stress_push_gain = 0.3
+    nominal_amp = 0.5  # reference amplitude from the flatness test
+
+    # Binary search for amplitude where peak crosses 1.0
+    lo_amp, hi_amp = 0.125, 8.0
+    safe_amp = 0.125
+    clip_amp = 8.0
+    n_iters = 10
+    for it in range(n_iters):
+        mid_amp = np.sqrt(lo_amp * hi_amp)  # geometric: even dB steps
+        r = _measure_enhancer_output(
+            stress_freqs, coeffs, fc, h2, h3, fs=fs, pre_gain=pre_gain,
+            push_gain=stress_push_gain, amplitude=float(mid_amp), duration=0.5,
+        )
+        peak = r[stress_freq]["peak"]
+        fund = r[stress_freq]["fund"]
+        h2m = r[stress_freq]["h2"]
+        h3m = r[stress_freq]["h3"]
+        clips = peak >= 1.0
+        marker = "CLIP" if clips else "safe"
+        overboost_eq = 20.0 * np.log10(mid_amp / nominal_amp)
+        print(f"    amp={mid_amp:.3f} (+{overboost_eq:+.1f} dB)  "
+              f"peak={peak:.4f}  fund={fund:.4f}  h2={h2m:.4f}  h3={h3m:.4f}  [{marker}]")
+        if clips:
+            clip_amp = mid_amp
+            hi_amp = mid_amp
+        else:
+            safe_amp = mid_amp
+            lo_amp = mid_amp
+
+    overboost_safe_db = 20.0 * np.log10(safe_amp / nominal_amp)
+    overboost_clip_db = 20.0 * np.log10(clip_amp / nominal_amp)
+    print(f"\n  Safe amplitude:     {safe_amp:.3f} (overboost ≤ {overboost_safe_db:+.1f} dB)")
+    print(f"  Clipping amplitude: {clip_amp:.3f} (overboost ≥ {overboost_clip_db:+.1f} dB)")
+
+    # Full profile at the safe boundary
+    r_safe = _measure_enhancer_output(
+        stress_freqs, coeffs, fc, h2, h3, fs=fs, pre_gain=pre_gain,
+        push_gain=stress_push_gain, amplitude=safe_amp, duration=0.5,
+    )
+    sr = r_safe[stress_freq]
+    if sr["fund"] > 1e-10:
+        h2_db = 20.0 * np.log10(max(sr["h2"], 1e-10) / sr["fund"])
+        h3_db = 20.0 * np.log10(max(sr["h3"], 1e-10) / sr["fund"])
+        print(f"  At boundary:  h2 rel fund = {h2_db:+.1f} dB  "
+              f"h3 rel fund = {h3_db:+.1f} dB")
+
+    assert safe_amp > nominal_amp, \
+        f"Safe amplitude {safe_amp:.3f} ≤ nominal {nominal_amp} — no overboost headroom"
+    print(f"\n  ✅ Harmonic stress passed — overboost ceiling ≈ {overboost_safe_db:+.1f} dB")
+    print(f"     (use overboost_db ≤ {overboost_safe_db:+.1f} to avoid clipping)")
 
 
 def test_roundtrip_flat_speaker():
