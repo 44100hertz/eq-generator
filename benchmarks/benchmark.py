@@ -18,7 +18,6 @@ sys.path.insert(0, str(ROOT))
 from eqgen.pipeline import run_pipeline
 from eqgen.presets import PresetManager, Preset, MAX_IIR_BANDS, get_house_curve
 from eqgen.eq_fit import FitResult, BiquadCoeffs, cascade_response_db
-from eqgen.quantize import BiquadQ28, quantize_biquads_q28, q28_to_float
 from eqgen.model import ear_sensitivity
 
 # ── Psychoacoustic bands for reporting ────────────────────────────────
@@ -137,14 +136,7 @@ def run_benchmark(fitter_module: str, presets: Optional[List[str]] = None,
             biquads, meta = mod.fit_bands(freqs, target_db, fs, max_bands=n_bands)
             elapsed = time.perf_counter() - t0
 
-            # Quantize and measure error
-            bq_q28 = quantize_biquads_q28(biquads)
-            q28_floats = [
-                BiquadCoeffs(b0=q28_to_float(b.b0), b1=q28_to_float(b.b1),
-                             b2=q28_to_float(b.b2), a1=q28_to_float(b.a1),
-                             a2=q28_to_float(b.a2))
-                for b in bq_q28
-            ]
+            q28_floats = biquads
             fitted_db = cascade_response_db(q28_floats, freqs, fs)
 
             p_rms = perceptual_rms_error(freqs, target_db, fitted_db)

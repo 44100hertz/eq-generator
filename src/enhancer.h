@@ -54,6 +54,7 @@ typedef struct {
 
     /* Pre-computed coefficients */
     float   release_coeff;      /* exp(-1/(fs*release))                */
+    float   env_smooth_alpha;   /* smoothed envelope tracking rate     */
     float   pre_gain;           /* gain before EQ                      */
     float   h2_scale;           /* h2_amp / (h2_amp + h3_amp)        */
     float   h3_scale;           /* h3_amp / (h2_amp + h3_amp)        */

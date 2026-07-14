@@ -30,12 +30,16 @@ MODULES = {
 
     # Model tests — verify the C enhancer pipeline
     "model":       ("eqgen.tests.test_model",       "C enhancer verification"),
-    "evenness":    ("eqgen.tests.test_evenness",       "Bass evenness (C enhancer sweep)"),
+    "evenness":    ("eqgen.tests.test_evenness",    "Bass evenness (C enhancer sweep)"),
+
+    # Integration tests — full pipeline end-to-end
+    "roundtrip":   ("eqgen.tests.test_roundtrip",   "Round-trip pipeline verification"),
 }
 
 # ── Group definitions ──────────────────────────────────────────────────
 DSP_MODULES    = {"harmonics", "gain_safety"}
 MODEL_MODULES  = {"chebyshev", "model", "evenness"}
+INTEG_MODULES  = {"roundtrip"}
 
 
 def main():
@@ -44,8 +48,8 @@ def main():
     )
     parser.add_argument(
         "--skip", nargs="*", default=[],
-        choices=["DSP", "MODEL"] + list(MODULES.keys()),
-        help="Skip specific groups or modules (DSP, MODEL, or module names)"
+        choices=["DSP", "MODEL", "INTEG"] + list(MODULES.keys()),
+        help="Skip specific groups or modules (DSP, MODEL, INTEG, or module names)"
     )
     parser.add_argument(
         "--only", nargs="*", default=None,
@@ -66,6 +70,9 @@ def main():
         print(f"\n  Model tests (verify psychoacoustic model):")
         for name in MODEL_MODULES:
             print(f"    {name:20s}  {MODULES[name][1]}")
+        print(f"\n  Integration tests (full pipeline):")
+        for name in INTEG_MODULES:
+            print(f"    {name:20s}  {MODULES[name][1]}")
         return
 
     # Determine which modules to run
@@ -80,6 +87,8 @@ def main():
             selected -= DSP_MODULES
         elif skip == "MODEL":
             selected -= MODEL_MODULES
+        elif skip == "INTEG":
+            selected -= INTEG_MODULES
         else:
             selected.discard(skip)
 

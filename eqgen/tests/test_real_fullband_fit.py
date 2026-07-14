@@ -11,7 +11,6 @@ sys.path.insert(0, str(ROOT))
 
 from eqgen.pipeline import run_pipeline
 from eqgen.eq_fit import fit_eq_curve, cascade_response_db, BiquadCoeffs
-from eqgen.quantize import BiquadQ28, quantize_biquads_q28, q28_to_float
 
 mp = str(ROOT/"measurements/technics/standing/measurement2.wav")
 tp = str(ROOT/"measurements/technics/standing/target.wav")
@@ -42,10 +41,7 @@ fit = fit_eq_curve(
     gain_range=(-60.0, 60.0), q_range=(0.3, 6.0), stop_db=0.3,
 )
 
-bq_q28 = quantize_biquads_q28(fit.biquads)
-q28_floats = [BiquadCoeffs(b0=q28_to_float(b.b0), b1=q28_to_float(b.b1),
-                           b2=q28_to_float(b.b2), a1=q28_to_float(b.a1),
-                           a2=q28_to_float(b.a2)) for b in bq_q28]
+q28_floats = fit.biquads
 fitted_db = cascade_response_db(q28_floats, freqs, fs)
 err = fitted_db - target_db
 

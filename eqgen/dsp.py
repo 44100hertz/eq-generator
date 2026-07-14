@@ -25,6 +25,7 @@ from typing import List, Tuple
 SQRT2 = np.sqrt(2.0)  # 1.4142135623730951
 
 
+# Used only by test_chebyshev.py — prefer eq_fit.design_butter_hp for new code.
 def design_butter_lp(fc: float, fs: float) -> np.ndarray:
     """2nd-order Butterworth LP: returns [b0, b1, b2, a1, a2]."""
     omega = np.tan(np.pi * fc / fs)
@@ -38,15 +39,13 @@ def design_butter_lp(fc: float, fs: float) -> np.ndarray:
 
 
 def design_butter_hp(fc: float, fs: float) -> np.ndarray:
-    """2nd-order Butterworth HP: returns [b0, b1, b2, a1, a2]."""
-    omega = np.tan(np.pi * fc / fs)
-    c = 1.0 + SQRT2 * omega + omega * omega
-    b0 = 1.0 / c
-    b1 = -2.0 / c
-    b2 = 1.0 / c
-    a1 = 2.0 * (omega * omega - 1.0) / c
-    a2 = (1.0 - SQRT2 * omega + omega * omega) / c
-    return np.array([b0, b1, b2, a1, a2])
+    """2nd-order Butterworth HP: returns [b0, b1, b2, a1, a2].
+
+    Thin wrapper around eq_fit.design_butter_hp for backward compatibility
+    with callers that expect ndarray instead of BiquadCoeffs."""
+    from eqgen.eq_fit import design_butter_hp as _design_butter_hp
+    bc = _design_butter_hp(fc, fs)
+    return np.array([bc.b0, bc.b1, bc.b2, bc.a1, bc.a2])
 
 
 def biquad_tick(x: float, coeffs: np.ndarray, state: np.ndarray) -> Tuple[float, np.ndarray]:

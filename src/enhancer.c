@@ -28,7 +28,6 @@ static inline uint32_t esp_cpu_get_cycle_count(void) { return 0; }
 
 #define SQRT2 1.4142135623730951f
 
-#define ENV_SMOOTH_ALPHA 0.002f
 void bass_design_butter_hp(float fc, float fs, float coeffs_out[5]) {
     float omega = tanf((float)M_PI * fc / fs);
     float c = 1.0f + SQRT2 * omega + omega * omega;
@@ -101,6 +100,7 @@ void BassEnhancerCfg_init(BassEnhancerCfg *cfg,
 
     /* Pre-compute release coefficient */
     cfg->release_coeff = expf(-1.0f / (fs * release_secs));
+    cfg->env_smooth_alpha = 2.0f * (float)M_PI * cutoff_hz / (3.0f * fs);
 
     /* Pre-compute Chebyshev input scales */
     float h_sum = h2_amp + h3_amp;
@@ -332,7 +332,7 @@ static float enhancer_process_channel(BassEnhancerChan *ch,
     /* Smooth env to kill 2f ripple: ripple AM in norm contaminates
      * the Chebyshev output with modulation sidebands that
      * interfere with the dry_hp fundamental, creating buzz. */
-    ch->env_smooth += ENV_SMOOTH_ALPHA * (env - ch->env_smooth);
+    ch->env_smooth += cfg->env_smooth_alpha * (env - ch->env_smooth);
     /* Adaptive blend: during steady state the smoothed envelope kills
      * 2f ripple (ripple amplitude ≈ 0.077·A < 0.1 threshold).  During
      * transients (sweeps, attacks) env jumps by >0.3 and the blend

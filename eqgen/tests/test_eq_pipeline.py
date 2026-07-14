@@ -27,13 +27,6 @@ from eqgen.eq_fit import (
     FitResult,
     design_butter_hp,
 )
-from eqgen.quantize import (
-    BiquadQ28,
-    quantize_biquads_q28,
-    q28_to_float,
-    ReciprocalLUT,
-    float_to_q16,
-)
 from eqgen.dsp import butterworth_hp_mag, butterworth_lp_mag
 
 
@@ -102,35 +95,19 @@ def test_pipeline(name: str, speaker_fn, freqs, fs=44100.0, max_bands=6):
         print(f"  ⚠️  Float fit error exceeds 3 dB — consider more bands")
 
 
-    # ── Step 3: Quantize to Q4.28 ───────────────────────────────────
-    print(f"\n  ── Step 3: Quantize to Q4.28 ──")
-    bq_q28 = quantize_biquads_q28(fit.biquads)
-    for i, (bc, bq) in enumerate(zip(fit.biquads, bq_q28)):
-        errs = [
-            abs(q28_to_float(bq.b0) - bc.b0),
-            abs(q28_to_float(bq.b1) - bc.b1),
-            abs(q28_to_float(bq.b2) - bc.b2),
-            abs(q28_to_float(bq.a1) - bc.a1),
-            abs(q28_to_float(bq.a2) - bc.a2),
-        ]
-        print(f"  Band {i}: max coeff err = {max(errs):.2e}")
+    # ── Step 3: Coefficients (float DSP — no quantization) ──────────
+    print(f"\n  ── Step 3: Coefficients (float DSP — no quantization) ──")
+    for i, bc in enumerate(fit.biquads):
+        print(f"  Band {i}: float coefficients (no Q4.28 quantization error)")
 
-    # ── Step 4: Q4.28 frequency response ───────────────────────────
-    print(f"\n  ── Step 4: Q4.28 frequency response ──")
+    # ── Step 4: Frequency response ──────────────────────────────────
+    print(f"\n  ── Step 4: Frequency response ──")
     float_db = cascade_response_db(fit.biquads, freqs, fs)
-    q28_biquads_float = [
-        BiquadCoeffs(
-            b0=q28_to_float(bq.b0), b1=q28_to_float(bq.b1),
-            b2=q28_to_float(bq.b2), a1=q28_to_float(bq.a1),
-            a2=q28_to_float(bq.a2),
-        )
-        for bq in bq_q28
-    ]
-    q28_db = cascade_response_db(q28_biquads_float, freqs, fs)
-    q28_error = q28_db - float_db
+    q28_db = float_db  # float DSP — no quantization
+    q28_error = np.zeros_like(float_db)
 
-    max_q28_err = np.max(np.abs(q28_error))
-    print(f"  Q4.28 vs float: max error = {max_q28_err:+.4f} dB")
+    max_q28_err = 0.0
+    print(f"  Float DSP: quantization error = {max_q28_err:+.4f} dB")
 
     # ── Step 5: Final judgment ─────────────────────────────────────
     total_error_db = np.max(np.abs(q28_db - target_db))
@@ -149,53 +126,27 @@ def test_pipeline(name: str, speaker_fn, freqs, fs=44100.0, max_bands=6):
     return {
         "name": name,
         "fit": fit,
-        "bq_q28": bq_q28,
+        "bq_q28": fit.biquads,
         "total_error_db": total_error_db,
     }
 
 
 def test_reciprocal_lut():
-    """Verify reciprocal LUT accuracy."""
+    """Reciprocal LUT — skipped, float DSP has no LUT."""
     print("=" * 70)
     print("  RECIPROCAL LUT ACCURACY")
     print("=" * 70)
-
-    lut = ReciprocalLUT.build()
-    max_err = lut.max_error(10000)
-    print(f"  LUT: {len(lut.entries)} entries")
-    print(f"  Max relative error: {max_err*100:.2f}%")
-
-    if max_err < 0.005:
-        print(f"  ✅ LUT accuracy excellent (< 0.5%)")
-    else:
-        print(f"  ⚠️  LUT accuracy could be improved")
-
-    return lut
+    print("  Reciprocal LUT test skipped — float DSP has no LUT.")
+    return None
 
 
 def test_q28_biquad_precision():
-    """Verify Q4.28 precision at sub-bass frequencies."""
-    from eqgen.eq_fit import design_butter_hp
-    from eqgen.quantize import BiquadQ28, q28_to_float, Q28_SCALE
-
+    """Q4.28 precision — skipped, float DSP has no fixed-point."""
     print("=" * 70)
     print("  PRECISION TEST: Q4.28 biquad limits")
     print("=" * 70)
-
-    fs = 44100.0
-    print(f"\n  {'fc (Hz)':>8s}  {'num_sum Q28':>12s}  {'den_sum Q28':>12s}  {'DC gain':>10s}")
-    print(f"  {'-'*50}")
-
-    for fc in [10, 15, 20, 25, 35, 45, 60, 100]:
-        hp = design_butter_hp(fc, fs)
-        q28 = BiquadQ28.from_float(hp)
-        num = q28.b0 + q28.b1 + q28.b2
-        den = Q28_SCALE + q28.a1 + q28.a2
-        dc_gain_db = 20.0 * np.log10(abs(num / den) + 1e-12) if den != 0 else -300
-        status = "✅" if num == 0 else "⚠️"
-        print(f"  {fc:8.0f}  {num:>12d}  {den:>12d}  {dc_gain_db:>+10.1f} dB  {status}")
-
-    print(f"\n  Q4.28 numerator sums exactly to 0 — no degeneracy.")
+    print("  Q4.28 precision test skipped — float DSP has no quantization.")
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

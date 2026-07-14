@@ -427,5 +427,5 @@ def _smooth_kernel(bin_freqs: np.ndarray, bin_values: np.ndarray,
         if w_sum > 0:
             result[i] = np.average(bin_values, weights=w)
         else:
-            result[i] = np.average(bin_values, weights=conf)
+            result[i] = bin_values[np.argmin(d)]
     return np.maximum(result, 0.0)

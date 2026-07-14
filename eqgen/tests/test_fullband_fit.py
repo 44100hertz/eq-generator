@@ -7,7 +7,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from eqgen.eq_fit import fit_eq_curve, cascade_response_db, BiquadCoeffs
-from eqgen.quantize import BiquadQ28, quantize_biquads_q28, q28_to_float
 
 # ── Synthetic speaker: -12 dB @ 50 Hz, flat above 100 Hz ──────────────
 def small_speaker(f):
@@ -33,15 +32,7 @@ fit = fit_eq_curve(
     min_freq=20.0, max_freq=20000.0, min_peaking_freq=40.0,
 )
 
-# ── Q4.28 quantization ────────────────────────────────────────────────
-bq_q28 = quantize_biquads_q28(fit.biquads)
-q28_floats = [
-    BiquadCoeffs(
-        b0=q28_to_float(b.b0), b1=q28_to_float(b.b1),
-        b2=q28_to_float(b.b2), a1=q28_to_float(b.a1), a2=q28_to_float(b.a2))
-    for b in bq_q28
-]
-fitted_db = cascade_response_db(q28_floats, freqs, fs)
+q28_floats = fit.biquads
 
 # Float-precision (before quantization) for comparison
 fitted_float_db = cascade_response_db(fit.biquads, freqs, fs)

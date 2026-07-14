@@ -15,7 +15,6 @@ sys.path.insert(0, str(ROOT))
 
 from eqgen.pipeline import run_pipeline
 from eqgen.eq_fit import fit_eq_curve, cascade_response_db, BiquadCoeffs
-from eqgen.quantize import BiquadQ28, quantize_biquads_q28, q28_to_float
 
 # ── Psychoacoustic bands ───────────────────────────────────────────────
 BANDS = [
@@ -63,16 +62,7 @@ def profile(freqs, target_db, fs, label, band_counts):
         )
         elapsed = time.perf_counter() - t0
 
-        # Quantized
-        bq_q28 = quantize_biquads_q28(fit.biquads)
-        q28f = [
-            BiquadCoeffs(
-                b0=q28_to_float(b.b0), b1=q28_to_float(b.b1),
-                b2=q28_to_float(b.b2), a1=q28_to_float(b.a1),
-                a2=q28_to_float(b.a2),
-            )
-            for b in bq_q28
-        ]
+        q28f = fit.biquads
         fitted_db = cascade_response_db(q28f, freqs, fs)
         float_db = cascade_response_db(fit.biquads, freqs, fs)
         err = fitted_db - target_db
@@ -98,15 +88,7 @@ def profile(freqs, target_db, fs, label, band_counts):
         max_bands=n_max, min_freq=f_min, max_freq=f_max,
         min_peaking_freq=f_min,
     )
-    bq_q28 = quantize_biquads_q28(fit.biquads)
-    q28f = [
-        BiquadCoeffs(
-            b0=q28_to_float(b.b0), b1=q28_to_float(b.b1),
-            b2=q28_to_float(b.b2), a1=q28_to_float(b.a1),
-            a2=q28_to_float(b.a2),
-        )
-        for b in bq_q28
-    ]
+    q28f = fit.biquads
     fitted_db = cascade_response_db(q28f, freqs, fs)
     err = fitted_db - target_db
 

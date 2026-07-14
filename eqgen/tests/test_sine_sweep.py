@@ -9,7 +9,6 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from eqgen.eq_fit import fit_eq_curve, cascade_response_db, BiquadCoeffs
-from eqgen.quantize import BiquadQ28, quantize_biquads_q28, q28_to_float
 from eqgen.analysis import goertzel_magnitude
 from eqgen.io import load_measurement
 from eqgen.pipeline import run_pipeline
@@ -30,8 +29,7 @@ fit = fit_eq_curve(freqs, gains_db, FS, max_bands=MAX_BANDS,
                    min_peaking_freq=40.0,
                    gain_range=(-60.0, 60.0), q_range=(0.3, 6.0))
 
-bq_q28 = quantize_biquads_q28(fit.biquads)
-coeffs = [v for bq in bq_q28 for v in [bq.b0, bq.b1, bq.b2, bq.a1, bq.a2]]
+coeffs = [v for bc in fit.biquads for v in [bc.b0, bc.b1, bc.b2, bc.a1, bc.a2]]
 
 print("="*70)
 print(f"  SINE SWEEP — C enhancer, technics/standing, fc={FC} h2={H2} h3={H3}")
