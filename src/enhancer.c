@@ -375,21 +375,27 @@ static float dsp_pipe_process_channel(DspPipeChan *ch,
     /* ── Crossfade: fundamental ↔ harmonics ──────────────────────
      *
      * target = env — smoothed bass level (envelope of lp_fund).
-     *    Using env (not |lp_fund|) avoids 2f AM modulation on
-     *    pure tones that would create intermodulation buzz.
-     * h      = h2_amp + h3_amp — harmonic perceptual efficiency.
-     *   A harmonic at unit physical amplitude delivers ~1/h times
-     *   the perceived loudness of a fundamental at unit amplitude.
-     *   (Small h → harmonics are efficient → less physical needed.)
+     * h2_amp, h3_amp — individual perceptual efficiencies.
+     *   h2 at unit physical amplitude delivers ~1/h2_amp times the
+     *   perceived loudness of a fundamental at unit amplitude;
+     *   h3 is similarly ~1/h3_amp times.
+     *   (Small hN_amp → harmonic N is efficient → less physical needed.)
+     * h_sum = h2_amp + h3_amp.
      * w      = fraction of fundamental loudness replaced by harmonics.
      *
      * Derivation (preserve perceived loudness = target):
-     *   perceived = (1-w)·target + harm_amp/h = target
-     *   physical  = (1-w)·target + harm_amp  = room
+     *   perceived = (1-w)·target + h2_phys/h2_amp + h3_phys/h3_amp = target
+     *   physical  = (1-w)·target + h2_phys + h3_phys  = room
+     *
+     * Split proportional to efficiency:
+     *   h2_phys = harm_amp · h2_amp/h_sum
+     *   h3_phys = harm_amp · h3_amp/h_sum
+     *   → h2_phys/h2_amp = h3_phys/h3_amp = harm_amp/h_sum
+     *   → perceived = (1-w)·target + 2·harm_amp/h_sum = target
      *
      * Solving:
-     *   harm_amp = (target - room) · h / (1 - h)
-     *   w        = (target - room) / (target · (1 - h))
+     *   harm_amp = (target - room) · h_sum / (2 - h_sum)
+     *   w        = (target - room) / (target · (1 - h_sum/2))
      *
      * When target ≤ room: pure fundamental (w=0).
      * When target > room: blend to preserve perceived flatness.
@@ -412,7 +418,7 @@ static float dsp_pipe_process_channel(DspPipeChan *ch,
     if (target <= room || h >= 1.0f || target < 1e-6f) {
         w_target = 0.0f;
     } else {
-        w_target = (target - room) / (target * (1.0f - h));
+        w_target = (target - room) / (target * (1.0f - h * 0.5f));
         if (w_target > 1.0f) w_target = 1.0f;
     }
     /* Slew the crossfade weight to prevent the Chebyshev from turning
@@ -435,15 +441,15 @@ static float dsp_pipe_process_channel(DspPipeChan *ch,
 
     float harm_out = 0.0f;
     if (w > 0.0f && h > 0.0f) {
-        /* Harmonics fill the headroom gap, scaled by h/(1-h)
+        /* Harmonics fill the headroom gap, scaled by h_sum/(2-h_sum)
          * so perceived loudness = target while physical stays
-         * within room.  Without this scaling, small h (efficient
-         * harmonics) would produce harm_amp ≈ target - room,
-         * over-filling headroom by ~1/h.
+         * within room.  Without this scaling, efficient harmonics
+         * (small h2_amp, h3_amp) would produce harm_amp ≈ target - room,
+         * over-filling headroom.
          * Slew harm_amp at the same rate as w to prevent the
          * Chebyshev from turning on in one sample during sweeps. */
         float h_safe = fmaxf(h, 1e-6f);
-        float harm_amp_target = (target - room) * h_safe / (1.0f - h_safe);
+        float harm_amp_target = (target - room) * h_safe / (2.0f - h_safe);
         if (harm_amp_target < 0.0f) harm_amp_target = 0.0f;
         float harm_amp = ch->harm_amp_slew;
         float ha_diff = harm_amp_target - harm_amp;

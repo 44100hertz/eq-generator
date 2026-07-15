@@ -2,18 +2,19 @@
   "name": "lunchbox",
   "description": "",
   "measurements": [
-    "measurements/lunchbox/measured.wav"
+    "measurements/lunchbox-noboost/L.wav",
+    "measurements/lunchbox-noboost/R.wav"
   ],
-  "target": "measurements/lunchbox/target.wav",
-  "house_curve": "vintage",
-  "noise": "measurements/lunchbox/noise.wav",
+  "target": "measurements/lunchbox-noboost/target.wav",
+  "house_curve": "midsize",
+  "noise": "measurements/lunchbox-noboost/noise.wav",
   "fc": 60,
-  "max_bands": 32,
+  "max_bands": 20,
   "smooth_exponent": 1,
   "release": 0.2,
-  "limiter_release": 0.049,
   "bluetooth_id": "KEN\u00b7RAD LUNCHBOX",
-  "speaker_level": 50,
+  "speaker_level": 30,
+  "overboost_db": 26,
   "high_rolloffs": [],
   "low_rolloffs": []
 }
