@@ -56,7 +56,7 @@ typedef struct {
 /* ── Plugin instance state ──────────────────────────────────────────── */
 
 typedef struct {
-    BassEnhancer      enh;
+    DspPipe      enh;
     Biquad           *eq_bqs_left;
     Biquad           *eq_bqs_right;
     float             fs;
@@ -104,8 +104,8 @@ static void *eqgen_instantiate(const void *desc, unsigned long fs)
 
     const float *coeffs = eqgen_get_coeffs((int)fs);
 
-    BassEnhancerCfg cfg;
-    BassEnhancerCfg_init(&cfg,
+    DspPipeCfg cfg;
+    dsp_pipe_cfg_init(&cfg,
                          EQGEN_CUTOFF_HZ,
                          EQGEN_H2_AMP,
                          EQGEN_H3_AMP,
@@ -119,7 +119,7 @@ static void *eqgen_instantiate(const void *desc, unsigned long fs)
 #endif
                          EQGEN_N_BIQUADS,
                          coeffs);
-    BassEnhancer_init(&inst->enh, &cfg, inst->eq_bqs_left, inst->eq_bqs_right);
+    dsp_pipe_init(&inst->enh, &cfg, inst->eq_bqs_left, inst->eq_bqs_right);
     inst->fs = (float)fs;
 
     return inst;
@@ -147,7 +147,7 @@ static void eqgen_connect_port(void *handle, unsigned long port,
 static void eqgen_activate(void *handle)
 {
     EqgenInstance *inst = (EqgenInstance *)handle;
-    BassEnhancer_reset(&inst->enh);
+    dsp_pipe_reset(&inst->enh);
 }
 
 static void eqgen_deactivate(void *handle)
@@ -186,8 +186,8 @@ static void eqgen_run(void *handle, unsigned long nframes)
         first_run = 0;
         last_release = release;
         const float *r_coeffs = eqgen_get_coeffs((int)inst->fs);
-        BassEnhancerCfg cfg;
-        BassEnhancerCfg_init(&cfg,
+        DspPipeCfg cfg;
+        dsp_pipe_cfg_init(&cfg,
                              EQGEN_CUTOFF_HZ,
                              EQGEN_H2_AMP,
                              EQGEN_H3_AMP,
@@ -201,7 +201,7 @@ static void eqgen_run(void *handle, unsigned long nframes)
 #endif
                              EQGEN_N_BIQUADS,
                              r_coeffs);
-        BassEnhancer_init(&inst->enh, &cfg, inst->eq_bqs_left, inst->eq_bqs_right);
+        dsp_pipe_init(&inst->enh, &cfg, inst->eq_bqs_left, inst->eq_bqs_right);
     }
 
     LADSPA_Data *in_l  = inst->in_left;
@@ -213,7 +213,7 @@ static void eqgen_run(void *handle, unsigned long nframes)
         float l = in_l[i];
         float r = in_r[i];
 
-        BassEnhancer_process_stereo(&inst->enh, &l, &r);
+        dsp_pipe_process_stereo(&inst->enh, &l, &r);
 
         out_l[i] = l;
         out_r[i] = r;

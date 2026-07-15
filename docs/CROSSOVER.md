@@ -93,7 +93,7 @@ Single `tweeter.measurements/` and `woofer.measurements/` directories in the pre
 
 ## Phase 2 — Firmware
 
-### 2a. Restructure `BassEnhancerCfg` / `BassEnhancer`
+### 2a. Restructure `DspPipeCfg` / `DspPipe`
 
 Current: one `eq_coeffs` array, shared across L/R. Enhancer runs on both channels.
 
@@ -106,7 +106,7 @@ typedef struct {
     int eq_n_biquads;                /* max of tweeter/woofer */
     const float *eq_tweeter_coeffs;  /* tweeter EQ (L channel, HP path) */
     const float *eq_woofer_coeffs;   /* woofer EQ  (R channel, LP path) */
-} BassEnhancerCfg;
+} DspPipeCfg;
 ```
 
 ### 2b. Signal path rewrite
@@ -132,7 +132,7 @@ The enhancer's internal LR4 (60 Hz) stays — it sits *after* the woofer EQ in t
 
 ### 2c. Crossover biquad initialization
 
-Add to `BassEnhancerCfg`:
+Add to `DspPipeCfg`:
 
 ```c
 float speaker_lp_coeffs[LR4_SECTIONS * 5];  /* speaker crossover LP */
@@ -141,7 +141,7 @@ float speaker_hp_coeffs[LR4_SECTIONS * 5];  /* speaker crossover HP */
 
 Per-channel state gets `Biquad speaker_cross[LR4_SECTIONS]`.
 
-`BassEnhancerCfg_init` grows a `speaker_crossover_hz` parameter. Zero or negative → disabled (full-range
+`DspPipeCfg_init` grows a `speaker_crossover_hz` parameter. Zero or negative → disabled (full-range
 mode, backward compatible).
 
 ## Phase 3 — Preset format (`presets.py`)

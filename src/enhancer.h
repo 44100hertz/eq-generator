@@ -22,12 +22,12 @@
  * detects actual HF content, not crossover artifacts.
  *
  * Usage:
- *   BassEnhancer enh;
- *   BassEnhancer_init(&enh, &cfg, eq_bqs_left, eq_bqs_right);
+ *   DspPipe enh;
+ *   dsp_pipe_init(&enh, &cfg, eq_bqs_left, eq_bqs_right);
  *   // Per stereo frame:
  *   float left = ...;
  *   float right = ...;
- *   BassEnhancer_process_stereo(&enh, &left, &right);
+ *   dsp_pipe_process_stereo(&enh, &left, &right);
  */
 
 #pragma once
@@ -74,7 +74,7 @@ typedef struct {
     /* EQ settings */
     int     eq_n_biquads;       /* number of EQ biquads                */
     const float *eq_coeffs;     /* pointer to eq_coeffs array           */
-} BassEnhancerCfg;
+} DspPipeCfg;
 
 /* ── Per-channel state ─────────────────────────────────────────────── */
 typedef struct {
@@ -107,14 +107,14 @@ typedef struct {
     int         hp_max_pos;          /* index of current max (-1 = stale) */
     float       eq_delay[LOOKAHEAD_LEN]; /* delay line for eq_out   */
     int         delay_pos;
-} BassEnhancerChan;
+} DspPipeChan;
 
 /* ── Stereo enhancer ───────────────────────────────────────────────── */
 typedef struct {
-    BassEnhancerCfg cfg;
-    BassEnhancerChan left;
-    BassEnhancerChan right;
-} BassEnhancer;
+    DspPipeCfg cfg;
+    DspPipeChan left;
+    DspPipeChan right;
+} DspPipe;
 
 /* ── Initialization ────────────────────────────────────────────────── */
 
@@ -135,33 +135,33 @@ void bass_design_lr4(float fc, float fs,
  *  fc: corner frequency (typ. 200 Hz)
  *  boost_db: max gain at DC (typ. 8 dB).  0 disables the shelf.
  */
-void BassEnhancerCfg_set_loudness(BassEnhancerCfg *cfg,
+void dsp_pipe_cfg_set_loudness(DspPipeCfg *cfg,
                                   float fc, float fs, float boost_db);
 
 /** Update runtime parameters without resetting filter state.
  *  h2_amp, h3_amp are set once via cfg and
  *  never changed at runtime.  Pass NaN to leave unchanged. */
-void BassEnhancer_update_params(BassEnhancer *enh,
+void dsp_pipe_update_params(DspPipe *enh,
                                 float pre_gain,
                                 float loudness_boost);
 
-/** Initialize BassEnhancerCfg from user-friendly parameters.
+/** Initialize DspPipeCfg from user-friendly parameters.
  *  Designs all LP/HP filters and pre-computes coefficients. */
-void BassEnhancerCfg_init(BassEnhancerCfg *cfg,
+void dsp_pipe_cfg_init(DspPipeCfg *cfg,
                           float cutoff_hz, float h2_amp, float h3_amp,
                           float release_secs, float fs,
                           float push_gain,
                           float pre_gain,
                           int eq_n_biquads, const float *eq_coeffs);
 
-/** Initialize a BassEnhancer instance. */
-void BassEnhancer_init(BassEnhancer *enh,
-                       const BassEnhancerCfg *cfg,
+/** Initialize a DspPipe instance. */
+void dsp_pipe_init(DspPipe *enh,
+                       const DspPipeCfg *cfg,
                        Biquad *eq_bqs_left,
                        Biquad *eq_bqs_right);
 
 /** Reset all filter states. */
-void BassEnhancer_reset(BassEnhancer *enh);
+void dsp_pipe_reset(DspPipe *enh);
 
 /* ── Processing ────────────────────────────────────────────────────── */
 
@@ -169,7 +169,7 @@ void BassEnhancer_reset(BassEnhancer *enh);
  *  Input: float samples in range [-1.0, 1.0]
  *  Output: float samples in range [-1.0, 1.0] (written in-place)
  */
-void BassEnhancer_process_stereo(BassEnhancer *enh,
+void dsp_pipe_process_stereo(DspPipe *enh,
                                  float *left, float *right);
 
 /* ── Profiling counters ────────────────────────────────────────────── */
@@ -182,11 +182,11 @@ typedef struct {
     uint64_t cycles_harm;
     uint64_t cycles_mix;
     uint64_t cycles_i2s;
-} EnhancerProfile;
+} DspPipeProfile;
 
-extern EnhancerProfile enh_profile;
+extern DspPipeProfile dsp_profile;
 
-void enhancer_profile_report(void);
+void dsp_pipe_profile_report(void);
 
 /* ── Low-level Chebyshev ──────────────────────────────────────────── */
 

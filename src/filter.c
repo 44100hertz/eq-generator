@@ -2,7 +2,7 @@
  * filter.c — stdin→stdout EQGen DSP filter (float)
  *
  * Reads raw float32le stereo interleaved samples from stdin,
- * processes through BassEnhancer_process_stereo, writes to stdout.
+ * processes through dsp_pipe_process_stereo, writes to stdout.
  * Uses baked-in eq_coeffs.h coefficients.
  *
  * Usage:
@@ -58,8 +58,8 @@ int main(int argc, char *argv[]) {
 
     const float *coeffs = eqgen_get_coeffs((int)fs);
 
-    BassEnhancer enh;
-    BassEnhancerCfg cfg;
+    DspPipe enh;
+    DspPipeCfg cfg;
 
 #ifdef EQGEN_PRE_GAIN
     float pre_gain_f = EQGEN_PRE_GAIN;
@@ -72,7 +72,7 @@ int main(int argc, char *argv[]) {
     volume_init_lut(vol_lut);
     uint8_t current_vol = 127;  /* start at full volume */
 
-    BassEnhancerCfg_init(&cfg,
+    dsp_pipe_cfg_init(&cfg,
                          EQGEN_CUTOFF_HZ,
                          EQGEN_H2_AMP,
                          EQGEN_H3_AMP,
@@ -84,12 +84,12 @@ int main(int argc, char *argv[]) {
                          coeffs);
 
     /* Pre-compute loudness shelf alpha (same reason as firmware).
-     * Do NOT use BassEnhancerCfg_set_loudness(..., 0.0f) — it will
+     * Do NOT use dsp_pipe_cfg_set_loudness(..., 0.0f) — it will
      * set alpha=0, permanently disabling the shelf. */
     cfg.loudness_alpha = 1.0f - expf(-2.0f * (float)M_PI * EQGEN_LOUDNESS_FC_HZ / fs);
     cfg.loudness_boost = 0.0f;
 
-    BassEnhancer_init(&enh, &cfg, eq_bqs_l, eq_bqs_r);
+    dsp_pipe_init(&enh, &cfg, eq_bqs_l, eq_bqs_r);
 
     /* Open control FIFO for live smart-volume adjustments (optional). */
     const char *ctrl_path = "/tmp/eqgen_sv_fifo";
@@ -156,7 +156,7 @@ int main(int argc, char *argv[]) {
             l *= vol_gain;
             r *= vol_gain;
 
-            BassEnhancer_process_stereo(&enh, &l, &r);
+            dsp_pipe_process_stereo(&enh, &l, &r);
 
             buf_interleaved[i * 2]     = l;
             buf_interleaved[i * 2 + 1] = r;

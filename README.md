@@ -321,7 +321,7 @@ make -C src                              # builds enhancer.so + eqgen_ladspa.so
    - `src/dc_blocker.h`
    - `src/eq_coeffs.h` (generated)
 3. In your audio callback (A2DP sink → I2S), convert int16 samples to float,
-   call `BassEnhancer_process_stereo()`, and convert back.  The DSP runs at
+   call `dsp_pipe_process_stereo()`, and convert back.  The DSP runs at
    44.1 kHz or 48 kHz — whatever sample rate the coefficients were designed at.
 
    With 24 EQ biquads the DSP consumes ~20% of one core on a 240 MHz ESP32,

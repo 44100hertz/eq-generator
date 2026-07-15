@@ -1,7 +1,7 @@
 /**
  * enhancer_api.c — Opaque API for Python FFI (float)
  *
- * Wraps BassEnhancer behind a simple create/destroy/process API.
+ * Wraps DspPipe behind a simple create/destroy/process API.
  * Callers are responsible for int16 ↔ float conversion.
  */
 
@@ -13,18 +13,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ── EnhancerHandle: the opaque struct ──────────────────────────────── */
+/* ── DspPipeHandle: the opaque struct ──────────────────────────────── */
 
-struct EnhancerHandle {
-    BassEnhancer      enh;
+struct DspPipeHandle {
+    DspPipe      enh;
     Biquad           *eq_bqs_left;
     Biquad           *eq_bqs_right;
 };
 
 /* ── Create / destroy ───────────────────────────────────────────────── */
 
-EnhancerHandle *enhancer_create(const EnhancerParams *p) {
-    EnhancerHandle *h = calloc(1, sizeof(EnhancerHandle));
+DspPipeHandle *dsp_pipe_create(const DspPipeParams *p) {
+    DspPipeHandle *h = calloc(1, sizeof(DspPipeHandle));
     if (!h) return NULL;
 
     /* Allocate EQ biquad state arrays */
@@ -39,32 +39,32 @@ EnhancerHandle *enhancer_create(const EnhancerParams *p) {
     }
 
     /* Configure and initialize */
-    BassEnhancerCfg cfg;
-    BassEnhancerCfg_init(&cfg,
+    DspPipeCfg cfg;
+    dsp_pipe_cfg_init(&cfg,
                          p->cutoff_hz, p->h2_amp, p->h3_amp,
                          p->release_secs, p->fs,
                          p->push_gain,
                          p->pre_gain,
                          p->eq_n_biquads, p->eq_coeffs);
 
-    BassEnhancer_init(&h->enh, &cfg, h->eq_bqs_left, h->eq_bqs_right);
+    dsp_pipe_init(&h->enh, &cfg, h->eq_bqs_left, h->eq_bqs_right);
 
     return h;
 }
 
-void enhancer_destroy(EnhancerHandle *h) {
+void dsp_pipe_destroy(DspPipeHandle *h) {
     if (!h) return;
     free(h->eq_bqs_left);
     free(h->eq_bqs_right);
     free(h);
 }
 
-void enhancer_reset(EnhancerHandle *h) {
-    if (h) BassEnhancer_reset(&h->enh);
+void dsp_pipe_handle_reset(DspPipeHandle *h) {
+    if (h) dsp_pipe_reset(&h->enh);
 }
 
 /* ── Process ────────────────────────────────────────────────────────── */
 
-void enhancer_process_stereo(EnhancerHandle *h, float *left, float *right) {
-    BassEnhancer_process_stereo(&h->enh, left, right);
+void dsp_pipe_handle_process_stereo(DspPipeHandle *h, float *left, float *right) {
+    dsp_pipe_process_stereo(&h->enh, left, right);
 }

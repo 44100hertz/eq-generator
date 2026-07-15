@@ -131,8 +131,8 @@ static int test_enhancer_pipeline(void) {
     float eq_coeffs[5];
     bass_design_butter_hp(25.0f, FS, eq_coeffs);
 
-    BassEnhancerCfg cfg;
-    BassEnhancerCfg_init(&cfg,
+    DspPipeCfg cfg;
+    dsp_pipe_cfg_init(&cfg,
                          60.0f,   /* cutoff_hz */
                          0.33f,   /* h2_amp */
                          0.33f,   /* h3_amp */
@@ -144,8 +144,8 @@ static int test_enhancer_pipeline(void) {
                          eq_coeffs);
 
     Biquad eq_left[1], eq_right[1];
-    BassEnhancer enh;
-    BassEnhancer_init(&enh, &cfg, eq_left, eq_right);
+    DspPipe enh;
+    dsp_pipe_init(&enh, &cfg, eq_left, eq_right);
 
     /* Feed a 40 Hz sine wave (below cutoff) */
     float rms_in = 0.0f, rms_out = 0.0f;
@@ -159,7 +159,7 @@ static int test_enhancer_pipeline(void) {
         float left  = x;
         float right = x;
 
-        BassEnhancer_process_stereo(&enh, &left, &right);
+        dsp_pipe_process_stereo(&enh, &left, &right);
 
         rms_in  += x * x;
         rms_out += left * left;
@@ -188,12 +188,12 @@ static int test_cpu_budget(void) {
     float eq_coeffs[5];
     bass_design_butter_hp(40.0f, FS, eq_coeffs);
 
-    BassEnhancerCfg cfg;
-    BassEnhancerCfg_init(&cfg, 60.0f, 0.33f, 0.33f, 0.2f, FS, 1.0f, 1.0f, 1, eq_coeffs);
+    DspPipeCfg cfg;
+    dsp_pipe_cfg_init(&cfg, 60.0f, 0.33f, 0.33f, 0.2f, FS, 1.0f, 1.0f, 1, eq_coeffs);
 
     Biquad eq_left[1], eq_right[1];
-    BassEnhancer enh;
-    BassEnhancer_init(&enh, &cfg, eq_left, eq_right);
+    DspPipe enh;
+    dsp_pipe_init(&enh, &cfg, eq_left, eq_right);
 
     float left = 0.0f, right = 0.0f;
 
@@ -202,7 +202,7 @@ static int test_cpu_budget(void) {
     for (int i = 0; i < n_iter; i++) {
         left = 0.1f;
         right = 0.1f;
-        BassEnhancer_process_stereo(&enh, &left, &right);
+        dsp_pipe_process_stereo(&enh, &left, &right);
     }
     clock_t end = clock();
 

@@ -40,7 +40,7 @@ static const char *TAG = "eqgen";
 
 /* ── DSP instance (globally accessible from the BT callback) ──── */
 
-static BassEnhancer      enhancer;
+static DspPipe      enhancer;
 static Biquad             eq_bqs_left[EQGEN_N_BIQUADS];
 static Biquad             eq_bqs_right[EQGEN_N_BIQUADS];
 
@@ -73,8 +73,8 @@ static void dsp_init(int rate)
     const float *coeffs = eqgen_get_coeffs(rate);
     float fs = (float)eqgen_get_fs(rate);
 
-    BassEnhancerCfg cfg;
-    BassEnhancerCfg_init(&cfg,
+    DspPipeCfg cfg;
+    dsp_pipe_cfg_init(&cfg,
                          EQGEN_CUTOFF_HZ,
                          EQGEN_H2_AMP,
                          EQGEN_H3_AMP,
@@ -89,14 +89,14 @@ static void dsp_init(int rate)
                          EQGEN_N_BIQUADS,
                          coeffs);
 
-    BassEnhancer_init(&enhancer, &cfg,
+    dsp_pipe_init(&enhancer, &cfg,
                       eq_bqs_left, eq_bqs_right);
 
     /* Pre-compute loudness shelf alpha now so the one-pole filter
      * is ready.  Boost starts at 0 — update_smart_volume() will
      * push the correct boost on first volume change.
      *
-     * Do NOT use BassEnhancerCfg_set_loudness(..., 0.0f) here:
+     * Do NOT use dsp_pipe_cfg_set_loudness(..., 0.0f) here:
      * that early-returns with alpha=0, permanently disabling the
      * shelf regardless of later boost updates. */
     cfg.loudness_alpha = 1.0f - expf(-2.0f * (float)M_PI * EQGEN_LOUDNESS_FC_HZ / fs);
@@ -225,7 +225,7 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
     /* Reset biquad/envelope state on stream start to flush any
      * stale state from a previous connection or silent gap. */
     if (!audio_streaming) {
-        BassEnhancer_reset(&enhancer);
+        dsp_pipe_reset(&enhancer);
         l_err = 0.0f;
         r_err = 0.0f;
         audio_streaming = true;
@@ -277,7 +277,7 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
 #ifdef EQGEN_PROFILE
         uint32_t cy_p1 = esp_cpu_get_cycle_count();
 #endif
-        BassEnhancer_process_stereo(&enhancer, &l, &r);
+        dsp_pipe_process_stereo(&enhancer, &l, &r);
 
 #ifdef EQGEN_PROFILE
         uint32_t cy_p2 = esp_cpu_get_cycle_count();
@@ -378,7 +378,7 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
                  "i2s_in %.1f%%  dsp %.1f%%  i2s_out %.1f%%",
                  (double)cy_budget,
                  (double)pct_convert, (double)pct_enhancer, (double)pct_output);
-        enhancer_profile_report();
+        dsp_pipe_profile_report();
         acc_frames     = 0;
         acc_convert    = 0;
         acc_enhancer   = 0;

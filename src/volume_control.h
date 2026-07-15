@@ -1,7 +1,7 @@
 /**
  * volume_control.h — shared live volume-control orchestration
  *
- * Wraps the 4-step update (smart_volume_compute → BassEnhancer_update_params
+ * Wraps the 4-step update (smart_volume_compute → dsp_pipe_update_params
  * → smart_volume_rebuild_lut → vol_lut lookup) so that both the desktop
  * PipeWire filter (src/filter.c) and the ESP32 firmware
  * (firmware/main/main.c) use identical code.
@@ -43,7 +43,7 @@ static inline void volume_init_lut(float vol_lut[128])
 
 static inline SmartVolumeParams volume_set(uint8_t vol,
                                             float vol_lut[128],
-                                            BassEnhancer *enh)
+                                            DspPipe *enh)
 {
     float pg_loud = 1.0f;
 #ifdef EQGEN_PRE_GAIN
@@ -53,7 +53,7 @@ static inline SmartVolumeParams volume_set(uint8_t vol,
     SmartVolumeParams svp;
     smart_volume_compute(vol, pg_loud, &svp);
 
-    BassEnhancer_update_params(enh, svp.pre_gain, svp.boost);
+    dsp_pipe_update_params(enh, svp.pre_gain, svp.boost);
 
     smart_volume_rebuild_lut(vol_lut, svp.shelf_db,
                              EQGEN_SPEAKER_LEVEL_DB,

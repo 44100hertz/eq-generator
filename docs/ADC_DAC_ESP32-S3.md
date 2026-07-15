@@ -104,7 +104,7 @@ PCM1808 mode pins: FMT=GND, MD1=GND, MD0=GND (I2S, slave, 24-bit).
 ```
 audio_source->read(buf)
   → int16→float (÷32768)
-  → BassEnhancer_process_stereo
+  → dsp_pipe_process_stereo
   → float→int16 (×32768, error-feedback dither)
   → i2s_out_write
 ```

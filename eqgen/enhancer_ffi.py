@@ -47,7 +47,7 @@ def get_lib() -> ctypes.CDLL:
 # ── Parameter struct ──────────────────────────────────────────────────
 
 
-class EnhancerParams(Structure):
+class DspPipeParams(Structure):
     _fields_ = [
         ("cutoff_hz", c_float),
         ("h2_amp", c_float),
@@ -73,18 +73,18 @@ def _bind() -> None:
     if _bound:
         return
     lib = get_lib()
-    lib.enhancer_create.argtypes = [POINTER(EnhancerParams)]
-    lib.enhancer_create.restype = c_void_p
-    lib.enhancer_destroy.argtypes = [c_void_p]
-    lib.enhancer_destroy.restype = None
-    lib.enhancer_reset.argtypes = [c_void_p]
-    lib.enhancer_reset.restype = None
-    lib.enhancer_process_stereo.argtypes = [
+    lib.dsp_pipe_create.argtypes = [POINTER(DspPipeParams)]
+    lib.dsp_pipe_create.restype = c_void_p
+    lib.dsp_pipe_destroy.argtypes = [c_void_p]
+    lib.dsp_pipe_destroy.restype = None
+    lib.dsp_pipe_handle_reset.argtypes = [c_void_p]
+    lib.dsp_pipe_handle_reset.restype = None
+    lib.dsp_pipe_handle_process_stereo.argtypes = [
         c_void_p,
         POINTER(c_float),
         POINTER(c_float),
     ]
-    lib.enhancer_process_stereo.restype = None
+    lib.dsp_pipe_handle_process_stereo.restype = None
     _bound = True
 
 
@@ -121,7 +121,7 @@ def create_enhancer(
     eq_arr = (c_float * len(coeffs))(*coeffs)
     global _eq_arr_keepalive
     _eq_arr_keepalive = eq_arr  # prevent garbage collection
-    params = EnhancerParams(
+    params = DspPipeParams(
         cutoff_hz=cutoff_hz,
         h2_amp=h2_amp,
         h3_amp=h3_amp,
@@ -133,25 +133,25 @@ def create_enhancer(
         eq_coeffs=cast(eq_arr, c_void_p),
     )
     lib = get_lib()
-    enh = lib.enhancer_create(byref(params))
+    enh = lib.dsp_pipe_create(byref(params))
     if not enh:
-        raise RuntimeError("enhancer_create returned NULL")
+        raise RuntimeError("dsp_pipe_create returned NULL")
     return enh
 
 
 def destroy_enhancer(enh: ctypes.c_void_p) -> None:
     """Free an enhancer instance."""
-    get_lib().enhancer_destroy(enh)
+    get_lib().dsp_pipe_destroy(enh)
 
 
 def reset_enhancer(enh: ctypes.c_void_p) -> None:
     """Reset all filter states in an enhancer instance."""
-    get_lib().enhancer_reset(enh)
+    get_lib().dsp_pipe_handle_reset(enh)
 
 
 def process_stereo_frame(enh: ctypes.c_void_p, left: float, right: float) -> tuple[float, float]:
     """Process a single stereo sample pair (float values in [-1.0, 1.0]) in-place."""
     l = c_float(left)
     r = c_float(right)
-    get_lib().enhancer_process_stereo(enh, byref(l), byref(r))
+    get_lib().dsp_pipe_handle_process_stereo(enh, byref(l), byref(r))
     return l.value, r.value

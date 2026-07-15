@@ -82,7 +82,7 @@ void bass_design_lr4(float fc, float fs,
 
 /* ── Configuration initialization ──────────────────────────────────── */
 
-void BassEnhancerCfg_init(BassEnhancerCfg *cfg,
+void dsp_pipe_cfg_init(DspPipeCfg *cfg,
                           float cutoff_hz, float h2_amp, float h3_amp,
                           float release_secs, float fs,
                           float push_gain,
@@ -126,7 +126,7 @@ void BassEnhancerCfg_init(BassEnhancerCfg *cfg,
 
 /* ── Loudness shelf setup ──────────────────────────────────────── */
 
-void BassEnhancerCfg_set_loudness(BassEnhancerCfg *cfg,
+void dsp_pipe_cfg_set_loudness(DspPipeCfg *cfg,
                                   float fc, float fs, float boost_db)
 {
     if (boost_db <= 0.0f || fc <= 0.0f) {
@@ -144,7 +144,7 @@ void BassEnhancerCfg_set_loudness(BassEnhancerCfg *cfg,
 #define NAN (0.0f/0.0f)
 #endif
 
-void BassEnhancer_update_params(BassEnhancer *enh,
+void dsp_pipe_update_params(DspPipe *enh,
                                 float pre_gain,
                                 float loudness_boost)
 {
@@ -154,8 +154,8 @@ void BassEnhancer_update_params(BassEnhancer *enh,
 
 /* ── Enhancer init / reset ─────────────────────────────────────────── */
 
-void BassEnhancer_init(BassEnhancer *enh,
-                       const BassEnhancerCfg *cfg,
+void dsp_pipe_init(DspPipe *enh,
+                       const DspPipeCfg *cfg,
                        Biquad *eq_bqs_left,
                        Biquad *eq_bqs_right)
 {
@@ -205,8 +205,8 @@ void BassEnhancer_init(BassEnhancer *enh,
     env_init(&enh->right.env, cfg->release_coeff);
 }
 
-void BassEnhancer_reset(BassEnhancer *enh) {
-    BassEnhancerCfg *cfg = &enh->cfg;
+void dsp_pipe_reset(DspPipe *enh) {
+    DspPipeCfg *cfg = &enh->cfg;
 
     for (int i = 0; i < cfg->eq_n_biquads; i++) {
         biquad_reset(&enh->left.eq_bqs[i]);
@@ -258,32 +258,32 @@ void BassEnhancer_reset(BassEnhancer *enh) {
 
 /* ── Profiling ─────────────────────────────────────────────────────── */
 
-EnhancerProfile enh_profile;
+DspPipeProfile dsp_profile;
 
-void enhancer_profile_report(void) {
-    if (enh_profile.frames == 0) return;
-    uint32_t n = enh_profile.frames;
+void dsp_pipe_profile_report(void) {
+    if (dsp_profile.frames == 0) return;
+    uint32_t n = dsp_profile.frames;
     ESP_LOGI("enhancer", "=== %lu frames ===", (unsigned long)n);
     ESP_LOGI("enhancer", "  total: %llu cy/frame  (%llu cy total)",
-             (unsigned long long)(enh_profile.cycles_total / n),
-             (unsigned long long)enh_profile.cycles_total);
+             (unsigned long long)(dsp_profile.cycles_total / n),
+             (unsigned long long)dsp_profile.cycles_total);
     ESP_LOGI("enhancer", "  EQ cascade: %llu cy/frame",
-             (unsigned long long)(enh_profile.cycles_eq / n));
+             (unsigned long long)(dsp_profile.cycles_eq / n));
     ESP_LOGI("enhancer", "  env+normalize: %llu cy/frame",
-             (unsigned long long)(enh_profile.cycles_env / n));
+             (unsigned long long)(dsp_profile.cycles_env / n));
     ESP_LOGI("enhancer", "  Chebyshev+scale: %llu cy/frame",
-             (unsigned long long)(enh_profile.cycles_harm / n));
+             (unsigned long long)(dsp_profile.cycles_harm / n));
     ESP_LOGI("enhancer", "  HP+mix+headroom: %llu cy/frame",
-             (unsigned long long)(enh_profile.cycles_mix / n));
+             (unsigned long long)(dsp_profile.cycles_mix / n));
     ESP_LOGI("enhancer", "  I2S write: %llu cy/frame",
-             (unsigned long long)(enh_profile.cycles_i2s / n));
-    memset(&enh_profile, 0, sizeof(enh_profile));
+             (unsigned long long)(dsp_profile.cycles_i2s / n));
+    memset(&dsp_profile, 0, sizeof(dsp_profile));
 }
 
 /* ── Per-channel tick ──────────────────────────────────────────────── */
 
-static float enhancer_process_channel(BassEnhancerChan *ch,
-                                      const BassEnhancerCfg *cfg,
+static float dsp_pipe_process_channel(DspPipeChan *ch,
+                                      const DspPipeCfg *cfg,
                                       float x)
 {
 #ifdef EQGEN_PROFILE
@@ -307,9 +307,9 @@ static float enhancer_process_channel(BassEnhancerChan *ch,
     if (cfg->cutoff_hz <= 0.0f) {
 #ifdef EQGEN_PROFILE
         c1 = esp_cpu_get_cycle_count();
-        enh_profile.frames++;
-        enh_profile.cycles_total += (c1 - c0);
-        enh_profile.cycles_eq     += (c1 - c0);
+        dsp_profile.frames++;
+        dsp_profile.cycles_total += (c1 - c0);
+        dsp_profile.cycles_eq     += (c1 - c0);
 #endif
         return eq_out;
     }
@@ -531,12 +531,12 @@ static float enhancer_process_channel(BassEnhancerChan *ch,
 
 #ifdef EQGEN_PROFILE
     c3 = esp_cpu_get_cycle_count();
-    enh_profile.frames++;
-    enh_profile.cycles_total += (c3 - c0);
-    enh_profile.cycles_eq     += (c1 - c0);
-    enh_profile.cycles_env    += (c2 - c1);
-    enh_profile.cycles_mix    += (c3 - c2);
-    enh_profile.cycles_harm   += (c2 - c1) / 2;
+    dsp_profile.frames++;
+    dsp_profile.cycles_total += (c3 - c0);
+    dsp_profile.cycles_eq     += (c1 - c0);
+    dsp_profile.cycles_env    += (c2 - c1);
+    dsp_profile.cycles_mix    += (c3 - c2);
+    dsp_profile.cycles_harm   += (c2 - c1) / 2;
 #endif
 
     return out;
@@ -544,11 +544,11 @@ static float enhancer_process_channel(BassEnhancerChan *ch,
 
 /* ── Stereo processing ─────────────────────────────────────────────── */
 
-void BassEnhancer_process_stereo(BassEnhancer *enh,
+void dsp_pipe_process_stereo(DspPipe *enh,
                                  float *left, float *right)
 {
-    *left  = enhancer_process_channel(&enh->left,  &enh->cfg, *left);
-    *right = enhancer_process_channel(&enh->right, &enh->cfg, *right);
+    *left  = dsp_pipe_process_channel(&enh->left,  &enh->cfg, *left);
+    *right = dsp_pipe_process_channel(&enh->right, &enh->cfg, *right);
 
     /* Safety net: clamp NaN/Inf to zero.  Once NaN enters biquad state
      * it propagates permanently — catching it here resets the output

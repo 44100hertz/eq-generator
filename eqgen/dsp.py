@@ -8,7 +8,7 @@ analysis helpers that Python is responsible for:
   - Butterworth biquad design (bilinear transform, float precision)
   - Sample-by-sample biquad tick (for compressor/envelope analysis)
   - Envelope follower (peak-hold, for offline trace analysis)
-  - BassEnhancerConfig (parameter container for documentation / tests)
+  - DspPipeConfig (parameter container for documentation / tests)
 
 The four process_* Python variants have been removed; the production
 pipeline is the C implementation exposed through enhancer_ffi.
@@ -124,7 +124,7 @@ def butterworth_hp_mag(f: float, fc: float) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
-class BassEnhancerConfig:
+class DspPipeConfig:
     """Configuration for the C harmonic bass enhancer.
 
     This is a documentation / test-annotation container.  The actual
