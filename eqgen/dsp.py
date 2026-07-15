@@ -236,7 +236,7 @@ def compute_overboost_ceiling(
     pre_gain: float, fs: float = 44100.0,
     push_gain: float = 0.3,
     test_freq: Optional[float] = None,
-    nominal_amp: float = 0.5,
+    nominal_amp: float = 1.0,
     n_iters: int = 10,
 ) -> Tuple[float, float]:
     """Find max safe overboost (dB) and the frequency that clips first.
@@ -298,7 +298,7 @@ def compute_clip_threshold(
     fc: float,
     pre_gain: float,
     fs: float = 44100.0,
-    nominal_amp: float = 0.5,
+    nominal_amp: float = 1.0,
 ) -> Tuple[float, float]:
     """Find overboost dB where dry_hp exceeds 1.0 (hard clip).
 
