@@ -118,6 +118,16 @@ def butterworth_hp_mag(f: float, fc: float) -> float:
     w = f / fc
     return w * w / np.sqrt(1.0 + w**4)
 
+def lr4_hp_mag(f: float, fc: float) -> float:
+    """LR4 high-pass magnitude at frequency f, crossover fc.
+
+    Two cascaded 2nd-order Butterworth HP filters:
+    H(f) = (f/fc)^4 / (1 + (f/fc)^4).
+    At fc: H = -6 dB; well above fc: H → 1.0.
+    """
+    w2 = (f / fc) ** 2
+    return w2 * w2 / (1.0 + w2 * w2)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration — parameter container for documentation / test annotation
@@ -281,6 +291,58 @@ def compute_overboost_ceiling(
         n_iters=n_iters, duration=0.5,
     )
     return (refined_db, float(worst_freq))
+
+
+def compute_clip_threshold(
+    coeffs: List[float],
+    fc: float,
+    pre_gain: float,
+    fs: float = 44100.0,
+    nominal_amp: float = 0.5,
+) -> Tuple[float, float]:
+    """Find overboost dB where dry_hp exceeds 1.0 (hard clip).
+
+    The dry_hp path is purely linear:
+        input × pre_gain × EQ cascade × LR4 HP crossover.
+
+    The bass-sum limiter cannot protect this path — only bass gets
+    ducked.  When dry_hp alone exceeds 1.0, the output hard-clips.
+
+    Sweeps fc to fs/2 and returns (clip_threshold_db, worst_freq_hz).
+    A return of inf means the treble path never clips even at extreme
+    overboost.
+    """
+    if not coeffs:
+        # No EQ — just pre_gain through HP crossover (→ 1.0 at high f)
+        max_gain = pre_gain
+        worst_freq = fc * 4.0
+    else:
+        from eqgen.eq_fit import BiquadCoeffs, cascade_response
+        biquads = []
+        for i in range(0, len(coeffs), 5):
+            biquads.append(BiquadCoeffs(
+                b0=float(coeffs[i]), b1=float(coeffs[i + 1]),
+                b2=float(coeffs[i + 2]),
+                a1=float(coeffs[i + 3]), a2=float(coeffs[i + 4]),
+            ))
+
+        freqs = np.logspace(np.log10(fc), np.log10(fs / 2.0), 300)
+        eq_mags = cascade_response(biquads, freqs, fs)
+
+        max_gain = 0.0
+        worst_freq = fc
+        for i, f in enumerate(freqs):
+            hp_gain = lr4_hp_mag(f, fc)
+            total = pre_gain * float(eq_mags[i]) * hp_gain
+            if total > max_gain:
+                max_gain = total
+                worst_freq = f
+
+    max_vol_gain = 1.0 / (nominal_amp * max_gain)
+    if max_vol_gain < 1.0:
+        return (0.0, float(worst_freq))
+
+    return (float(20.0 * np.log10(max_vol_gain)), float(worst_freq))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -98,7 +98,7 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
         max_gain_db = detailed.get("max_gain_db", 0.0)
 
         # ── IIR-only EQ: fit biquads directly to correction curve ─
-        from eqgen.dsp import pre_gain_from_max_gain, compute_overboost_ceiling
+        from eqgen.dsp import pre_gain_from_max_gain, compute_overboost_ceiling, compute_clip_threshold
 
         if preset.max_bands > 0:
             freqs_hires = np.logspace(np.log10(freqs[0]), np.log10(freqs[-1]), 500)
@@ -130,9 +130,13 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
         efficacy = detailed.get("efficacy", {})
         h2_amp = efficacy.get("h2_amp", 0.0)
         h3_amp = efficacy.get("h3_amp", 0.0)
-        overboost_ceiling_db, overboost_ceiling_freq = compute_overboost_ceiling(
+        limit_threshold_db, limit_threshold_freq = compute_overboost_ceiling(
             h2_amp=h2_amp, h3_amp=h3_amp,
             fc=preset.fc, coeffs=coeffs_flat,
+            pre_gain=pre_gain_lin, fs=fs,
+        )
+        clip_threshold_db, clip_threshold_freq = compute_clip_threshold(
+            coeffs=coeffs_flat, fc=preset.fc,
             pre_gain=pre_gain_lin, fs=fs,
         )
 
@@ -189,9 +193,10 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
                 "treble_err": float(np.max(np.abs(err_arr[err_freqs > 2000]))),
                 "fc": preset.fc,
                 "fs": fs, "max_gain_db": max_gain_db,
-                "efficacy": detailed.get("efficacy", {}),
-                "overboost_ceiling_db": round(overboost_ceiling_db, 1),
-                "overboost_ceiling_freq": round(overboost_ceiling_freq, 1),
+                "limit_threshold_db": round(limit_threshold_db, 1),
+                "limit_threshold_freq": round(limit_threshold_freq, 1),
+                "clip_threshold_db": round(clip_threshold_db, 1),
+                "clip_threshold_freq": round(clip_threshold_freq, 1),
             },
             "raw_measurement": raw_meas,
             "raw_target": targ_db,
