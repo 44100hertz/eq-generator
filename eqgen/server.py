@@ -49,7 +49,7 @@ sys.path.insert(0, str(ROOT))
 
 from eqgen.presets import Preset, PresetManager, PRESETS_DIR, MAX_IIR_BANDS, load_house_curves, list_house_curve_names, get_house_curve
 from eqgen.pipeline import run_pipeline
-from eqgen.eq_fit import cascade_response_db, BiquadCoeffs, fit_eq_curve
+from eqgen.eq_fit import cascade_response_db, BiquadCoeffs, FitResult, fit_eq_curve
 from eqgen.web_ui import load_html
 
 
@@ -98,59 +98,35 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
         max_gain_db = detailed.get("max_gain_db", 0.0)
 
         # ── IIR-only EQ: fit biquads directly to correction curve ─
-        freqs_hires = np.logspace(np.log10(freqs[0]), np.log10(freqs[-1]), 500)
-
-        # Fit IIR biquads to the full target curve
-        fit_result = fit_eq_curve(freqs, gains_db, fs,
-                                  max_bands=preset.max_bands,
-                                  min_freq=freqs[0], max_freq=freqs[-1],
-                                  min_peaking_freq=freqs[0])
-        q28_floats = fit_result.biquads
-        iir_response_db = cascade_response_db(q28_floats, freqs_hires, fs)
-
-        # Prediction error: IIR fit vs target on same hi-res grid
-        target_hires = np.interp(freqs_hires, freqs, gains_db)
-        pred_err_db = iir_response_db - target_hires
-
-        # Raw measurement (as-is, no level shift) and fitted target line.
-        # The target is always pink or brown noise — a straight line in dB
-        # vs log-freq.  Fit it, then shift to measurement’s midrange level.
-        raw_meas = detailed["raw_measurement"]
-        raw_targ = detailed["raw_target"]
-        targ_arr = np.array([(p["freq"], p["db"]) for p in raw_targ])
-        log_f_targ = np.log10(targ_arr[:, 0])
-        slope, intercept = np.polyfit(log_f_targ, targ_arr[:, 1], 1)
-        targ_fit = slope * log_f_targ + intercept
-
-        meas_arr = np.array([(p["freq"], p["db"]) for p in raw_meas])
-        mm = (meas_arr[:, 0] >= 500) & (meas_arr[:, 0] <= 2000)
-        tm = (targ_arr[:, 0] >= 500) & (targ_arr[:, 0] <= 2000)
-        meas_mid = float(np.mean(meas_arr[mm, 1])) if mm.any() else 0.0
-        targ_mid = float(np.mean(targ_fit[tm])) if tm.any() else 0.0
-        offset = meas_mid - targ_mid
-
-        targ_db = [{"freq": float(targ_arr[i, 0]),
-                     "db": float(targ_fit[i] + offset)}
-                    for i in range(len(targ_arr))]
-
-        # Error: fitted target - measurement (at raw measurement resolution)
-        meas_log_f = np.log10(meas_arr[:, 0])
-        targ_at_meas = slope * meas_log_f + intercept + offset
-        error = [{"freq": float(meas_arr[i, 0]),
-                  "db": float(targ_at_meas[i] - meas_arr[i, 1])}
-                 for i in range(len(meas_arr))]
-
-        err_arr = np.array([e["db"] for e in error])
-        err_freqs = np.array([e["freq"] for e in error])
-
-        # ── Overboost ceiling: max safe overboost_db before limiter clips ─
         from eqgen.dsp import pre_gain_from_max_gain, compute_overboost_ceiling
-        efficacy = detailed.get("efficacy", {})
-        h2_amp = efficacy.get("h2_amp", 0.0)
-        h3_amp = efficacy.get("h3_amp", 0.0)
-        pre_gain_lin = float(pre_gain_from_max_gain(max_gain_db))
-        coeffs_flat = [v for bc in fit_result.biquads
-                       for v in [bc.b0, bc.b1, bc.b2, bc.a1, bc.a2]]
+
+        if preset.max_bands > 0:
+            freqs_hires = np.logspace(np.log10(freqs[0]), np.log10(freqs[-1]), 500)
+
+            # Fit IIR biquads to the full target curve
+            fit_result = fit_eq_curve(freqs, gains_db, fs,
+                                      max_bands=preset.max_bands,
+                                      min_freq=freqs[0], max_freq=freqs[-1],
+                                      min_peaking_freq=freqs[0])
+            q28_floats = fit_result.biquads
+            iir_response_db = cascade_response_db(q28_floats, freqs_hires, fs)
+
+            # Prediction error: IIR fit vs target on same hi-res grid
+            target_hires = np.interp(freqs_hires, freqs, gains_db)
+            pred_err_db = iir_response_db - target_hires
+
+            pre_gain_lin = float(pre_gain_from_max_gain(max_gain_db))
+            coeffs_flat = [v for bc in fit_result.biquads
+                           for v in [bc.b0, bc.b1, bc.b2, bc.a1, bc.a2]]
+        else:
+            freqs_hires = freqs
+            fit_result = FitResult()
+            iir_response_db = np.zeros(len(freqs_hires))
+            target_hires = np.interp(freqs_hires, freqs, gains_db)
+            pred_err_db = iir_response_db - target_hires
+
+            pre_gain_lin = 1.0
+            coeffs_flat = []
         overboost_ceiling_db, overboost_ceiling_freq = compute_overboost_ceiling(
             h2_amp=h2_amp, h3_amp=h3_amp,
             fc=preset.fc, coeffs=coeffs_flat,
@@ -159,7 +135,7 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
 
         # ── Smart volume: compute effective curves at different volume levels ─
         from eqgen.smart_volume import compute_smart_volume_curves
-        pg_db_loud = 20.0 * np.log10(pre_gain_from_max_gain(max_gain_db))
+        pg_db_loud = 20.0 * np.log10(pre_gain_lin)
         sv_result = compute_smart_volume_curves(freqs, gains_db,
                                                   pre_gain_db_loud=float(pg_db_loud),
                                                   speaker_level_db=preset.speaker_level,
@@ -234,7 +210,7 @@ def _apply_preset_to_system(preset_name: str, task_id: str):
             meas_paths=preset.resolve_measurements(),
             target_path=preset.resolve_target() or "",
             noise_path=preset.resolve_noise(),
-            fc=preset.fc or 60.0,
+            fc=preset.fc,
             max_bands=preset.max_bands,
             smooth_exponent=preset.smooth_exponent,
             bluetooth_id=preset.bluetooth_id or None,
@@ -332,7 +308,7 @@ def _flash_esp32(preset_name: str, task_id: str):
             meas_paths=preset.resolve_measurements(),
             target_path=preset.resolve_target() or "",
             noise_path=preset.resolve_noise(),
-            fc=preset.fc or 60.0,
+            fc=preset.fc,
             max_bands=preset.max_bands,
             smooth_exponent=preset.smooth_exponent,
             bluetooth_id=preset.bluetooth_id or None,

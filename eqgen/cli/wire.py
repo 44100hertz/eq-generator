@@ -260,38 +260,46 @@ def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
         print(f"  Max correction gain: {max_gain_db:+.1f} dB")
 
     # ── IIR-only EQ ─
-    rates = [44100.0, 48000.0]
-    all_biquads = {}
-    all_bands = {}
+    if max_bands > 0:
+        rates = [44100.0, 48000.0]
+        all_biquads = {}
+        all_bands = {}
 
-    for rate in rates:
-        print(f"\n── Fitting IIR biquads at {rate:.0f} Hz (max {max_bands} bands)...")
-        coeffs, bands, _, fit_target, fitted_db = design_eq(
-            eq_freqs, target_db, float(rate),
-            max_bands=max_bands,
-            min_peaking_freq=fc)
+        for rate in rates:
+            print(f"\n── Fitting IIR biquads at {rate:.0f} Hz (max {max_bands} bands)...")
+            coeffs, bands, _, fit_target, fitted_db = design_eq(
+                eq_freqs, target_db, float(rate),
+                max_bands=max_bands,
+                min_peaking_freq=fc)
 
-        print(f"  {len(bands)} bands")
-        err = fitted_db - fit_target
-        for label, lo, hi in [
-            ("Bass ≤250Hz", 0, 250), ("Mid 250-2k", 250, 2000),
-            ("Treble >2k", 2000, 99999),
-        ]:
-            m = (eq_freqs >= lo) & (eq_freqs <= hi)
-            if m.any():
-                print(f"    {label:<16s}  max err = {np.max(np.abs(err[m])):+.1f} dB")
+            print(f"  {len(bands)} bands")
+            err = fitted_db - fit_target
+            for label, lo, hi in [
+                ("Bass ≤250Hz", 0, 250), ("Mid 250-2k", 250, 2000),
+                ("Treble >2k", 2000, 99999),
+            ]:
+                m = (eq_freqs >= lo) & (eq_freqs <= hi)
+                if m.any():
+                    print(f"    {label:<16s}  max err = {np.max(np.abs(err[m])):+.1f} dB")
 
-        all_biquads[rate] = [BiquadCoeffs(b0=coeffs[i*5], b1=coeffs[i*5+1],
-                                          b2=coeffs[i*5+2], a1=coeffs[i*5+3],
-                                          a2=coeffs[i*5+4])
-                             for i in range(len(bands))]
-        all_bands[rate] = bands
+            all_biquads[rate] = [BiquadCoeffs(b0=coeffs[i*5], b1=coeffs[i*5+1],
+                                              b2=coeffs[i*5+2], a1=coeffs[i*5+3],
+                                              a2=coeffs[i*5+4])
+                                 for i in range(len(bands))]
+            all_bands[rate] = bands
 
-    biquads_44 = all_biquads[44100.0]
-    biquads_48 = all_biquads[48000.0]
-    bands_44 = all_bands[44100.0]
-    bands_48 = all_bands[48000.0]
-    pre_gain = pre_gain_from_max_gain(max_gain_db)
+        biquads_44 = all_biquads[44100.0]
+        biquads_48 = all_biquads[48000.0]
+        bands_44 = all_bands[44100.0]
+        bands_48 = all_bands[48000.0]
+        pre_gain = pre_gain_from_max_gain(max_gain_db)
+    else:
+        print(f"\n── Skipping IIR fit (max_bands=0)")
+        biquads_44 = []
+        biquads_48 = []
+        bands_44 = []
+        bands_48 = []
+        pre_gain = 1.0
 
     cfg = {
         "cutoff_hz": fc,
@@ -600,7 +608,7 @@ def main():
             meas_paths=[str(ROOT / p) for p in preset.measurements],
             noise_path=str(ROOT / preset.noise) if preset.noise else None,
             target_path=str(ROOT / preset.target) if preset.target else None,
-            fc=preset.fc or 60.0,
+            fc=preset.fc,
             smooth_exponent=preset.smooth_exponent,
             max_bands=preset.max_bands,
             bluetooth_id=preset.bluetooth_id or None,
@@ -633,7 +641,7 @@ def main():
             meas_paths=[str(ROOT / p) for p in preset.measurements],
             noise_path=str(ROOT / preset.noise) if preset.noise else None,
             target_path=str(ROOT / preset.target) if preset.target else None,
-            fc=preset.fc or 60.0,
+            fc=preset.fc,
             smooth_exponent=preset.smooth_exponent,
             max_bands=preset.max_bands,
             bluetooth_id=preset.bluetooth_id or None,

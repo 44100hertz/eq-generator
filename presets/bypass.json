@@ -1,0 +1,19 @@
+{
+  "name": "bypass",
+  "description": "",
+  "measurements": [
+    "measurements/cardboard/response.wav"
+  ],
+  "target": "measurements/cardboard/target.wav",
+  "house_curve": "flat",
+  "noise": "measurements/cardboard/noise.wav",
+  "fc": 0,
+  "max_bands": 0,
+  "smooth_exponent": 1,
+  "release": 0.2,
+  "bluetooth_id": "",
+  "speaker_level": 60,
+  "overboost_db": 0,
+  "high_rolloffs": [],
+  "low_rolloffs": []
+}
