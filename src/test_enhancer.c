@@ -26,14 +26,16 @@
 #include "biquad.h"
 #include "envelope.h"
 #include "enhancer.h"
-#include "dc_blocker.h"
 
 #define FS 44100.0f
 
-/* ── Test 1: Biquad DC gain ───────────────────────────────────────── */
+/* ── Test 1: hp_harm DC rejection ────────────────────────────────────
+ * T₂(x) = 2x² − 1 introduces a −1 DC offset into the harmonics path.
+ * hp_harm (2nd-order Butterworth HP at fc) filters this DC before
+ * it reaches the output mix — no separate DC blocker needed. */
 
-static int test_biquad_dc_gain(void) {
-    printf("Test 1: Biquad DC gain...\n");
+static int test_hp_harm_dc_rejection(void) {
+    printf("Test 1: hp_harm DC rejection...\n");
 
     float hp_coeffs[5];
     bass_design_butter_hp(25.0f, FS, hp_coeffs);
@@ -41,27 +43,14 @@ static int test_biquad_dc_gain(void) {
     Biquad bq;
     biquad_init(&bq, hp_coeffs);
 
-    /* Feed constant DC = 0.5 for 200k samples */
     float out = 0.0f;
     for (int i = 0; i < 200000; i++) {
         out = biquad_tick(&bq, 0.5f);
     }
 
-    printf("  HP alone after 200k DC: %.6f (raw — expect non-zero)\n", out);
+    printf("  hp_harm after 200k DC: %.6f (expect < 0.01)\n", out);
 
-    /* Now test DC blocker + HP cascade */
-    DCBlocker dcb;
-    float dc_R = expf(-2.0f * (float)M_PI * 5.0f / FS);
-    dc_blocker_init(&dcb, dc_R);
-    biquad_reset(&bq);
-
-    float chain_out = 0.0f;
-    for (int i = 0; i < 200000; i++) {
-        chain_out = biquad_tick(&bq, dc_blocker_tick(&dcb, 0.5f));
-    }
-    printf("  DC blocker + HP after 200k: %.6f (expect < 0.01)\n", chain_out);
-
-    int pass = (fabsf(chain_out) < 0.01f);
+    int pass = (fabsf(out) < 0.01f);
     printf("  %s\n\n", pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;
 }
@@ -230,7 +219,7 @@ int main(void) {
     printf("  Bass Enhancer C Implementation Tests (float)\n");
     printf("========================================\n\n");
 
-    failures += test_biquad_dc_gain();
+    failures += test_hp_harm_dc_rejection();
     failures += test_chebyshev();
     failures += test_envelope();
     failures += test_enhancer_pipeline();

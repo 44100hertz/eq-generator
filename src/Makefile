@@ -13,11 +13,11 @@ CFLAGS   ?= -O2 -Wall -Wextra
 LDFLAGS_SO ?= -shared -fPIC -lm
 
 SOURCES        = enhancer.c enhancer_api.c
-HEADERS        = enhancer.h enhancer_api.h biquad.h lp.h envelope.h dc_blocker.h eq_coeffs.h
+HEADERS        = enhancer.h enhancer_api.h biquad.h lp.h envelope.h eq_coeffs.h
 TARGET         = enhancer.so
 
 LADSPA_SOURCES = enhancer.c ladspa/ladspa_wrapper.c
-LADSPA_HEADERS = enhancer.h biquad.h lp.h envelope.h dc_blocker.h eq_coeffs.h
+LADSPA_HEADERS = enhancer.h biquad.h lp.h envelope.h eq_coeffs.h
 LADSPA_TARGET  = eqgen_ladspa.so
 LADSPA_INSTALL_DIR = $(HOME)/.ladspa
 

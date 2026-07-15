@@ -195,10 +195,6 @@ void dsp_pipe_init(DspPipe *enh,
     enh->left.bass_gain_red = 1.0f;
     enh->right.bass_gain_red = 1.0f;
 
-    /* Initialize DC blockers (5 Hz cutoff) */
-    float dc_R = expf(-2.0f * (float)M_PI * 5.0f / cfg->fs);
-    dc_blocker_init(&enh->left.dc_block,  dc_R);
-    dc_blocker_init(&enh->right.dc_block, dc_R);
 
     /* Initialize envelope */
     env_init(&enh->left.env,  cfg->release_coeff);
@@ -225,8 +221,6 @@ void dsp_pipe_reset(DspPipe *enh) {
     biquad_reset(&enh->left.hp_harm);
     biquad_reset(&enh->right.hp_harm);
 
-    dc_blocker_reset(&enh->left.dc_block);
-    dc_blocker_reset(&enh->right.dc_block);
 
     enh->left.env.peak  = 0.0f;
     enh->left.w_slew  = 0.0f;
@@ -292,8 +286,6 @@ static float dsp_pipe_process_channel(DspPipeChan *ch,
     c0 = esp_cpu_get_cycle_count();
 #endif
 
-    /* ── Stage 0: DC blocker ───────────────────────────────────── */
-    x = dc_blocker_tick(&ch->dc_block, x);
 
     /* ── Stage 0a: Pre-gain ─────────────────────────────────────── */
     if (cfg->pre_gain != 1.0f) {

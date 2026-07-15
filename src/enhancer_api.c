@@ -8,7 +8,6 @@
 #include "enhancer_api.h"
 #include "enhancer.h"
 #include "biquad.h"
-#include "dc_blocker.h"
 #include "envelope.h"
 #include <stdlib.h>
 #include <string.h>

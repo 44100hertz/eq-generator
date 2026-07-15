@@ -34,7 +34,6 @@
 #include <stdint.h>
 #include "biquad.h"
 #include "envelope.h"
-#include "dc_blocker.h"
 
 #define LOOKAHEAD_LEN         240   /* 5 ms @ 48 kHz */
 #define LR4_SECTIONS          2     /* cascaded 2nd-order sections */
@@ -78,7 +77,6 @@ typedef struct {
 
 /* ── Per-channel state ─────────────────────────────────────────────── */
 typedef struct {
-    DCBlocker   dc_block;
     float       loudness_state;
 
     Biquad     *eq_bqs;          /* array of eq_n_biquads Biquad       */
