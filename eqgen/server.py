@@ -127,11 +127,48 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
 
             pre_gain_lin = 1.0
             coeffs_flat = []
+        efficacy = detailed.get("efficacy", {})
+        h2_amp = efficacy.get("h2_amp", 0.0)
+        h3_amp = efficacy.get("h3_amp", 0.0)
         overboost_ceiling_db, overboost_ceiling_freq = compute_overboost_ceiling(
             h2_amp=h2_amp, h3_amp=h3_amp,
             fc=preset.fc, coeffs=coeffs_flat,
             pre_gain=pre_gain_lin, fs=fs,
         )
+
+        # ── Raw measurement, target, and error (for display) ──────────
+        raw_meas = detailed["raw_measurement"]
+        raw_targ = detailed["raw_target"]
+        if raw_targ:
+            targ_arr = np.array([(p["freq"], p["db"]) for p in raw_targ])
+            log_f_targ = np.log10(targ_arr[:, 0])
+            slope, intercept = np.polyfit(log_f_targ, targ_arr[:, 1], 1)
+            targ_fit = slope * log_f_targ + intercept
+
+            meas_arr = np.array([(p["freq"], p["db"]) for p in raw_meas])
+            mm = (meas_arr[:, 0] >= 500) & (meas_arr[:, 0] <= 2000)
+            tm = (targ_arr[:, 0] >= 500) & (targ_arr[:, 0] <= 2000)
+            meas_mid = float(np.mean(meas_arr[mm, 1])) if mm.any() else 0.0
+            targ_mid = float(np.mean(targ_fit[tm])) if tm.any() else 0.0
+            offset = meas_mid - targ_mid
+
+            targ_db = [{"freq": float(targ_arr[i, 0]),
+                         "db": float(targ_fit[i] + offset)}
+                        for i in range(len(targ_arr))]
+
+            # Error: fitted target - measurement (at raw measurement resolution)
+            meas_log_f = np.log10(meas_arr[:, 0])
+            targ_at_meas = slope * meas_log_f + intercept + offset
+            error = [{"freq": float(meas_arr[i, 0]),
+                      "db": float(targ_at_meas[i] - meas_arr[i, 1])}
+                     for i in range(len(meas_arr))]
+            err_arr = np.array([e["db"] for e in error])
+            err_freqs = np.array([e["freq"] for e in error])
+        else:
+            targ_db = []
+            error = []
+            err_arr = np.array([])
+            err_freqs = np.array([])
 
         # ── Smart volume: compute effective curves at different volume levels ─
         from eqgen.smart_volume import compute_smart_volume_curves
