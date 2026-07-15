@@ -609,6 +609,8 @@ function renderResults() {
   const h   = (eff.h2_amp != null && eff.h3_amp != null) ? (eff.h2_amp + eff.h3_amp).toFixed(4) : '—';
   const overboost_ceil = (r.metrics && r.metrics.overboost_ceiling_db != null)
     ? r.metrics.overboost_ceiling_db.toFixed(1) + ' dB' : '—';
+  const overboost_freq = (r.metrics && r.metrics.overboost_ceiling_freq != null)
+    ? '@ ' + r.metrics.overboost_ceiling_freq.toFixed(1) + ' Hz' : '';
   const overboost_set = (r.smart_volume && r.smart_volume.params && r.smart_volume.params.overboost_db != null)
     ? r.smart_volume.params.overboost_db.toFixed(1) + ' dB' : '—';
 
@@ -619,7 +621,7 @@ function renderResults() {
         <span>h<sub>2</sub> = ${h2}</span>
         <span>h<sub>3</sub> = ${h3}</span>
         <span style="color:var(--fg)">h = ${h}</span>
-        <span>overboost ceiling = <b style="color:var(--yellow)">${overboost_ceil}</b></span>
+        <span>overboost ceiling = <b style="color:var(--yellow)">${overboost_ceil}</b> <span style="color:var(--muted)">${overboost_freq}</span></span>
         <span style="margin-left:auto;font-size:11px">h → 0: pure fundamental &nbsp; h → 1: pure harmonics</span>
       </div></div>
     <div class="chart"><h3>1. Measurement &amp; Target</h3><canvas id="cMeas"></canvas>

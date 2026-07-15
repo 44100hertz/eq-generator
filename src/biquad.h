@@ -58,7 +58,7 @@ static inline float biquad_tick(Biquad *bq, float x) {
 
     bq->x2 = bq->x1;
     bq->x1 = x;
-    bq->y2 = ftz(bq->y1);
+    bq->y2 = bq->y1;
     bq->y1 = y;
 
     return y;

@@ -18,10 +18,10 @@ static const char *TAG = "i2s_out";
 #define I2S_LRCK_PIN  25
 #define I2S_DATA_PIN  22
 
-/* ── DMA buffer: ~20ms of stereo 16-bit at 48kHz ─────────────── */
+/* ── DMA buffer: ~93ms of stereo 16-bit at 44100Hz ──────────── */
 
-#define I2S_DMA_DESC_NUM   4
-#define I2S_DMA_FRAME_NUM  512
+#define I2S_DMA_DESC_NUM   8
+#define I2S_DMA_FRAME_NUM  1024
 
 static i2s_chan_handle_t tx_handle = NULL;
 
@@ -137,7 +137,12 @@ int i2s_out_write(const int16_t *samples, uint32_t frame_count,
     size_t nbytes = frame_count * 2 * sizeof(int16_t);
     size_t written = 0;
     esp_err_t err = i2s_channel_write(tx_handle, samples, nbytes,
-                                      &written, portMAX_DELAY);
+                                      &written, pdMS_TO_TICKS(200));
+    if (err == ESP_ERR_TIMEOUT) {
+        ESP_LOGW(TAG, "i2s write timeout (%lu/%lu bytes in %lums)",
+                 (unsigned long)written, (unsigned long)nbytes,
+                 200UL);
+    }
     if (bytes_written) *bytes_written = written;
-    return (err == ESP_OK) ? 0 : (int)err;
+    return (err == ESP_OK || err == ESP_ERR_TIMEOUT) ? 0 : (int)err;
 }

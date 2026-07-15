@@ -151,7 +151,7 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
         pre_gain_lin = float(pre_gain_from_max_gain(max_gain_db))
         coeffs_flat = [v for bc in fit_result.biquads
                        for v in [bc.b0, bc.b1, bc.b2, bc.a1, bc.a2]]
-        overboost_ceiling_db = compute_overboost_ceiling(
+        overboost_ceiling_db, overboost_ceiling_freq = compute_overboost_ceiling(
             h2_amp=h2_amp, h3_amp=h3_amp,
             fc=preset.fc, coeffs=coeffs_flat,
             pre_gain=pre_gain_lin, fs=fs,
@@ -178,6 +178,7 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
                 "fs": fs, "max_gain_db": max_gain_db,
                 "efficacy": detailed.get("efficacy", {}),
                 "overboost_ceiling_db": round(overboost_ceiling_db, 1),
+                "overboost_ceiling_freq": round(overboost_ceiling_freq, 1),
             },
             "raw_measurement": raw_meas,
             "raw_target": targ_db,
@@ -356,26 +357,35 @@ def _flash_esp32(preset_name: str, task_id: str):
             raise RuntimeError(f"idf.py build failed:\n{r.stderr[-1000:]}")
         logger.info("ESP32 firmware built")
 
-        # 4. idf.py flash
-        flash_cmd = ["idf.py", "flash"]
-        port = _find_esp32_port()
-        if port:
-            flash_cmd.extend(["-p", port])
-            logger.info("Flashing on %s", port)
-        else:
-            logger.warning("No ESP32 port auto-detected — using idf.py default")
-        r = subprocess.run(
-            flash_cmd,
-            cwd=str(FIRMWARE_DIR),
-            capture_output=True, text=True, timeout=120)
-        if r.returncode != 0:
-            err = r.stderr[-500:] if r.stderr else "unknown error"
-            if "Permission denied" in err or "not readable" in err:
+        # 4. idf.py flash — retry once on transient serial errors.
+        max_attempts = 2
+        last_err = ""
+        for attempt in range(1, max_attempts + 1):
+            flash_cmd = ["idf.py", "flash"]
+            port = _find_esp32_port()
+            if port:
+                flash_cmd.extend(["-p", port])
+                logger.info("Flashing on %s (attempt %d/%d)", port, attempt, max_attempts)
+            else:
+                logger.warning("No ESP32 port auto-detected — using idf.py default")
+            r = subprocess.run(
+                flash_cmd,
+                cwd=str(FIRMWARE_DIR),
+                capture_output=True, text=True, timeout=120)
+            if r.returncode == 0:
+                break
+            last_err = r.stderr[-500:] if r.stderr else "unknown error"
+            if "Permission denied" in last_err or "not readable" in last_err:
                 raise RuntimeError(
                     f"Serial port permission denied. "
                     f"Use 'make flash ARGS={preset.name}' from a terminal, "
                     f"or add yourself to the dialout group.")
-            raise RuntimeError(f"idf.py flash failed:\n{err}")
+            if "serial noise" in last_err.lower() and attempt < max_attempts:
+                logger.warning("Transient serial error, retrying…")
+                continue
+            raise RuntimeError(f"idf.py flash failed:\n{last_err}")
+        else:
+            raise RuntimeError(f"idf.py flash failed after {max_attempts} attempts:\n{last_err}")
 
         result = {
             "status": "complete",

@@ -246,6 +246,11 @@ void BassEnhancer_reset(BassEnhancer *enh) {
     enh->right.hp_ring_pos = 0;
     enh->left.delay_pos    = 0;
     enh->right.delay_pos   = 0;
+    enh->left.hp_max      = 0.0f;
+    enh->left.hp_max_pos  = -1;
+    enh->right.hp_max     = 0.0f;
+    enh->right.hp_max_pos = -1;
+
 
     enh->left.loudness_state  = 0.0f;
     enh->right.loudness_state = 0.0f;
@@ -281,10 +286,11 @@ static float enhancer_process_channel(BassEnhancerChan *ch,
                                       const BassEnhancerCfg *cfg,
                                       float x)
 {
+#ifdef EQGEN_PROFILE
     uint32_t c0, c1, c2, c3;
     (void)c0; (void)c1; (void)c2; (void)c3;
-
     c0 = esp_cpu_get_cycle_count();
+#endif
 
     /* ── Stage 0: DC blocker ───────────────────────────────────── */
     x = dc_blocker_tick(&ch->dc_block, x);
@@ -299,26 +305,50 @@ static float enhancer_process_channel(BassEnhancerChan *ch,
 
     /* Bypass enhancer when cutoff ≤ 0 */
     if (cfg->cutoff_hz <= 0.0f) {
+#ifdef EQGEN_PROFILE
         c1 = esp_cpu_get_cycle_count();
-        c3 = c1;
         enh_profile.frames++;
-        enh_profile.cycles_total += (c3 - c0);
+        enh_profile.cycles_total += (c1 - c0);
         enh_profile.cycles_eq     += (c1 - c0);
+#endif
         return eq_out;
     }
 
+#ifdef EQGEN_PROFILE
     c1 = esp_cpu_get_cycle_count();
+#endif
 
     /* ── Lookahead: LR4 HP filter on current sample ──────────── */
     float hp_now = biquad_cascade(ch->hp_lookahead, LR4_SECTIONS, eq_out);
-    ch->hp_ring[ch->hp_ring_pos] = fabsf(hp_now);
+    float hp_abs = fabsf(hp_now);
+
+    /* Incremental running max — avoids O(LOOKAHEAD_LEN) scan every sample.
+     * The ring position we're about to write is the oldest sample in the
+     * window; when the current max lives there and gets overwritten, we
+     * rescan.  Amortized O(1). */
+    if (hp_abs >= ch->hp_max || ch->hp_max_pos < 0) {
+        ch->hp_max = hp_abs;
+        ch->hp_max_pos = ch->hp_ring_pos;
+    } else if (ch->hp_max_pos == ch->hp_ring_pos) {
+        /* Overwriting the max — rescan */
+        ch->hp_max = 0.0f;
+        for (int i = 0; i < LOOKAHEAD_LEN; i++) {
+            if (ch->hp_ring[i] > ch->hp_max) {
+                ch->hp_max = ch->hp_ring[i];
+                ch->hp_max_pos = i;
+            }
+        }
+        /* Also scan the incoming sample (not yet in ring) */
+        if (hp_abs > ch->hp_max) {
+            ch->hp_max = hp_abs;
+            ch->hp_max_pos = ch->hp_ring_pos;
+        }
+    }
+
+    ch->hp_ring[ch->hp_ring_pos] = hp_abs;
     ch->hp_ring_pos = (ch->hp_ring_pos + 1) % LOOKAHEAD_LEN;
 
-    /* Find upcoming peak */
-    float upcoming = 0.0f;
-    for (int i = 0; i < LOOKAHEAD_LEN; i++) {
-        if (ch->hp_ring[i] > upcoming) upcoming = ch->hp_ring[i];
-    }
+    float upcoming = ch->hp_max;
 
     /* ── Delay line: get delayed eq_out, write current ──────────── */
     float eq_delayed = ch->eq_delay[(ch->delay_pos + 1) % LOOKAHEAD_LEN];
@@ -459,7 +489,9 @@ static float enhancer_process_channel(BassEnhancerChan *ch,
         ch->harm_amp_slew = 0.0f;
     }
 
+#ifdef EQGEN_PROFILE
     c2 = esp_cpu_get_cycle_count();
+#endif
 
     /* ── Bass-sum limiter (replaces tanh) ────────────────────────
      * When dry_hp + bass_sum would exceed 1.0, attenuate only the
@@ -497,14 +529,15 @@ static float enhancer_process_channel(BassEnhancerChan *ch,
         out += ch->loudness_state * cfg->loudness_boost;
     }
 
+#ifdef EQGEN_PROFILE
     c3 = esp_cpu_get_cycle_count();
-    /* ── Accumulate profile ─────────────────────────────────────── */
     enh_profile.frames++;
     enh_profile.cycles_total += (c3 - c0);
     enh_profile.cycles_eq     += (c1 - c0);
     enh_profile.cycles_env    += (c2 - c1);
     enh_profile.cycles_mix    += (c3 - c2);
     enh_profile.cycles_harm   += (c2 - c1) / 2;
+#endif
 
     return out;
 }

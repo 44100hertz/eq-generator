@@ -103,6 +103,8 @@ typedef struct {
     /* Lookahead */
     float       hp_ring[LOOKAHEAD_LEN];  /* |dry_hp| window         */
     int         hp_ring_pos;
+    float       hp_max;              /* running max of hp_ring         */
+    int         hp_max_pos;          /* index of current max (-1 = stale) */
     float       eq_delay[LOOKAHEAD_LEN]; /* delay line for eq_out   */
     int         delay_pos;
 } BassEnhancerChan;

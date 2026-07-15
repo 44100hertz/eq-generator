@@ -10,7 +10,8 @@
  */
 
 /* ── Profiling: comment out for production builds ─────────────── */
-// #define EQGEN_PROFILE
+#define EQGEN_PROFILE
+
 
 #include <math.h>
 #include <stdbool.h>
@@ -22,6 +23,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_cpu.h"
 
 #include "enhancer.h"
 #include "eq_coeffs.h"
@@ -241,7 +243,8 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
 
     /* ── DSP processing ── */
 #ifdef EQGEN_PROFILE
-    int64_t t0 = esp_timer_get_time();
+    uint32_t cy_cb_start = esp_cpu_get_cycle_count();
+    uint32_t cy_convert = 0, cy_enhancer = 0, cy_output = 0;
 #endif
 
     const int16_t *in = (const int16_t *)data;
@@ -259,6 +262,9 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
     static uint32_t out_idx = 0;
 
     for (uint32_t i = 0; i < frames; i++) {
+#ifdef EQGEN_PROFILE
+        uint32_t cy_p0 = esp_cpu_get_cycle_count();
+#endif
         /* int16 → float [-1, 1] */
         float l = (float)in[i * 2]     / 32768.0f;
         float r = (float)in[i * 2 + 1] / 32768.0f;
@@ -268,7 +274,14 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
         l *= vol_f;
         r *= vol_f;
 
+#ifdef EQGEN_PROFILE
+        uint32_t cy_p1 = esp_cpu_get_cycle_count();
+#endif
         BassEnhancer_process_stereo(&enhancer, &l, &r);
+
+#ifdef EQGEN_PROFILE
+        uint32_t cy_p2 = esp_cpu_get_cycle_count();
+#endif
 
         /* Safety net: if enhancer produced NaN/Inf, zero it.
          * This prevents undefined behavior in the float→int cast. */
@@ -295,6 +308,13 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
             r_err = 0.0f;
         }
 
+#ifdef EQGEN_PROFILE
+        uint32_t cy_p3 = esp_cpu_get_cycle_count();
+        cy_convert  += cy_p1 - cy_p0;
+        cy_enhancer += cy_p2 - cy_p1;
+        cy_output   += cy_p3 - cy_p2;
+#endif
+
         out_buf[out_idx++] = (int16_t)li;
         out_buf[out_idx++] = (int16_t)ri;
 
@@ -313,18 +333,58 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
     }
 
 #ifdef EQGEN_PROFILE
-    int64_t elapsed_us = esp_timer_get_time() - t0;
-    static int64_t total_us = 0, total_frames = 0;
-    total_us += elapsed_us;
-    total_frames += frames;
-    if (total_frames >= 44100) {
-        float load_pct = (float)total_us / 10000.0f;
-        float us_per_frame = (float)total_us / (float)total_frames;
-        ESP_LOGI(TAG, "DSP: %.1f%% CPU, %.1f us/frame (%lu frames)",
-                 load_pct, us_per_frame, (unsigned long)total_frames);
+    uint32_t cy_cb_end = esp_cpu_get_cycle_count();
+    uint32_t cy_elapsed = cy_cb_end - cy_cb_start;
+
+    static uint32_t acc_frames = 0;
+    static uint32_t acc_convert = 0, acc_enhancer = 0, acc_output = 0;
+    static uint64_t acc_cy_elapsed = 0;
+    static uint32_t underrun_count = 0;
+    static uint32_t max_cy_buf = 0;
+
+    acc_convert  += cy_convert;
+    acc_enhancer += cy_enhancer;
+    acc_output   += cy_output;
+    acc_frames   += frames;
+    acc_cy_elapsed += cy_elapsed;
+
+    if (cy_elapsed > max_cy_buf) max_cy_buf = cy_elapsed;
+
+    /* Deadline: one buffer's worth of CPU cycles at this sample rate. */
+    uint64_t cy_deadline = (uint64_t)frames * CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ
+                         * 1000000ULL / (uint64_t)rate;
+    if (cy_elapsed > cy_deadline) {
+        underrun_count++;
+    }
+
+    if (acc_frames >= (uint32_t)rate) {
+        /* Per-frame cycle budget at this rate */
+        float cy_budget = (float)(CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ * 1000000ULL)
+                        / (float)rate;
+        float avg_cpu  = (float)acc_cy_elapsed * 100.0f
+                       / (float)(acc_frames * (uint64_t)(uint32_t)cy_budget);
+        float pct_convert  = (float)acc_convert * 100.0f
+                           / (float)(acc_frames * (uint64_t)(uint32_t)cy_budget);
+        float pct_enhancer = (float)acc_enhancer * 100.0f
+                           / (float)(acc_frames * (uint64_t)(uint32_t)cy_budget);
+        float pct_output   = (float)acc_output * 100.0f
+                           / (float)(acc_frames * (uint64_t)(uint32_t)cy_budget);
+        ESP_LOGI(TAG,
+                 "DSP: avg %.0f%% CPU  max_cb=%.0f cy  underruns=%lu",
+                 (double)avg_cpu,
+                 (double)max_cy_buf, (unsigned long)underrun_count);
+        ESP_LOGI(TAG,
+                 "  phases / frame budget (%.0f cy):  "
+                 "i2s_in %.1f%%  dsp %.1f%%  i2s_out %.1f%%",
+                 (double)cy_budget,
+                 (double)pct_convert, (double)pct_enhancer, (double)pct_output);
         enhancer_profile_report();
-        total_us = 0;
-        total_frames = 0;
+        acc_frames     = 0;
+        acc_convert    = 0;
+        acc_enhancer   = 0;
+        acc_output     = 0;
+        acc_cy_elapsed = 0;
+        max_cy_buf     = 0;
     }
 #endif
 }
