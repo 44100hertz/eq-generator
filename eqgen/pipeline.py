@@ -161,15 +161,24 @@ def run_pipeline(
     cv_at_eval = _smooth_kernel(meas_freqs, meas_cv, meas_cv, eval_freqs,
                                 bandwidth_oct=0.3)
     bw_meas = np.maximum(BASE_BW * (cv_at_eval / MIN_CV) ** smooth_exponent, 0.01)
-    meas_vals = _smooth_kernel(meas_freqs, meas_raw, meas_cv, eval_freqs,
-                               bandwidth_oct=bw_meas, cv_penalty=CV_PENALTY)
 
     # Spectral subtraction (power domain — correct for uncorrelated noise)
+    # Applied at raw FFT bin resolution, before smoothing.
     if noise_freqs is not None:
-        noise_vals = _smooth_kernel(noise_freqs, noise_raw, noise_cv, eval_freqs,
-                                    cv_penalty=CV_PENALTY)
-        meas_vals = np.sqrt(np.maximum(meas_vals**2 - noise_vals**2,
-                                       meas_vals**2 * 0.0001))
+        # Interpolate noise to measurement frequencies if they differ
+        if len(noise_freqs) == len(meas_freqs) and np.allclose(noise_freqs, meas_freqs):
+            noise_at_meas = noise_raw
+        else:
+            noise_at_meas = 10.0 ** (np.interp(np.log10(meas_freqs),
+                                               np.log10(noise_freqs),
+                                               np.log10(np.maximum(noise_raw, 1e-20))) / 20.0)
+        meas_sub_raw = np.sqrt(np.maximum(meas_raw**2 - noise_at_meas**2,
+                                          meas_raw**2 * 0.0001))
+    else:
+        meas_sub_raw = meas_raw
+
+    meas_vals = _smooth_kernel(meas_freqs, meas_sub_raw, meas_cv, eval_freqs,
+                               bandwidth_oct=bw_meas, cv_penalty=CV_PENALTY)
 
     # 6. Target from WAV (linear fit in dB vs log-freq) or flat 0 dB line.
     #    House curve is an additive adjustment applied on top.
@@ -226,6 +235,8 @@ def run_pipeline(
         noise_data = []
         if noise_stats is not None:
             noise_data = [{"freq": s["freq"], "cv": s["cv"]} for s in noise_stats]
+        meas_sub_raw_json = [{"freq": float(f), "db": ratio_to_db(v)}
+                            for f, v in zip(meas_freqs, meas_sub_raw)]
         meas_sub = [{"freq": float(f), "db": ratio_to_db(v)}
                     for f, v in zip(eval_freqs, meas_vals)]
         targ_sub = [{"freq": float(f), "db": float(d)}
@@ -240,7 +251,7 @@ def run_pipeline(
             "raw_measurement": raw_resp,
             "raw_target": raw_target,
             "noise_cv": cv_data,
-            "noise_floor": noise_data,
+            "meas_subtracted_raw": meas_sub_raw_json,
             "meas_subtracted": meas_sub,
             "target_resampled": targ_sub,
         }

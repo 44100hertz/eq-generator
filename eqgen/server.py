@@ -196,6 +196,7 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
             "raw_measurement": raw_meas,
             "raw_target": targ_db,
             "meas_smoothed": detailed["meas_subtracted"],
+            "meas_subtracted_raw": detailed["meas_subtracted_raw"],
             "targ_smoothed": detailed["target_resampled"],
             "correction": [{"freq": float(f), "db": float(d)} for f, d in zip(freqs, gains_db)],
             "error": error,
