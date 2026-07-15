@@ -34,3 +34,4 @@ src/bench_sweep_*
 prototypes/fft_eq_test
 firmware/tests/quick_bench/build/
 .pi-subagents/
+presets/_web_apply.json
