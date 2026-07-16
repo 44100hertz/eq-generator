@@ -12,7 +12,7 @@ Exports:
 
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -281,6 +281,7 @@ def design_eq(
     fs: float,
     max_bands: int = MAX_IIR_BANDS,
     min_peaking_freq: float = 0.0,
+    error_weight: Optional[Callable[[float], float]] = None,
 ) -> Tuple[List[float], List[dict], np.ndarray, np.ndarray, np.ndarray]:
     """Design an IIR EQ to match a target curve using cascaded biquads.
 
@@ -288,7 +289,8 @@ def design_eq(
     """
     fit = fit_eq_curve(freqs, target_db, fs, max_bands=max_bands,
                        min_freq=freqs[0], max_freq=freqs[-1],
-                       min_peaking_freq=min_peaking_freq if min_peaking_freq > 0 else freqs[0])
+                       min_peaking_freq=min_peaking_freq if min_peaking_freq > 0 else freqs[0],
+                       error_weight=error_weight)
 
     coeffs = []
     for bc in fit.biquads:

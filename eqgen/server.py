@@ -48,6 +48,7 @@ except ImportError:
 sys.path.insert(0, str(ROOT))
 
 from eqgen.presets import Preset, PresetManager, PRESETS_DIR, MAX_IIR_BANDS, load_house_curves, list_house_curve_names, get_house_curve
+from eqgen.model import perceptual_weight
 from eqgen.pipeline import run_pipeline
 from eqgen.eq_fit import cascade_response_db, BiquadCoeffs, FitResult, fit_eq_curve
 from eqgen.web_ui import load_html
@@ -107,7 +108,8 @@ def _run_pipeline_for_preset(preset_dict: dict, task_id: str):
             fit_result = fit_eq_curve(freqs, gains_db, fs,
                                       max_bands=preset.max_bands,
                                       min_freq=freqs[0], max_freq=freqs[-1],
-                                      min_peaking_freq=freqs[0])
+                                      min_peaking_freq=freqs[0],
+                                      error_weight=perceptual_weight)
             q28_floats = fit_result.biquads
             iir_response_db = cascade_response_db(q28_floats, freqs_hires, fs)
 

@@ -15,7 +15,7 @@ All coefficients are stored normalized (a0 = 1): [b0, b1, b2, a1, a2].
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import List, Tuple, Dict, Optional
+from typing import Callable, List, Tuple, Dict, Optional
 
 from eqgen.presets import MAX_IIR_BANDS
 
@@ -181,6 +181,7 @@ def fit_eq_curve(
     q_range: Tuple[float, float] = (0.3, 32.0),
     stop_db: float = 0.3,
     n_eval: int = 512,
+    error_weight: Optional[Callable[[float], float]] = None,
 ) -> FitResult:
     """Fit a target gain curve (dB) to cascaded peaking biquads.
 
@@ -205,6 +206,9 @@ def fit_eq_curve(
         gain_range: (min_gain_db, max_gain_db) per band.
         q_range: (min_Q, max_Q) search range.
         stop_db: stop when max |residual| falls below this threshold.
+        error_weight: if provided, f(Hz)→weight used for (gain,Q) selection
+            and the stop criterion.  Band placement itself always uses raw
+            residual so the fitter attacks the largest physical error first.
 
     Returns:
         FitResult with biquads, metadata, and final residual.
@@ -217,11 +221,21 @@ def fit_eq_curve(
     eval_target = np.interp(eval_freqs, freqs, target_db)
     eval_mask = np.ones(n_eval, dtype=bool)  # all points already in [min,max]
 
+    # Perceptual error weight: rescale to mean=1 so stop_db keeps its meaning.
+    if error_weight is not None:
+        raw_w = np.array([error_weight(float(f)) for f in eval_freqs])
+        eval_weights = raw_w / np.mean(raw_w)
+    else:
+        eval_weights = np.ones(n_eval)
+
     cascade_db = np.zeros(n_eval)
     residual = eval_target.copy()
-    prev_rms_err = float(np.sqrt(np.mean(residual ** 2)))
+    prev_rms_err = float(np.sqrt(np.average(residual ** 2, weights=eval_weights)))
 
     for i in range(max_bands):
+        # Band placement: use raw residual (fix the biggest problem).
+        # The weight is applied in _search_band_params (gain/Q choice)
+        # and in the RMS-based stop criterion, not here.
         actionable = np.abs(residual)
         too_low = eval_freqs < min_peaking_freq
         actionable[too_low] = 0.0
@@ -235,10 +249,10 @@ def fit_eq_curve(
 
         best_gain, best_Q, best_err = _search_band_params(
             f0, error_db, cascade_db, eval_target, eval_freqs, fs, eval_mask,
-            gain_range=gain_range, q_range=q_range,
+            gain_range=gain_range, q_range=q_range, weights=eval_weights,
         )
 
-        current_rms = float(np.sqrt(np.mean(residual ** 2)))
+        current_rms = float(np.sqrt(np.average(residual ** 2, weights=eval_weights)))
         if current_rms - best_err < 0.01 and current_rms < stop_db * 2.0:
             break
 
@@ -249,7 +263,7 @@ def fit_eq_curve(
 
         # Early-stop: reject band if RMS error increased (biquad made things
         # worse overall, even if it reduced a single peak)
-        new_rms_err = float(np.sqrt(np.mean(new_residual ** 2)))
+        new_rms_err = float(np.sqrt(np.average(new_residual ** 2, weights=eval_weights)))
         if new_rms_err > prev_rms_err:
             break
 
@@ -308,10 +322,13 @@ def _peaking_response_db(f0: float, gain_db: float, Q: float,
 
 
 def _rms_error_db(cascade_db: np.ndarray, peaking_db: np.ndarray,
-                  target_db: np.ndarray, mask: np.ndarray) -> float:
+                  target_db: np.ndarray, mask: np.ndarray,
+                  weights: Optional[np.ndarray] = None) -> float:
     """RMS error after adding a peaking filter to the current cascade."""
     new_db = cascade_db + peaking_db
     err = new_db - target_db
+    if weights is not None:
+        return float(np.sqrt(np.average(err[mask] ** 2, weights=weights[mask])))
     return float(np.sqrt(np.mean(err[mask] ** 2)))
 
 
@@ -319,7 +336,8 @@ def _golden_search_Q(f0: float, gain_db: float, cascade_db: np.ndarray,
                      target_db: np.ndarray, freqs: np.ndarray, fs: float,
                      mask: np.ndarray,
                      q_lo: float = 0.3, q_hi: float = 6.0,
-                     tol: float = 0.05, max_iter: int = 15) -> float:
+                     tol: float = 0.05, max_iter: int = 15,
+                     weights: Optional[np.ndarray] = None) -> float:
     """Golden-section search for optimal Q at given (f0, gain_db).
 
     Assumes the RMS error as a function of Q is unimodal.
@@ -334,7 +352,7 @@ def _golden_search_Q(f0: float, gain_db: float, cascade_db: np.ndarray,
     test_errs = np.array([
         _rms_error_db(cascade_db,
                       _peaking_response_db(f0, gain_db, q, freqs, fs),
-                      target_db, mask)
+                      target_db, mask, weights)
         for q in test_Qs
     ])
 
@@ -353,10 +371,10 @@ def _golden_search_Q(f0: float, gain_db: float, cascade_db: np.ndarray,
 
     ec = _rms_error_db(cascade_db,
                        _peaking_response_db(f0, gain_db, c, freqs, fs),
-                       target_db, mask)
+                       target_db, mask, weights)
     ed = _rms_error_db(cascade_db,
                        _peaking_response_db(f0, gain_db, d, freqs, fs),
-                       target_db, mask)
+                       target_db, mask, weights)
 
     for _ in range(max_iter):
         if b - a < tol:
@@ -368,7 +386,7 @@ def _golden_search_Q(f0: float, gain_db: float, cascade_db: np.ndarray,
             c = b - (b - a) / _PHI
             ec = _rms_error_db(cascade_db,
                                _peaking_response_db(f0, gain_db, c, freqs, fs),
-                               target_db, mask)
+                               target_db, mask, weights)
         else:
             a = c
             c = d
@@ -376,7 +394,7 @@ def _golden_search_Q(f0: float, gain_db: float, cascade_db: np.ndarray,
             d = a + (b - a) / _PHI
             ed = _rms_error_db(cascade_db,
                                _peaking_response_db(f0, gain_db, d, freqs, fs),
-                               target_db, mask)
+                               target_db, mask, weights)
 
     return (a + b) / 2.0
 
@@ -386,6 +404,7 @@ def _search_band_params(f0: float, residual_at_f0: float,
                          freqs: np.ndarray, fs: float, mask: np.ndarray,
                          gain_range: Tuple[float, float] = (-60.0, 60.0),
                          q_range: Tuple[float, float] = (0.3, 32.0),
+                         weights: Optional[np.ndarray] = None,
                          ) -> Tuple[float, float, float]:
     """Search for optimal (gain_db, Q) for a peaking filter at f0.
 
@@ -407,9 +426,10 @@ def _search_band_params(f0: float, residual_at_f0: float,
 
         q_opt = _golden_search_Q(f0, float(g), cascade_db, target_db,
                                   freqs, fs, mask,
-                                  q_lo=q_range[0], q_hi=q_range[1])
+                                  q_lo=q_range[0], q_hi=q_range[1],
+                                  weights=weights)
         pk_db = _peaking_response_db(f0, float(g), q_opt, freqs, fs)
-        err = _rms_error_db(cascade_db, pk_db, target_db, mask)
+        err = _rms_error_db(cascade_db, pk_db, target_db, mask, weights)
 
         if err < best_err:
             best_err = err

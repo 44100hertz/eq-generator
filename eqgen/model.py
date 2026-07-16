@@ -147,6 +147,42 @@ def ear_sensitivity(f: float) -> float:
     return _iso226_sensitivity(f, phon=60.0)
 
 
+# ── Perceptual weighting (ear × music spectrum) ───────────────────
+
+# Long-term average music spectrum slope: ~-4.5 dB/octave relative to 1 kHz.
+# This is the approximate tilt observed across large mixed-music corpora —
+# slightly steeper than pink noise (-3 dB/oct) because instrument fundamentals
+# cluster at lower frequencies while harmonics roll off.
+_MUSIC_TILT_DB_PER_OCTAVE = 4.5
+
+
+def music_spectrum_weight(f: float) -> float:
+    """Relative energy in average music at frequency f (1 kHz = 1.0).
+
+    Models the long-term average spectrum of mixed music as a simple
+    log-linear slope.  Values > 1 mean more energy than at 1 kHz.
+    """
+    octaves = np.log2(max(f, 1.0) / 1000.0)
+    db = -_MUSIC_TILT_DB_PER_OCTAVE * octaves
+    return float(10.0 ** (db / 20.0))
+
+
+def perceptual_weight(f: float) -> float:
+    """Combined perceptual importance of frequency f.
+
+    ear_sensitivity(f) × music_spectrum_weight(f).
+
+    Uses 80 phon (typical listening level) rather than 60 phon — the
+    equal-loudness contours flatten significantly at higher SPL, and
+    music is rarely auditioned near threshold.
+
+    Peak is ~500 Hz where both curves cross; rolls off at extremes.
+    """
+    from eqgen.iso226 import sensitivity as _iso226_sensitivity
+    ear = _iso226_sensitivity(f, phon=80.0)
+    return ear * music_spectrum_weight(f)
+
+
 # ── Harmonic efficacy: compute h2/h3 from measurement data ────
 
 def compute_harmonic_efficacy(

@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from eqgen.eq_fit import fit_eq_curve
+from eqgen.model import perceptual_weight
 from eqgen.pipeline import run_pipeline
 from eqgen.dsp import pre_gain_from_max_gain
 from eqgen.presets import MAX_IIR_BANDS
@@ -37,7 +38,8 @@ SPEAKERS = {
 def _fit_header_bands(freqs, shifted_db, fs, max_bands, f_min, f_max):
     """Fit biquads at a single sample rate, return (biquads, bands, n_bands)."""
     fit = fit_eq_curve(freqs, shifted_db, fs, max_bands=max_bands,
-                       min_freq=f_min, max_freq=f_max)
+                       min_freq=f_min, max_freq=f_max,
+                       error_weight=perceptual_weight)
     return fit.biquads, fit.bands, fit.n_bands
 
 

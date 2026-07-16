@@ -36,6 +36,7 @@ from eqgen.pipeline import run_pipeline, design_eq
 from eqgen.dsp import pre_gain_from_max_gain
 from eqgen.eq_fit import cascade_response_db, BiquadCoeffs
 from eqgen.presets import MAX_IIR_BANDS, get_house_curve
+from eqgen.model import perceptual_weight
 from eqgen.smart_volume import SV_LOUDNESS_FC, SV_LOUDNESS_Q, FM_SLOPE
 
 MEAS_DIR = ROOT / "measurements"
@@ -272,7 +273,8 @@ def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
             coeffs, bands, _, fit_target, fitted_db = design_eq(
                 eq_freqs, target_db, float(rate),
                 max_bands=max_bands,
-                min_peaking_freq=fc)
+                min_peaking_freq=fc,
+                error_weight=perceptual_weight)
 
             print(f"  {len(bands)} bands")
             err = fitted_db - fit_target
