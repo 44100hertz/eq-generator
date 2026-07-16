@@ -296,6 +296,18 @@ async function flashESP32() {
     setStatus('Measurement and target paths required', 'error'); return;
   }
 
+  // Guard: ESP32 firmware has a hard limit of 16 IIR bands.
+  const nBands = (state.pipelineResult && state.pipelineResult.metrics
+    && state.pipelineResult.metrics.n_bands) || 0;
+  if (p.max_bands > 16) {
+    alert(`Cannot flash: max_bands is set to ${p.max_bands}, but the ESP32 firmware supports at most 16 bands.`);
+    return;
+  }
+  if (nBands > 16) {
+    alert(`Cannot flash: the current EQ curve uses ${nBands} bands, but the ESP32 firmware supports at most 16. Reduce max_bands and re-analyze.`);
+    return;
+  }
+
   if (!confirm('Flash ESP32 with this EQ curve? This will rebuild the firmware and flash via USB.')) return;
 
   // Save form state to temp preset, then flash by name only
@@ -519,7 +531,7 @@ function renderEditor() {
       <div class="form-group"><label>Target WAV</label><input id="fTarget" value="${esc(p.target || '')}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Noise WAV (optional)</label><input id="fNoise" value="${esc(p.noise || '')}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Cutoff fc (Hz)</label><input id="fFc" type="number" step="1" min="20" max="200" value="${p.fc ?? ''}" oninput="scheduleAnalyze()"></div>
-      <div class="form-group"><label>Max Bands</label><input id="fMaxBands" type="number" step="1" min="1" max="8" value="${p.max_bands ?? __MAX_IIR_BANDS__}" oninput="scheduleAnalyze()"></div>
+      <div class="form-group"><label>Max Bands</label><input id="fMaxBands" type="number" step="1" min="1" max="32" value="${p.max_bands ?? __MAX_IIR_BANDS__}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Smooth Exponent</label><input id="fSmooth" type="number" step="0.1" min="0" max="4" value="${p.smooth_exponent ?? 1.0}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Release (s)</label><input id="fRelease" type="number" step="0.01" min="0.01" max="2" value="${p.release ?? 0.2}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Bluetooth ID</label><input id="fBtId" value="${esc(p.bluetooth_id || '')}" placeholder="e.g. Living Room Speaker" oninput="scheduleAnalyze()"></div>

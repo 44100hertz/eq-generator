@@ -345,6 +345,13 @@ def _flash_esp32(preset_name: str, task_id: str):
 
         preset = pm.load(preset_name)
 
+        # Guard: ESP32 firmware has a hard limit of 16 IIR bands.
+        if preset.max_bands > 16:
+            raise ValueError(
+                f"Cannot flash: max_bands is {preset.max_bands}, "
+                f"but the ESP32 firmware supports at most 16 bands."
+            )
+
         curve_data = get_house_curve(preset.house_curve) if preset.house_curve else None
 
         # 1. Run pipeline + IIR fit
@@ -361,6 +368,13 @@ def _flash_esp32(preset_name: str, task_id: str):
             overboost_db=preset.overboost_db,
         )
         cfg["release_secs"] = preset.release
+
+        # Guard: verify pipeline didn't produce more bands than the ESP can handle.
+        if len(bands_44) > 16:
+            raise RuntimeError(
+                f"Pipeline produced {len(bands_44)} bands, "
+                f"but the ESP32 firmware supports at most 16."
+            )
 
         # 2. Generate eq_coeffs.h + sfx_data.h
         generate_eq_header(bq_q28_44, bq_q28_48, bands_44, bands_48, cfg,
