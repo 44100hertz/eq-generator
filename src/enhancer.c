@@ -104,6 +104,9 @@ void dsp_pipe_cfg_init(DspPipeCfg *cfg,
 
     /* Pre-compute limiter release (49 ms) */
     cfg->lim_release_coeff = 1.0f - expf(-1.0f / (fs * 0.049f));
+
+    /* Pre-compute full-band limiter release (3.0 s) */
+    cfg->fb_release_coeff = 1.0f - expf(-1.0f / (fs * 3.0f));
     /* Pre-compute Chebyshev input scales */
     float h_sum = h2_amp + h3_amp;
     cfg->h2_scale = (h_sum > 1e-6f) ? h2_amp / h_sum : 0.0f;
@@ -194,6 +197,8 @@ void dsp_pipe_init(DspPipe *enh,
     enh->right.harm_amp_slew = 0.0f;
     enh->left.bass_gain_red = 1.0f;
     enh->right.bass_gain_red = 1.0f;
+    enh->left.fb_env = 0.0f;
+    enh->right.fb_env = 0.0f;
 
 
     /* Initialize envelope */
@@ -229,6 +234,8 @@ void dsp_pipe_reset(DspPipe *enh) {
     enh->right.harm_amp_slew = 0.0f;
     enh->left.bass_gain_red  = 1.0f;
     enh->right.bass_gain_red = 1.0f;
+    enh->left.fb_env  = 0.0f;
+    enh->right.fb_env = 0.0f;
 
     for (int i = 0; i < LOOKAHEAD_LEN; i++) {
         enh->left.hp_ring[i]  = 0.0f;
@@ -525,6 +532,23 @@ static float dsp_pipe_process_channel(DspPipeChan *ch,
         float diff = out - ch->loudness_state;
         ch->loudness_state += cfg->loudness_alpha * diff;
         out += ch->loudness_state * cfg->loudness_boost;
+    }
+
+    /* ── Full-band peak limiter ─────────────────────────────────
+     * Instant attack / 3-second release.  Only engages when the
+     * bass-sum limiter can't protect against treble transients.
+     * At normal gains this never fires — it's a safety net for
+     * aggressive overboost configurations.                    */
+    {
+        float peak = fabsf(out);
+        if (peak > ch->fb_env) {
+            ch->fb_env = peak;
+        } else {
+            ch->fb_env += (peak - ch->fb_env) * cfg->fb_release_coeff;
+        }
+        if (ch->fb_env > 1.0f) {
+            out /= ch->fb_env;
+        }
     }
 
 #ifdef EQGEN_PROFILE

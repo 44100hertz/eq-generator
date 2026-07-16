@@ -11,7 +11,7 @@
  *      w = (target−room)/(target·(1−h)), blend fundamental ↔ harmonics
  *   7. Mix: LR4 HP + (1−w)·lp_fund + harm
  *   8. Loudness shelf (optional)
- *   9. Soft output clamp (tanh)
+ *   9. Full-band peak limiter (instant attack, slow release)
  *
  * Volume scaling MUST run before this enhancer so the headroom
  * budget is relative to the already-attenuated signal.
@@ -55,6 +55,7 @@ typedef struct {
     float   release_coeff;      /* exp(-1/(fs*release))                */
     float   env_smooth_alpha;   /* smoothed envelope tracking rate     */
     float   lim_release_coeff;  /* limiter release (49ms) one-pole coeff */
+    float   fb_release_coeff;   /* full-band limiter release (~3s) coeff  */
     float   pre_gain;           /* gain before EQ                      */
     float   h2_scale;           /* h2_amp / (h2_amp + h3_amp)        */
     float   h3_scale;           /* h3_amp / (h2_amp + h3_amp)        */
@@ -97,6 +98,9 @@ typedef struct {
 
     /* Bass-sum limiter */
     float       bass_gain_red;    /* gain reduction factor, 0..1       */
+
+    /* Full-band peak limiter */
+    float       fb_env;           /* peak envelope for full-band limit */
 
     /* Lookahead */
     float       hp_ring[LOOKAHEAD_LEN];  /* |dry_hp| window         */
