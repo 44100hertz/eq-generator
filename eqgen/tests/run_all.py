@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Run all Python analysis scripts in sequence.
+Run all eqgen tests in sequence.
 
 Usage:
     python run_all.py              # run everything
-    python run_all.py --skip MODEL  # skip model-based analyses
-    python run_all.py --skip DSP    # skip DSP tests
-    python run_all.py --only harmonics  # run only a specific module
+    python run_all.py --skip HEURISTIC  # skip heuristic tests
+    python run_all.py --skip INTEG      # skip integration tests
+    python run_all.py --only roundtrip  # run only a specific module
 """
 
 import sys
@@ -14,42 +14,35 @@ import argparse
 import time
 from pathlib import Path
 
-# Add the project root to sys.path so modules can import from eqgen.*
 ROOT = str(Path(__file__).resolve().parent.parent.parent)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-# ── Analysis modules (in run order) ────────────────────────────────────
-# Each module exposes a run() function.
+# ── Test modules (in run order) ────────────────────────────────────────
 
 MODULES = {
-    # DSP tests — verify the enhancer's signal-processing behavior
-    "harmonics":   ("eqgen.tests.test_harmonics",   "Harmonic purity & linearity"),
-    "gain_safety": ("eqgen.tests.test_gain_safety", "Gain safety on real measurements"),
+    # Heuristic tests — verify algorithm correctness independent of the DSP pipeline
+    "eq_pipeline":        ("eqgen.tests.test_eq_pipeline",       "EQ curve → IIR fit"),
+    "fullband_fit":       ("eqgen.tests.test_fullband_fit",      "Full-band IIR fit (synthetic)"),
+    "real_fullband_fit":  ("eqgen.tests.test_real_fullband_fit", "Full-band IIR fit (real data)"),
 
-    # Model tests — verify the C enhancer pipeline
-    "model":       ("eqgen.tests.test_model",       "C enhancer verification"),
-    "evenness":    ("eqgen.tests.test_evenness",    "Bass evenness (C enhancer sweep)"),
-
-    # Integration tests — full pipeline end-to-end
-    "roundtrip":   ("eqgen.tests.test_roundtrip",   "Round-trip pipeline verification"),
-    "31hz":        ("eqgen.tests.test_31hz",        "31 Hz end-to-end tone test"),
+    # Integration tests — full pipeline end-to-end through the C DSP
+    "roundtrip":          ("eqgen.tests.test_roundtrip",         "Round-trip pipeline"),
+    "input_signals":      ("eqgen.tests.test_input_signals",     "Input signal tones through C DSP"),
 }
 
-# ── Group definitions ──────────────────────────────────────────────────
-DSP_MODULES    = {"harmonics", "gain_safety"}
-MODEL_MODULES  = {"model", "evenness"}
-INTEG_MODULES  = {"roundtrip", "31hz"}
+HEURISTIC_MODULES = {"eq_pipeline", "fullband_fit", "real_fullband_fit"}
+INTEG_MODULES     = {"roundtrip", "input_signals"}
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run all Python analysis scripts for eqgen."
+        description="Run all eqgen tests."
     )
     parser.add_argument(
         "--skip", nargs="*", default=[],
-        choices=["DSP", "MODEL", "INTEG"] + list(MODULES.keys()),
-        help="Skip specific groups or modules (DSP, MODEL, INTEG, or module names)"
+        choices=["HEURISTIC", "INTEG"] + list(MODULES.keys()),
+        help="Skip specific groups or modules (HEURISTIC, INTEG, or module names)"
     )
     parser.add_argument(
         "--only", nargs="*", default=None,
@@ -63,43 +56,33 @@ def main():
     args = parser.parse_args()
 
     if args.list:
-        print("Available modules:")
-        print(f"\n  DSP tests (verify signal processing):")
-        for name in DSP_MODULES:
+        print("Heuristic tests (algorithm correctness):")
+        for name in HEURISTIC_MODULES:
             print(f"    {name:20s}  {MODULES[name][1]}")
-        print(f"\n  Model tests (verify psychoacoustic model):")
-        for name in MODEL_MODULES:
-            print(f"    {name:20s}  {MODULES[name][1]}")
-        print(f"\n  Integration tests (full pipeline):")
+        print(f"\nIntegration tests (full pipeline):")
         for name in INTEG_MODULES:
             print(f"    {name:20s}  {MODULES[name][1]}")
         return
 
-    # Determine which modules to run
     if args.only:
         selected = set(args.only)
     else:
         selected = set(MODULES.keys())
 
-    # Apply skips
     for skip in args.skip:
-        if skip == "DSP":
-            selected -= DSP_MODULES
-        elif skip == "MODEL":
-            selected -= MODEL_MODULES
+        if skip == "HEURISTIC":
+            selected -= HEURISTIC_MODULES
         elif skip == "INTEG":
             selected -= INTEG_MODULES
         else:
             selected.discard(skip)
 
-    # Sort in the order defined above
     ordered = [name for name in MODULES if name in selected]
 
     if not ordered:
         print("No modules selected to run.")
         return
 
-    # ── Run each module ────────────────────────────────────────────────
     total_start = time.time()
     passed = 0
     failed = 0
@@ -108,13 +91,8 @@ def main():
         module_path, description = MODULES[name]
         header = f" [{i+1}/{len(ordered)}] {description} "
 
-        # Special case: the model.py library has multiple run functions
-        if module_path == "eqgen.model":
-            print(f"  ⚠️  Module 'eqgen.model' has been removed — skipping.")
-            continue
-        else:
-            _mod = __import__(module_path, fromlist=["run"])
-            fn = _mod.run
+        _mod = __import__(module_path, fromlist=["run"])
+        fn = _mod.run
 
         print()
         print("=" * 70)
@@ -135,7 +113,6 @@ def main():
 
     total_elapsed = time.time() - total_start
 
-    # ── Summary ────────────────────────────────────────────────────────
     print()
     print("=" * 70)
     print(f"{' RESULTS ':=^70}")

@@ -101,40 +101,6 @@ def model_gain_needed(
     return target_amplitude / denom
 
 
-# ── Model gain (legacy — used by loudness analysis) ───────────────────
-
-def model_gain(f, fc, h2, h3, S, weighted=False):
-    """Compute model gain G for frequency f (with optional ear weighting)."""
-    Sf = S(f)
-    S2f = S(2 * f)
-    S3f = S(3 * f)
-
-    hp = butterworth_hp_mag
-    lp = first_order_lp_mag
-
-    fund_factor = 1.0 + 3.0 * h3 * (h3 * h3 - 1.0) * lp(f, fc / 2.0)
-
-    a = (hp(f, fc) * Sf * fund_factor)**2
-    b = h2**4 * lp(f, fc)**2 * hp(2 * f, fc)**2 * S2f**2
-    c = h3**6 * lp(f, fc / 2.0)**2 * hp(3 * f, fc)**2 * S3f**2
-
-    if weighted:
-        sf = ear_sensitivity(f)
-        s2f = ear_sensitivity(2 * f)
-        s3f = ear_sensitivity(3 * f)
-        denom = np.sqrt(sf**2 * a + s2f**2 * b + s3f**2 * c)
-    else:
-        denom = np.sqrt(a + b + c)
-
-    if denom < 1e-12:
-        return 1.0
-
-    target = 1.0
-    G = target / denom
-    comp = target / Sf if Sf > 1e-12 else 1.0
-    return min(G, comp)
-
-
 # ── Equal-loudness sensitivity (ISO 226:2023, ~60 phon) ───────────────
 
 def ear_sensitivity(f: float) -> float:
@@ -253,8 +219,4 @@ def small_speaker(f: float) -> float:
         return 0.25 + 0.75 * (f - 50) / 50
 
 
-# ── Full preprocessing curve (mirrors Rust bass_enhancer_preprocess) ─
 
-# ── Analysis functions moved to eqgen/analysis_tools/loudness.py ─────────
-# run_loudness_analysis() and run_model_gain_analysis() were extracted
-# to keep production code clean. Run them from there.
