@@ -1,5 +1,7 @@
 # Multi-Driver Active Crossover
 
+> **STATUS: PLANNED — not yet implemented.** This document describes a future multi-driver active crossover feature. None of the code changes described below exist in the current codebase.
+
 ## Current state
 
 eqgen processes one full-range speaker: measurement → one correction curve → one biquad cascade, shared

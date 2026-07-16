@@ -1,5 +1,7 @@
 # Enhancer DSP Pipeline
 
+> **Note:** The C DSP was originally Q16 fixed-point but has been ported to full float precision. The signal flow described below reflects the current float implementation.
+
 The bass enhancer (`src/enhancer.c` / `src/enhancer.h`) is the core of EQGen's real-time processing — it runs on the ESP32 firmware and the desktop PipeWire filter. This document describes the signal flow and the rationale behind each stage.
 
 ## Signal Chain (per channel)

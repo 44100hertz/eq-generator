@@ -4,12 +4,10 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    pyrirtool.url = "github:maj4e/pyrirtool";
-    pyrirtool.flake = false;
     nixpkgs-esp-dev.url = "github:mirrexagon/nixpkgs-esp-dev";
   };
 
-  outputs = { self, nixpkgs, flake-utils, pyrirtool, nixpkgs-esp-dev }:
+  outputs = { self, nixpkgs, flake-utils, nixpkgs-esp-dev }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
@@ -29,7 +27,6 @@
             esp-idf-esp32
           ];
           shellHook = ''
-            export PYTHONPATH="${pyrirtool}:$PYTHONPATH"
             echo "eqgen — speaker EQ correction suite"
             echo "  Design EQ:   python -m eqgen.cli.eqgen -m <meas.wav> -t <target.wav> -o eq.json"
             echo "  Audition:    python -m eqgen.cli.audition <speaker> /tmp/out --tracks song.flac"

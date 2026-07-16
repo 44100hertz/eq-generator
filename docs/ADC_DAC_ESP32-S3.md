@@ -1,5 +1,7 @@
 # ADC → DSP → DAC on ESP32-S3
 
+> **STATUS: PLANNED — not yet implemented.** This document describes a future hardware configuration for ADC→DSP→DAC on ESP32-S3. None of the files or Kconfig changes described below exist in the current codebase.
+
 Wired I2S audio pipeline coexisting with the existing Bluetooth A2DP path.
 
 ## Architecture
