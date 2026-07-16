@@ -36,6 +36,7 @@ from eqgen.pipeline import run_pipeline, design_eq
 from eqgen.dsp import pre_gain_from_max_gain
 from eqgen.eq_fit import cascade_response_db, BiquadCoeffs
 from eqgen.presets import MAX_IIR_BANDS, get_house_curve
+from eqgen.smart_volume import SV_LOUDNESS_FC, SV_LOUDNESS_Q, FM_SLOPE
 
 MEAS_DIR = ROOT / "measurements"
 SRC_DIR = ROOT / "src"
@@ -99,10 +100,11 @@ def generate_eq_header(biquads_44, biquads_48, bands_44, bands_48, cfg,
     h3 = float(cfg.get('h3_amp', 1.0))
     lines.append("")
     lines.append("/* ── Smart volume (AVRCP-based loudness compensation) ────────────── */")
-    lines.append("/* Shelf boost is linear with volume: 0.8 dB per 10 dB of              */")
-    lines.append("/* attenuation from peak (FM equal-loudness contour).                  */")
-    lines.append("/* Max shelf = 0.08 * EQGEN_SPEAKER_LEVEL_DB at vol=0.                */")
-    lines.append("#define EQGEN_LOUDNESS_FC_HZ         200.0f  /* one-pole shelf corner  */")
+    lines.append("/* 2nd-order low shelf fitted to ISO 226:2023.                         */")
+    lines.append("/* Shelf boost is linear with dB drop from peak volume.                */")
+    lines.append(f"#define FM_SLOPE                    {FM_SLOPE:.4f}f  /* dB shelf per dB SPL drop */")
+    lines.append(f"#define EQGEN_LOUDNESS_FC_HZ        {SV_LOUDNESS_FC:.1f}f  /* shelf corner freq        */")
+    lines.append(f"#define EQGEN_LOUDNESS_Q            {SV_LOUDNESS_Q:.3f}f  /* shelf Q                  */")
     lines.append("")
     lines.append("/* Headroom-based enhancer: LP fundamental + harmonics fill available space. */")
     lines.append("")

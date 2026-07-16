@@ -83,11 +83,13 @@ int main(int argc, char *argv[]) {
                          n_bq,
                          coeffs);
 
-    /* Pre-compute loudness shelf alpha (same reason as firmware).
-     * Do NOT use dsp_pipe_cfg_set_loudness(..., 0.0f) — it will
-     * set alpha=0, permanently disabling the shelf. */
-    cfg.loudness_alpha = 1.0f - expf(-2.0f * (float)M_PI * EQGEN_LOUDNESS_FC_HZ / fs);
-    cfg.loudness_boost = 0.0f;
+    /* Pre-compute loudness shelf (2nd-order biquad, RBJ cookbook).
+     * At boost_db=0 the coefficients produce a flat (unity) response.
+     * fc=80 Hz, Q=0.332 fitted to ISO 226 differential contours. */
+    dsp_pipe_cfg_set_loudness(&cfg,
+                               EQGEN_LOUDNESS_FC_HZ,
+                               EQGEN_LOUDNESS_Q,
+                               fs, 0.0f);
 
     dsp_pipe_init(&enh, &cfg, eq_bqs_l, eq_bqs_r);
 

@@ -22,11 +22,16 @@ shelf), while a 40 dB range speaker drops only 40 dB (≈20 dB SPL →
 
 import numpy as np
 
-from eqgen.dsp import first_order_lp_mag, pre_gain_from_max_gain
+from eqgen.dsp import pre_gain_from_max_gain, second_order_low_shelf_mag
 
 # Constants matching smart_volume.h / firmware
-SV_LOUDNESS_FC = 200.0   # Hz — one-pole shelf corner
-FM_SLOPE = 0.08           # dB shelf per dB of attenuation (0.8 dB / 10 dB)
+# 2nd-order low shelf fitted to ISO 226:2023 equal-loudness contours.
+# fc=80 Hz, Q=0.332 best matches the differential compensation shape
+# (ear sensitivity change as volume drops from 70 phon).
+# Slope = 0.52 dB shelf per dB SPL drop at 1kHz.
+SV_LOUDNESS_FC = 80.0    # Hz — 2nd-order shelf corner
+SV_LOUDNESS_Q = 0.332     # shelf Q (gentle, no peaking)
+FM_SLOPE = 0.25           # dB shelf per dB of attenuation (~2.5 dB / 10 dB)
 
 
 def compute_smart_volume_curves(
@@ -76,13 +81,12 @@ def compute_smart_volume_curves(
         pre_gain_linear = pg_quiet + t * (pg_loud_linear - pg_quiet)
         pre_gain_db = 20.0 * np.log10(max(pre_gain_linear, 1e-12))
 
-        # Shelf response: one-pole low shelf at 200 Hz
+        # Shelf response: 2nd-order low shelf fitted to ISO 226 contours
         if shelf_db_val > 0.01:
-            shelf_gain = np.array([
-                1.0 + (10.0 ** (shelf_db_val / 20.0) - 1.0) * first_order_lp_mag(f, SV_LOUDNESS_FC)
+            shelf_db_arr = np.array([
+                second_order_low_shelf_mag(f, SV_LOUDNESS_FC, shelf_db_val, SV_LOUDNESS_Q)
                 for f in freqs
             ])
-            shelf_db_arr = 20.0 * np.log10(np.maximum(shelf_gain, 1e-12))
         else:
             shelf_db_arr = np.zeros_like(freqs)
 

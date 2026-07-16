@@ -118,6 +118,20 @@ def butterworth_hp_mag(f: float, fc: float) -> float:
     w = f / fc
     return w * w / np.sqrt(1.0 + w**4)
 
+def second_order_low_shelf_mag(f: float, fc: float, gain_db: float, Q: float,
+                              fs: float = 48000.0) -> float:
+    """2nd-order low shelf magnitude (linear) at frequency f.
+
+    Uses the RBJ Audio EQ Cookbook biquad design and evaluates the exact
+    digital frequency response.  For analysis/plotting only — the real-time
+    DSP uses the C biquad implementation.
+    """
+    from eqgen.eq_fit import design_low_shelf, biquad_response
+    bc = design_low_shelf(fc, gain_db, Q, fs)
+    H = biquad_response(bc, np.array([f]), fs)
+    return float(np.abs(H[0]))
+
+
 def lr4_hp_mag(f: float, fc: float) -> float:
     """LR4 high-pass magnitude at frequency f, crossover fc.
 

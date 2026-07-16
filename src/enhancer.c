@@ -122,23 +122,62 @@ void dsp_pipe_cfg_init(DspPipeCfg *cfg,
     cfg->eq_n_biquads = eq_n_biquads;
     cfg->eq_coeffs    = eq_coeffs;
 
-    /* Loudness defaults: disabled */
-    cfg->loudness_alpha    = 0.0f;
-    cfg->loudness_boost    = 0.0f;
+    /* Loudness defaults: flat (unity) biquad */
+    cfg->loudness_fc = 80.0f;
+    cfg->loudness_Q  = 0.332f;
+    cfg->loudness_coeffs[0] = 1.0f;  /* b0 */
+    cfg->loudness_coeffs[1] = 0.0f;  /* b1 */
+    cfg->loudness_coeffs[2] = 0.0f;  /* b2 */
+    cfg->loudness_coeffs[3] = 0.0f;  /* a1 */
+    cfg->loudness_coeffs[4] = 0.0f;  /* a2 */
+}
+
+/* ── 2nd-order low-shelf biquad design (RBJ Audio EQ Cookbook) ── */
+
+static void design_loudness_shelf(float fc, float Q, float boost_db,
+                                   float fs, float coeffs[5])
+{
+    if (boost_db <= 0.001f || fc <= 0.0f) {
+        /* Flat: unity gain at all frequencies */
+        coeffs[0] = 1.0f;  /* b0 */
+        coeffs[1] = 0.0f;  /* b1 */
+        coeffs[2] = 0.0f;  /* b2 */
+        coeffs[3] = 0.0f;  /* a1 */
+        coeffs[4] = 0.0f;  /* a2 */
+        return;
+    }
+    float A    = powf(10.0f, boost_db / 40.0f);
+    float w0   = 2.0f * (float)M_PI * fc / fs;
+    float cosw = cosf(w0);
+    float sinw = sinf(w0);
+    float alpha = sinw / (2.0f * Q);
+    float sqrtA = sqrtf(A);
+
+    float b0 = A * ((A + 1.0f) - (A - 1.0f) * cosw + 2.0f * sqrtA * alpha);
+    float b1 = 2.0f * A * ((A - 1.0f) - (A + 1.0f) * cosw);
+    float b2 = A * ((A + 1.0f) - (A - 1.0f) * cosw - 2.0f * sqrtA * alpha);
+    float a0 = (A + 1.0f) + (A - 1.0f) * cosw + 2.0f * sqrtA * alpha;
+    float a1 = -2.0f * ((A - 1.0f) + (A + 1.0f) * cosw);
+    float a2 = (A + 1.0f) + (A - 1.0f) * cosw - 2.0f * sqrtA * alpha;
+
+    /* Normalise to a0=1 */
+    float inv_a0 = 1.0f / a0;
+    coeffs[0] = b0 * inv_a0;
+    coeffs[1] = b1 * inv_a0;
+    coeffs[2] = b2 * inv_a0;
+    coeffs[3] = a1 * inv_a0;
+    coeffs[4] = a2 * inv_a0;
 }
 
 /* ── Loudness shelf setup ──────────────────────────────────────── */
 
 void dsp_pipe_cfg_set_loudness(DspPipeCfg *cfg,
-                                  float fc, float fs, float boost_db)
+                                  float fc, float Q, float fs,
+                                  float boost_db)
 {
-    if (boost_db <= 0.0f || fc <= 0.0f) {
-        cfg->loudness_alpha = 0.0f;
-        cfg->loudness_boost = 0.0f;
-        return;
-    }
-    cfg->loudness_alpha = 1.0f - expf(-2.0f * (float)M_PI * fc / fs);
-    cfg->loudness_boost = powf(10.0f, boost_db / 20.0f) - 1.0f;
+    cfg->loudness_fc = fc;
+    cfg->loudness_Q  = Q;
+    design_loudness_shelf(fc, Q, boost_db, fs, cfg->loudness_coeffs);
 }
 
 /* ── Runtime parameter update ──────────────────────────────────── */
@@ -151,8 +190,19 @@ void dsp_pipe_update_params(DspPipe *enh,
                                 float pre_gain,
                                 float loudness_boost)
 {
-    if (!isnan(pre_gain))          enh->cfg.pre_gain          = pre_gain;
-    if (!isnan(loudness_boost))    enh->cfg.loudness_boost    = loudness_boost;
+    if (!isnan(pre_gain)) {
+        enh->cfg.pre_gain = pre_gain;
+    }
+    if (!isnan(loudness_boost)) {
+        /* Convert (G-1) back to dB and recompute biquad coefficients */
+        float G = loudness_boost + 1.0f;
+        float boost_db = (G > 0.001f) ? 20.0f * log10f(G) : 0.0f;
+        design_loudness_shelf(enh->cfg.loudness_fc,
+                               enh->cfg.loudness_Q,
+                               boost_db,
+                               enh->cfg.fs,
+                               enh->cfg.loudness_coeffs);
+    }
 }
 
 /* ── Enhancer init / reset ─────────────────────────────────────────── */
@@ -253,8 +303,14 @@ void dsp_pipe_reset(DspPipe *enh) {
     enh->right.hp_max_pos = -1;
 
 
-    enh->left.loudness_state  = 0.0f;
-    enh->right.loudness_state = 0.0f;
+    enh->left.loudness_x1  = 0.0f;
+    enh->left.loudness_x2  = 0.0f;
+    enh->left.loudness_y1  = 0.0f;
+    enh->left.loudness_y2  = 0.0f;
+    enh->right.loudness_x1 = 0.0f;
+    enh->right.loudness_x2 = 0.0f;
+    enh->right.loudness_y1 = 0.0f;
+    enh->right.loudness_y2 = 0.0f;
 }
 
 /* ── Profiling ─────────────────────────────────────────────────────── */
@@ -527,11 +583,19 @@ static float dsp_pipe_process_channel(DspPipeChan *ch,
     bass_sum *= ch->bass_gain_red;
     float out = dry_hp + bass_sum;
 
-    /* ── Loudness shelf (one-pole low shelf) ────────────────────── */
-    if (cfg->loudness_boost != 0.0f) {
-        float diff = out - ch->loudness_state;
-        ch->loudness_state += cfg->loudness_alpha * diff;
-        out += ch->loudness_state * cfg->loudness_boost;
+    /* ── Loudness shelf (2nd-order biquad low shelf) ───────────── */
+    {
+        const float *c = cfg->loudness_coeffs;
+        float y = c[0] * out
+                + c[1] * ch->loudness_x1
+                + c[2] * ch->loudness_x2
+                - c[3] * ch->loudness_y1
+                - c[4] * ch->loudness_y2;
+        ch->loudness_x2 = ch->loudness_x1;
+        ch->loudness_x1 = out;
+        ch->loudness_y2 = ch->loudness_y1;
+        ch->loudness_y1 = y;
+        out = y;
     }
 
     /* ── Full-band peak limiter ─────────────────────────────────

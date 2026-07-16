@@ -23,6 +23,7 @@ from eqgen.eq_fit import fit_eq_curve
 from eqgen.pipeline import run_pipeline
 from eqgen.dsp import pre_gain_from_max_gain
 from eqgen.presets import MAX_IIR_BANDS
+from eqgen.smart_volume import SV_LOUDNESS_FC, SV_LOUDNESS_Q, FM_SLOPE
 
 
 SPEAKERS = {
@@ -79,7 +80,10 @@ def generate_header(speaker_name: str, speaker_fn, fs: float, fc: float,
     lines.append(f"#define EQGEN_PRE_GAIN             {pre_gain:.6f}f  // {pre_gain:.2f}x = {20*np.log10(pre_gain):+.1f} dB")
     lines.append("")
     lines.append("/* ── Smart volume (AVRCP-based loudness compensation) ────────────── */")
-    lines.append("#define EQGEN_LOUDNESS_FC_HZ         200.0f  /* one-pole shelf corner freq  */")
+    lines.append("/* 2nd-order low shelf fitted to ISO 226:2023 equal-loudness contours. */")
+    lines.append(f"#define FM_SLOPE                    {FM_SLOPE:.4f}f  /* dB shelf per dB SPL drop */")
+    lines.append(f"#define EQGEN_LOUDNESS_FC_HZ        {SV_LOUDNESS_FC:.1f}f  /* shelf corner freq        */")
+    lines.append(f"#define EQGEN_LOUDNESS_Q            {SV_LOUDNESS_Q:.3f}f  /* shelf Q                  */")
     lines.append("#define EQGEN_QUIET_SHELF_DB           8.0f  /* boost at DC when vol → 0   */")
     lines.append("#define EQGEN_QUIET_FUNDAMENTAL_BLEED  0.40f /* max LP bleed when harmonics fully cut */")
     lines.append("")

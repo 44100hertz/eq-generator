@@ -60,9 +60,10 @@ typedef struct {
     float   h2_scale;           /* h2_amp / (h2_amp + h3_amp)        */
     float   h3_scale;           /* h3_amp / (h2_amp + h3_amp)        */
 
-    /* Loudness compensation */
-    float   loudness_alpha;      /* one-pole LP alpha (0 = disabled)   */
-    float   loudness_boost;      /* (G-1), 0 = no shelf                */
+    /* Loudness compensation — 2nd-order low shelf (RBJ biquad) */
+    float   loudness_fc;         /* shelf corner frequency (Hz)        */
+    float   loudness_Q;          /* shelf Q                            */
+    float   loudness_coeffs[5];  /* {b0, b1, b2, a1, a2}, a0=1       */
 
     /* 2nd-order Butterworth HP (harmonics cleanup path only) */
     float   hp_harm_coeffs[5];
@@ -78,7 +79,10 @@ typedef struct {
 
 /* ── Per-channel state ─────────────────────────────────────────────── */
 typedef struct {
-    float       loudness_state;
+    float       loudness_x1;      /* biquad input  state z⁻¹          */
+    float       loudness_x2;      /* biquad input  state z⁻²          */
+    float       loudness_y1;      /* biquad output state z⁻¹          */
+    float       loudness_y2;      /* biquad output state z⁻²          */
 
     Biquad     *eq_bqs;          /* array of eq_n_biquads Biquad       */
 
@@ -133,12 +137,14 @@ void bass_design_lr4(float fc, float fs,
                       float lp_coeffs[LR4_SECTIONS * 5],
                       float hp_coeffs[LR4_SECTIONS * 5]);
 
-/** Configure the loudness compensation shelf.
- *  fc: corner frequency (typ. 200 Hz)
- *  boost_db: max gain at DC (typ. 8 dB).  0 disables the shelf.
+/** Configure (or reconfigure) the 2nd-order loudness shelf.
+ *  fc: corner frequency (typ. 80 Hz)
+ *  Q:  shelf Q (typ. 0.332)
+ *  boost_db: max gain at DC (dB).  0 → flat (biquad passes through).
  */
 void dsp_pipe_cfg_set_loudness(DspPipeCfg *cfg,
-                                  float fc, float fs, float boost_db);
+                                  float fc, float Q, float fs,
+                                  float boost_db);
 
 /** Update runtime parameters without resetting filter state.
  *  h2_amp, h3_amp are set once via cfg and

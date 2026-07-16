@@ -92,15 +92,13 @@ static void dsp_init(int rate)
     dsp_pipe_init(&enhancer, &cfg,
                       eq_bqs_left, eq_bqs_right);
 
-    /* Pre-compute loudness shelf alpha now so the one-pole filter
-     * is ready.  Boost starts at 0 — update_smart_volume() will
-     * push the correct boost on first volume change.
-     *
-     * Do NOT use dsp_pipe_cfg_set_loudness(..., 0.0f) here:
-     * that early-returns with alpha=0, permanently disabling the
-     * shelf regardless of later boost updates. */
-    cfg.loudness_alpha = 1.0f - expf(-2.0f * (float)M_PI * EQGEN_LOUDNESS_FC_HZ / fs);
-    cfg.loudness_boost = 0.0f;
+    /* Pre-compute loudness shelf biquad.  Boost starts at 0 → flat
+     * response.  update_smart_volume() pushes the correct boost on
+     * first volume change. */
+    dsp_pipe_cfg_set_loudness(&cfg,
+                               EQGEN_LOUDNESS_FC_HZ,
+                               EQGEN_LOUDNESS_Q,
+                               fs, 0.0f);
     enhancer.cfg = cfg;
 
     dsp_rate = rate;

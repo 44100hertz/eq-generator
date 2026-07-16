@@ -26,9 +26,13 @@ extern "C" {
 #  define EQGEN_OVERBOOST_DB  0.0f
 #endif
 
-/* FM slope: 0.8 dB of bass boost per 10 dB of attenuation.
- * Matches Fletcher-Munson equal-loudness contours linearly. */
-#define FM_SLOPE  0.08f
+/* Shelf slope: dB of bass boost per dB of SPL drop at 1 kHz.
+ * Fitted to ISO 226:2023 equal-loudness contours (differential
+ * compensation from 70 phon).  Defined in eq_coeffs.h (generated).
+ * At vol=127 (drop=0) the shelf is always 0 dB. */
+#ifndef FM_SLOPE
+#  error "eq_coeffs.h must be included before smart_volume.h (defines FM_SLOPE)"
+#endif
 
 /* ── Results of a smart-volume interpolation ─────────────────────── */
 
