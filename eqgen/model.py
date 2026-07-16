@@ -141,36 +141,10 @@ def ear_sensitivity(f: float) -> float:
     """Ear sensitivity at frequency f, relative to 1 kHz = 1.0.
 
     Values < 1 mean the ear is LESS sensitive (needs more SPL).
-    Approximate fit to ISO 226:2023 at ~60 phon.
+    Based on ISO 226:2023 contours from iso226_table.csv.
     """
-    if f <= 0:
-        return 0.0
-    # Key data points at 60 phon:
-    # 20Hz: 98dB → s = 10^((60-98)/20) = 0.013
-    # 30Hz: 88dB → s = 0.040
-    # 50Hz: 78dB → s = 0.126
-    # 100Hz: 65dB → s = 0.562
-    # 200Hz: 61dB → s = 0.891
-    # 1kHz: 60dB → s = 1.000
-    points = [
-        (20, 0.013),
-        (30, 0.040),
-        (50, 0.126),
-        (100, 0.562),
-        (200, 0.891),
-        (1000, 1.000),
-        (20000, 1.000),
-    ]
-    for i in range(len(points) - 1):
-        f1, s1 = points[i]
-        f2, s2 = points[i + 1]
-        if f1 <= f <= f2:
-            log_f1, log_f2 = np.log10(f1), np.log10(f2)
-            log_s1, log_s2 = np.log10(s1), np.log10(s2)
-            t = (np.log10(f) - log_f1) / (log_f2 - log_f1)
-            log_s = log_s1 + t * (log_s2 - log_s1)
-            return 10.0 ** log_s
-    return 1.0
+    from eqgen.iso226 import sensitivity as _iso226_sensitivity
+    return _iso226_sensitivity(f, phon=60.0)
 
 
 # ── Harmonic efficacy: compute h2/h3 from measurement data ────

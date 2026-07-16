@@ -13,7 +13,7 @@ Method:
   * Red annotation text and the pink watermark are rejected by requiring
     dark pixels to be near-neutral (small max-min channel spread).
 
-Outputs: printed table, iso226_table.csv, iso226_verify.png (overlay).
+Outputs: printed table, ../eqgen/iso226_table.csv, iso226_verify.png (overlay).
 
 Verified by: 1 kHz anchor (N phon must read N dB), strict curve ordering,
 max tracking step, and visual inspection of the overlay.
@@ -209,7 +209,7 @@ def main():
 
     # --- output -----------------------------------------------------------
     header = ["freq_hz"] + [f"phon_{p}" for p in PHONS]
-    with open("iso226_table.csv", "w", newline="") as fh:
+    with open("../eqgen/iso226_table.csv", "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(header)
         for i, f in enumerate(FREQS):
@@ -235,7 +235,7 @@ def main():
                 fx, fy = f_to_col(f), np.interp(f_to_col(f), xs, ys)
                 dr.ellipse([fx - 3, fy - 3, fx + 3, fy + 3], fill=(255, 0, 0))
     out.save("iso226_verify.png")
-    print("\nwrote iso226_table.csv and iso226_verify.png")
+    print("\nwrote ../eqgen/iso226_table.csv and iso226_verify.png")
 
 
 if __name__ == "__main__":
