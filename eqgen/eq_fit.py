@@ -95,6 +95,20 @@ def design_butter_hp(fc: float, fs: float) -> BiquadCoeffs:
     return BiquadCoeffs(b0, b1, b2, a1, a2)
 
 
+def design_butter_lp(fc: float, fs: float) -> BiquadCoeffs:
+    """2nd-order Butterworth low-pass (bilinear transform)."""
+    SQRT2 = np.sqrt(2.0)
+    omega = np.tan(np.pi * fc / fs)
+    c = 1.0 + SQRT2 * omega + omega * omega
+
+    b0 = omega * omega / c
+    b1 = 2.0 * omega * omega / c
+    b2 = omega * omega / c
+    a1 = 2.0 * (omega * omega - 1.0) / c
+    a2 = (1.0 - SQRT2 * omega + omega * omega) / c
+    return BiquadCoeffs(b0, b1, b2, a1, a2)
+
+
 def design_high_shelf(f0: float, gain_db: float, Q: float, fs: float) -> BiquadCoeffs:
     """High-shelf filter at f0 (boost above f0). Q ≈ 0.707 for Butterworth."""
     A = 10.0 ** (gain_db / 40.0)

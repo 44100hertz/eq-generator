@@ -31,8 +31,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from eqgen.dsp import design_butter_lp, design_butter_hp, biquad_tick
-from eqgen.dsp import butterworth_hp_mag
+from eqgen.eq_fit import design_butter_lp, design_butter_hp
+from eqgen.dsp import biquad_tick, butterworth_hp_mag
 
 
 def analyze_chebyshev_mix(
@@ -61,8 +61,8 @@ def analyze_chebyshev_mix(
     x_in = amplitude * np.sin(2.0 * np.pi * freq * t)
 
     # ── 2. LP filter (2nd order Butterworth, bilinear) ─────────────────
-    lp_coeffs = design_butter_lp(cutoff, fs)
-    hp_coeffs = design_butter_hp(cutoff, fs)
+    lp_coeffs = design_butter_lp(cutoff, fs).to_array()
+    hp_coeffs = design_butter_hp(cutoff, fs).to_array()
 
     lp_state = np.zeros(4)
     x_lp = np.zeros(n)

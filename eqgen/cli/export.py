@@ -21,10 +21,10 @@ sys.path.insert(0, str(ROOT))
 
 from eqgen.eq_fit import fit_eq_curve
 from eqgen.model import perceptual_weight
-from eqgen.pipeline import run_pipeline
 from eqgen.dsp import pre_gain_from_max_gain
 from eqgen.presets import MAX_IIR_BANDS
 from eqgen.smart_volume import SV_LOUDNESS_FC, SV_LOUDNESS_Q, FM_SLOPE
+from eqgen.header_gen import generate_c_header
 
 
 SPEAKERS = {
@@ -43,10 +43,13 @@ def _fit_header_bands(freqs, shifted_db, fs, max_bands, f_min, f_max):
     return fit.biquads, fit.bands, fit.n_bands
 
 
-def generate_header(speaker_name: str, speaker_fn, fs: float, fc: float,
-                    h2: float, h3: float, max_bands: int) -> str:
-    """Generate C header content for a speaker model's EQ coefficients
-    at both 44100 Hz and 48000 Hz."""
+def _fit_export_biquads(speaker_fn, fc, max_bands):
+    """Run the fitting pipeline for export, return (biquads, bands, pre_gain).
+
+    Performs fitting at both 44100 Hz and 48000 Hz and returns the
+    values needed by generate_header.
+    """
+    fs = 44100.0
     f_min = fc / 2.0
     f_max = min(16000.0, fs * 0.49)
     freqs = np.logspace(np.log10(f_min), np.log10(f_max), 200)
@@ -58,78 +61,67 @@ def generate_header(speaker_name: str, speaker_fn, fs: float, fc: float,
     max_gain_db = max(0.0, float(np.max(target_db)))
     pre_gain = pre_gain_from_max_gain(max_gain_db)
 
-    # Fit at both 44100 and 48000
-    biquads_44, bands_44, n_bands_44 = _fit_header_bands(
+    biquads_44, bands_44, _ = _fit_header_bands(
         freqs, target_db, 44100.0, max_bands, f_min, f_max)
-    biquads_48, bands_48, n_bands_48 = _fit_header_bands(
+    biquads_48, bands_48, _ = _fit_header_bands(
         freqs, target_db, 48000.0, max_bands, f_min, f_max)
 
-    lines = []
-    lines.append(f"// Auto-generated EQ coefficients for: {speaker_name}")
-    lines.append(f"// Generated: python -m eqgen.cli.export --speaker {speaker_name} --max-bands {max_bands}")
-    lines.append(f"// Two coefficient arrays — one per sample rate — because biquad coefficients")
-    lines.append(f"// are sample-rate-dependent.  At runtime, eqgen_get_coeffs(rate) selects")
-    lines.append(f"// the correct array for 44100 Hz or 48000 Hz.")
-    lines.append(f"//")
-    lines.append(f"// 44.1k: {n_bands_44} biquads, 48k: {n_bands_48} biquads — float coefficients")
-    lines.append(f"// fc={fc:.0f} Hz, h2_amp={h2:.2f}, h3_amp={h3:.2f}")
-    lines.append("")
-    lines.append("#pragma once")
-    lines.append("")
-    lines.append(f"#define EQGEN_CUTOFF_HZ            {fc:.1f}f")
-    lines.append(f"#define EQGEN_H2_AMP               {h2:.3f}f")
-    lines.append(f"#define EQGEN_H3_AMP               {h3:.3f}f")
-    lines.append(f"#define EQGEN_PRE_GAIN             {pre_gain:.6f}f  // {pre_gain:.2f}x = {20*np.log10(pre_gain):+.1f} dB")
-    lines.append("")
-    lines.append("/* ── Smart volume (AVRCP-based loudness compensation) ────────────── */")
-    lines.append("/* 2nd-order low shelf fitted to ISO 226:2023 equal-loudness contours. */")
-    lines.append(f"#define FM_SLOPE                    {FM_SLOPE:.4f}f  /* dB shelf per dB SPL drop */")
-    lines.append(f"#define EQGEN_LOUDNESS_FC_HZ        {SV_LOUDNESS_FC:.1f}f  /* shelf corner freq        */")
-    lines.append(f"#define EQGEN_LOUDNESS_Q            {SV_LOUDNESS_Q:.3f}f  /* shelf Q                  */")
-    lines.append("#define EQGEN_QUIET_SHELF_DB           8.0f  /* boost at DC when vol → 0   */")
-    lines.append("#define EQGEN_QUIET_FUNDAMENTAL_BLEED  0.40f /* max LP bleed when harmonics fully cut */")
-    lines.append("")
-    lines.append("/* Harmonic→bleed crossfade thresholds (t = vol/127) */")
-    lines.append("#define EQGEN_HARMONIC_BLEED_CROSSFADE_LO_T  0.20f  /* vol≤25: h2/h3=0, bleed=max */")
-    lines.append("#define EQGEN_HARMONIC_BLEED_CROSSFADE_HI_T  0.50f  /* vol≥63: h2/h3=full, bleed=0 */")
-    lines.append(f"#define EQGEN_FS_44100              44100")
-    lines.append(f"#define EQGEN_FS_48000              48000")
-    lines.append(f"#define EQGEN_N_BIQUADS            {n_bands_44}")
-    lines.append("")
-    lines.append("/* ── Firmware config ────────────────────────────────────────────── */")
-    lines.append("#define EQGEN_RELEASE_SECS           0.200f")
-    lines.append("#define EQGEN_LIMITER_RELEASE_SECS   0.049f")
-    lines.append('#define EQGEN_BT_DEVICE_NAME        "eqgen"')
-    lines.append("#define EQGEN_SPEAKER_LEVEL_DB        60")
-    lines.append("")
+    return biquads_44, bands_44, biquads_48, bands_48, pre_gain
 
-    def _write_coeffs(name, biquads, bands):
-        lines.append(f"static const float {name}[{len(bands) * 5}] = {{")
-        for i, bc in enumerate(biquads):
-            band = bands[i]
-            lines.append(
-                f"    {bc.b0:>15.9f}f, {bc.b1:>15.9f}f, {bc.b2:>15.9f}f, "
-                f"{bc.a1:>15.9f}f, {bc.a2:>15.9f}f,"
-                f"  // [{i}] f0={band['f0']:6.1f} Hz gain={band['gain_db']:+5.1f} dB"
-            )
-        lines.append("};")
-        lines.append("")
 
-    _write_coeffs("eqgen_coeffs_44100", biquads_44, bands_44)
-    _write_coeffs("eqgen_coeffs_48000", biquads_48, bands_48)
+def generate_header(speaker_name: str, biquads_44, bands_44,
+                    biquads_48, bands_48, pre_gain: float,
+                    fc: float, h2: float, h3: float, max_bands: int) -> str:
+    """Generate C header content from pre-computed biquads."""
+    n_bands_44 = len(bands_44)
+    n_bands_48 = len(bands_48)
 
-    lines.append("/** Select coefficient array for the given sample rate. */")
-    lines.append("static inline const float *eqgen_get_coeffs(int sample_rate) {")
-    lines.append("    return (sample_rate == 48000) ? eqgen_coeffs_48000 : eqgen_coeffs_44100;")
-    lines.append("}")
-    lines.append("")
-    lines.append("/** Select nominal Fs for the given sample rate. */")
-    lines.append("static inline int eqgen_get_fs(int sample_rate) {")
-    lines.append("    return (sample_rate == 48000) ? EQGEN_FS_48000 : EQGEN_FS_44100;")
-    lines.append("}")
-    lines.append("")
+    header_lines = [
+        f"Auto-generated EQ coefficients for: {speaker_name}",
+        f"Generated: python -m eqgen.cli.export --speaker {speaker_name} --max-bands {max_bands}",
+        "Two coefficient arrays — one per sample rate — because biquad coefficients",
+        "are sample-rate-dependent.  At runtime, eqgen_get_coeffs(rate) selects",
+        "the correct array for 44100 Hz or 48000 Hz.",
+        "",
+        f"44.1k: {n_bands_44} biquads, 48k: {n_bands_48} biquads — float coefficients",
+        f"fc={fc:.0f} Hz, h2_amp={h2:.2f}, h3_amp={h3:.2f}",
+    ]
 
-    return "\n".join(lines)
+    define_lines = [
+        f"#define EQGEN_CUTOFF_HZ            {fc:.1f}f",
+        f"#define EQGEN_H2_AMP               {h2:.3f}f",
+        f"#define EQGEN_H3_AMP               {h3:.3f}f",
+        f"#define EQGEN_PRE_GAIN             {pre_gain:.6f}f  // {pre_gain:.2f}x = {20*np.log10(pre_gain):+.1f} dB",
+        "",
+        "/* ── Smart volume (AVRCP-based loudness compensation) ────────────── */",
+        "/* 2nd-order low shelf fitted to ISO 226:2023 equal-loudness contours. */",
+        f"#define FM_SLOPE                    {FM_SLOPE:.4f}f  /* dB shelf per dB SPL drop */",
+        f"#define EQGEN_LOUDNESS_FC_HZ        {SV_LOUDNESS_FC:.1f}f  /* shelf corner freq        */",
+        f"#define EQGEN_LOUDNESS_Q            {SV_LOUDNESS_Q:.3f}f  /* shelf Q                  */",
+        "#define EQGEN_QUIET_SHELF_DB           8.0f  /* boost at DC when vol → 0   */",
+        "#define EQGEN_QUIET_FUNDAMENTAL_BLEED  0.40f /* max LP bleed when harmonics fully cut */",
+        "",
+        "/* Harmonic→bleed crossfade thresholds (t = vol/127) */",
+        "#define EQGEN_HARMONIC_BLEED_CROSSFADE_LO_T  0.20f  /* vol≤25: h2/h3=0, bleed=max */",
+        "#define EQGEN_HARMONIC_BLEED_CROSSFADE_HI_T  0.50f  /* vol≥63: h2/h3=full, bleed=0 */",
+        f"#define EQGEN_FS_44100              44100",
+        f"#define EQGEN_FS_48000              48000",
+        f"#define EQGEN_N_BIQUADS            {n_bands_44}",
+        "",
+        "/* ── Firmware config ────────────────────────────────────────────── */",
+        "#define EQGEN_RELEASE_SECS           0.200f",
+        "#define EQGEN_LIMITER_RELEASE_SECS   0.049f",
+        '#define EQGEN_BT_DEVICE_NAME        "eqgen"',
+        "#define EQGEN_SPEAKER_LEVEL_DB        60",
+        "",
+    ]
+
+    return generate_c_header(
+        biquads_44, bands_44,
+        biquads_48, bands_48,
+        header_lines=header_lines,
+        define_lines=define_lines,
+    )
 
 
 def main():
@@ -153,8 +145,10 @@ def main():
     args = parser.parse_args()
 
     speaker_fn = SPEAKERS[args.speaker]
-    header = generate_header(args.speaker, speaker_fn, args.fs, args.fc,
-                             args.h2, args.h3, args.max_bands)
+    bq44, bn44, bq48, bn48, pg = _fit_export_biquads(
+        speaker_fn, args.fc, args.max_bands)
+    header = generate_header(args.speaker, bq44, bn44, bq48, bn48, pg,
+                             args.fc, args.h2, args.h3, args.max_bands)
 
     if args.output:
         p = Path(args.output)

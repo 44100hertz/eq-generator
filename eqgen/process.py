@@ -8,6 +8,7 @@ import subprocess
 from typing import List, Optional
 
 import numpy as np
+from scipy.io import wavfile
 
 from eqgen import enhancer_ffi
 
@@ -64,25 +65,9 @@ def process_track(
 
     enhancer_ffi.destroy_enhancer(enh)
 
-    datasize = len(out_data)
-    wav = bytearray(44 + datasize)
-    wav[0:4] = b'RIFF'
-    struct.pack_into('<I', wav, 4, 36 + datasize)
-    wav[8:16] = b'WAVEfmt '
-    struct.pack_into('<I', wav, 16, 16)
-    struct.pack_into('<H', wav, 20, 1)
-    struct.pack_into('<H', wav, 22, 2)
-    struct.pack_into('<I', wav, 24, 44100)
-    struct.pack_into('<I', wav, 28, 44100 * 4)
-    struct.pack_into('<H', wav, 32, 4)
-    struct.pack_into('<H', wav, 34, 16)
-    wav[36:40] = b'data'
-    struct.pack_into('<I', wav, 40, datasize)
-    wav[44:] = out_data
-
+    int16_data = np.frombuffer(out_data, dtype=np.int16).reshape(-1, 2)
     os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
-    with open(output_path, 'wb') as f:
-        f.write(wav)
+    wavfile.write(output_path, 44100, int16_data)
 
     gain_db = 20.0 * np.log10(max(peak_out, 1) / max(peak_in, 1))
     print(f"  Peak: in={peak_in} out={peak_out} ({gain_db:+.1f} dB) \u2192 {output_path}")

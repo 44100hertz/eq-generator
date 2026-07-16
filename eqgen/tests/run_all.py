@@ -26,7 +26,6 @@ MODULES = {
     # DSP tests — verify the enhancer's signal-processing behavior
     "harmonics":   ("eqgen.tests.test_harmonics",   "Harmonic purity & linearity"),
     "gain_safety": ("eqgen.tests.test_gain_safety", "Gain safety on real measurements"),
-    "chebyshev":   ("eqgen.tests.test_chebyshev",   "Chebyshev math analysis"),
 
     # Model tests — verify the C enhancer pipeline
     "model":       ("eqgen.tests.test_model",       "C enhancer verification"),
@@ -34,12 +33,13 @@ MODULES = {
 
     # Integration tests — full pipeline end-to-end
     "roundtrip":   ("eqgen.tests.test_roundtrip",   "Round-trip pipeline verification"),
+    "31hz":        ("eqgen.tests.test_31hz",        "31 Hz end-to-end tone test"),
 }
 
 # ── Group definitions ──────────────────────────────────────────────────
 DSP_MODULES    = {"harmonics", "gain_safety"}
-MODEL_MODULES  = {"chebyshev", "model", "evenness"}
-INTEG_MODULES  = {"roundtrip"}
+MODEL_MODULES  = {"model", "evenness"}
+INTEG_MODULES  = {"roundtrip", "31hz"}
 
 
 def main():

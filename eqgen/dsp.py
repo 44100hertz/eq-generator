@@ -6,8 +6,7 @@ eqgen.enhancer_ffi.  This module retains only the design-time and
 analysis helpers that Python is responsible for:
 
   - Butterworth biquad design (bilinear transform, float precision)
-  - Sample-by-sample biquad tick (for compressor/envelope analysis)
-  - Envelope follower (peak-hold, for offline trace analysis)
+  - Sample-by-sample biquad tick (for offline analysis)
   - DspPipeConfig (parameter container for documentation / tests)
 
 The four process_* Python variants have been removed; the production
@@ -18,34 +17,8 @@ import numpy as np
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2nd-order Butterworth biquad filters (bilinear transform)
-# ─────────────────────────────────────────────────────────────────────────────
-
-SQRT2 = np.sqrt(2.0)  # 1.4142135623730951
-
-
-# Used only by test_chebyshev.py — prefer eq_fit.design_butter_hp for new code.
-def design_butter_lp(fc: float, fs: float) -> np.ndarray:
-    """2nd-order Butterworth LP: returns [b0, b1, b2, a1, a2]."""
-    omega = np.tan(np.pi * fc / fs)
-    c = 1.0 + SQRT2 * omega + omega * omega
-    b0 = omega * omega / c
-    b1 = 2.0 * omega * omega / c
-    b2 = omega * omega / c
-    a1 = 2.0 * (omega * omega - 1.0) / c
-    a2 = (1.0 - SQRT2 * omega + omega * omega) / c
-    return np.array([b0, b1, b2, a1, a2])
-
-
-def design_butter_hp(fc: float, fs: float) -> np.ndarray:
-    """2nd-order Butterworth HP: returns [b0, b1, b2, a1, a2].
-
-    Thin wrapper around eq_fit.design_butter_hp for backward compatibility
-    with callers that expect ndarray instead of BiquadCoeffs."""
-    from eqgen.eq_fit import design_butter_hp as _design_butter_hp
-    bc = _design_butter_hp(fc, fs)
-    return np.array([bc.b0, bc.b1, bc.b2, bc.a1, bc.a2])
+# Butterworth design functions live in eq_fit.py (returning BiquadCoeffs).
+# Use eq_fit.design_butter_hp / eq_fit.design_butter_lp for new code.
 
 
 def biquad_tick(x: float, coeffs: np.ndarray, state: np.ndarray) -> Tuple[float, np.ndarray]:
@@ -67,33 +40,7 @@ def biquad_tick(x: float, coeffs: np.ndarray, state: np.ndarray) -> Tuple[float,
     return y, state
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Envelope follower — peak-hold with exponential decay
-# ─────────────────────────────────────────────────────────────────────────────
 
-@dataclass
-class EnvFollower:
-    """Peak-hold envelope follower with instant attack (max) and release decay."""
-
-    decay_coeff: float
-    floor: float = 1e-4
-    value: float = 0.0
-
-    @classmethod
-    def from_params(cls, release_ms: float, fs: float, floor: float = 1e-4) -> "EnvFollower":
-        r_ms = max(release_ms, 10.0)
-        decay_coeff = np.exp(-1.0 / (r_ms * 0.001 * fs))
-        return cls(decay_coeff=decay_coeff, floor=floor)
-
-    def tick(self, x: float) -> float:
-        self.value = max(self.value * self.decay_coeff, abs(x))
-        return self.value
-
-    def read(self) -> float:
-        return self.value
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Butterworth filter magnitude responses (for analysis)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -365,14 +312,9 @@ def compute_clip_threshold(
 
 def build_default_eq_coeffs(fs: float = 44100.0) -> List[float]:
     """Build a flat 3-HP-cascade default EQ as float list."""
+    from eqgen.eq_fit import design_butter_hp
     coeffs = []
     for fc in [25, 35, 45]:
-        omega = np.tan(np.pi * fc / fs)
-        c = 1.0 + SQRT2 * omega + omega * omega
-        b0 = 1.0 / c
-        b1 = -2.0 / c
-        b2 = 1.0 / c
-        a1 = (2.0 * (omega * omega - 1.0)) / c
-        a2 = (1.0 - SQRT2 * omega + omega * omega) / c
-        coeffs.extend([b0, b1, b2, a1, a2])
+        bc = design_butter_hp(fc, fs)
+        coeffs.extend([bc.b0, bc.b1, bc.b2, bc.a1, bc.a2])
     return coeffs

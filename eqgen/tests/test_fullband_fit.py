@@ -7,12 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from eqgen.eq_fit import fit_eq_curve, cascade_response_db, BiquadCoeffs
-
-# ── Synthetic speaker: -12 dB @ 50 Hz, flat above 100 Hz ──────────────
-def small_speaker(f):
-    if f <= 50:   return 0.25
-    if f >= 100:  return 1.0
-    return 0.25 + 0.75 * (f - 50) / 50
+from eqgen.model import small_speaker
 
 fs = 44100.0
 freqs = np.logspace(np.log10(20), np.log10(20000), 300)

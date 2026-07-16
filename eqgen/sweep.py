@@ -32,6 +32,7 @@ def run_sine_sweep(
     release_secs: float = 0.2,
     vol_gain: float = 1.0,
     pre_gain: Optional[float] = None,
+    push_gain: float = 1.0,
     loudness_boost: float = 0.0,
 ) -> Dict[float, Dict[str, float]]:
     """Run sine tones through the C enhancer and measure output harmonics.
@@ -53,6 +54,7 @@ def run_sine_sweep(
         cutoff_hz=fc, h2_amp=h2, h3_amp=h3,
         release_secs=release_secs, fs=fs,
         pre_gain=pre_gain if pre_gain is not None else 1.0,
+        push_gain=push_gain,
         coeffs=eq_coeffs,
     )
 

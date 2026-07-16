@@ -28,19 +28,10 @@ from eqgen.eq_fit import (
     design_butter_hp,
 )
 from eqgen.dsp import butterworth_hp_mag, butterworth_lp_mag
-
+from eqgen.model import small_speaker
 
 
 # ── Speaker models for testing ──────────────────────────────────────
-
-def small_speaker(f):
-    """Small speaker: -12 dB at 50 Hz, flat above 100 Hz."""
-    if f <= 50:
-        return 0.25
-    elif f >= 100:
-        return 1.0
-    else:
-        return 0.25 + 0.75 * (f - 50) / 50
 
 
 def steep_speaker(f):
