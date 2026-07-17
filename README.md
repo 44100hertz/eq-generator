@@ -25,69 +25,86 @@ harmonics) matches the target frequency response.
 
 ### Pipeline (desktop)
 
+```mermaid
+flowchart TD
+    M["measurement*.wav"] --> WF1["Welch FFT"]
+    T["target.wav"] --> WF2["Welch FFT"]
+    N["noise.wav (optional)"] --> WF3["Welch FFT"]
+
+    WF1 --> POOL["Pool per-bin stats"]
+    WF3 --> POOL
+    WF2 --> FIT["Linear fit (dB vs log-freq)"]
+
+    POOL --> CV["CV merge + noise-floor inflation"]
+    CV --> SMOOTH["CV-weighted kernel smoothing + spectral subtraction"]
+    SMOOTH --> MC["Measurement Curve"]
+
+    FIT --> SHIFT["Shift to midrange level"]
+    SHIFT --> TC["Target Curve"]
+
+    MC --> CORR["Correction = target / measurement"]
+    TC --> CORR
+
+    CORR --> MODEL["Bass enhancer preprocess (harmonic efficacy)"]
+    MODEL --> FITTER["IIR Biquad Fit (greedy golden-section)"]
+
+    FITTER --> JSON["JSON curve (EQ points)"]
+    FITTER --> SO["enhancer.so (ctypes FFI)"]
+
+    SO --> ENH["eqgen.cli.enhance (offline WAV)"]
+    SO --> WIRE["eqgen.cli.wire (live PipeWire LADSPA)"]
 ```
-measurement.wav ─┐
-                 ├─→ Welch FFT (multi‑window, per‑bin CV) ─→ adaptive EQ points
-target.wav ──────┘         │                                      │
-                           │  noise.wav (spectral subtraction)     │
-                           ▼                                      ▼
-                      pooled stats ────────────────────→ resample to EQ grid
-                                                                    │
-                                                     ┌──────────────┤
-                                                     ▼              ▼
-                                               target curve   measurement curve
-                                                     │              │
-                                                     ▼              ▼
-                                              correction = target / measurement
-                                                     │
-                                                     ▼ (optional)
-                                              bass enhancer preprocess
-                                              (solve G s.t. perceived output = target)
-                                                     │
-                                                     ▼
-                                              IIR biquad fit (greedy golden‑section)
-                                                    ╱          ╲
-                                                   ▼            ▼
-                                              JSON curve    enhancer.so
-                                              (EQ points)   (ctypes FFI)
-                                                                 │
-                                                  ┌──────────────┴──────────────┐
-                                                  ▼                             ▼
-                                          eqgen.cli.enhance              eqgen.cli.wire
-                                          (offline WAV)              (live PipeWire LADSPA)
-```
+
+1. **Welch FFT** on measurement, target, and (optional) noise WAVs — per-bin mean, magnitude, and CV
+2. **Pool** stats across multiple measurement takes, merge noise CV, inflate CV in noise-dominated bins
+3. **CV-weighted kernel smoothing** on a uniform log-spaced grid, with spectral subtraction for uncorrelated noise
+4. **Target curve** = linear fit of raw target (dB vs log-freq), shifted to measurement midrange level
+5. **Correction** = target / measurement in linear magnitude, then normalize midrange to 0 dB
+6. **Bass enhancer preprocess** (optional) — compute harmonic efficacy from correction curve
+7. **IIR biquad fit** — greedy golden-section search fits cascaded peaking filters to the correction curve
+8. **Export** — JSON EQ points for visualization, or `enhancer.so` (ctypes FFI) for offline/live audition
 
 ### DSP core (runs identically on desktop and ESP32)
 
-```
-  input (float)
-     │
-     ▼
-  DC blocker
-     │
-     ▼
-  pre‑gain
-     │
-     ▼
-  cascaded EQ biquads (float)
-     │
-     ▼
-  LR4 crossover → LP(fc) ──→ envelope ──→ Chebyshev T₂/T₃ ──→ mix
-     │                                                           │
-     └──→ HP(fc) dry path ───────────────────────────────────────┤
-                                                                  ▼
-                                                            loudness shelf
-                                                                  │
-                                                                  ▼
-                                                            full‑band limiter
-                                                                  │
-                                                                  ▼
-                                                            output (float)
+```mermaid
+flowchart LR
+    A[Input] --> B[Pre-gain]
+    B --> C[EQ Biquads]
+    C --> D["Lookahead HP + Delay Line"]
+    D --> E[LR4 Crossover]
 
-     Harmonics generated via Chebyshev polynomials from the LP path.
-     Crossfade between dry HP and harmonics controlled by headroom budget.
-     Full‑band peak limiter with 3 s release catches overboost transients.
+    E --> F["LP(fc): Envelope Follower"]
+    E --> G["HP(fc): Dry Path (bypass)"]
+
+    F --> H[Adaptive Smooth]
+    H --> I[Normalize]
+    I --> J["Chebyshev T<sub>2</sub> + T<sub>3</sub>"]
+    J --> K[HP Filter]
+
+    K --> L[Crossfade + Mix]
+    G --> L
+
+    L --> M["Bass-sum Limiter (49 ms release)"]
+    M --> N[Loudness Shelf]
+    N --> O["Full-band Limiter (3 s release)"]
+    O --> P[Output]
 ```
+
+1. **Pre-gain** — applies configured pre-gain (compensates for EQ boost headroom)
+2. **EQ biquads** — cascaded peaking filters correct the speaker response
+3. **Lookahead HP + delay line** — LR4 high-pass on current sample; ring buffer tracks
+   upcoming peak for headroom budgeting
+4. **LR4 crossover** splits the delayed signal:
+   - **LP(fc)** → envelope follower → adaptive smoothing → normalize →
+     Chebyshev T₂/T₃ harmonics → HP filter (removes DC/fundamental bleed)
+   - **HP(fc)** → dry path (unprocessed high frequencies)
+5. **Crossfade** — slews between dry LP fundamental and harmonics based on
+   headroom budget; preserves perceived loudness while limiting excursion
+6. **Bass-sum limiter** — instant attack / 49 ms release; attenuates only bass
+   when dry HP + bass sum would clip
+7. **Loudness shelf** — 2nd-order low-shelf biquad for volume-dependent contour
+8. **Full-band peak limiter** — instant attack / 3 s release safety net for
+   aggressive overboost configurations
 
 ---
 
