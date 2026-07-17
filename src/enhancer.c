@@ -358,6 +358,25 @@ static float dsp_pipe_process_channel(DspPipeChan *ch,
     /* ── Stage 1: EQ preprocessing ──────────────────────────────── */
     float eq_out = biquad_cascade(ch->eq_bqs, cfg->eq_n_biquads, x);
 
+    /* ── Loudness shelf (2nd-order biquad low shelf) ─────────────
+     * Pre-enhancer — part of the psychoacoustic target.  At low
+     * listening volumes, a Fletcher-Munson shelf compensates for
+     * the ear's reduced bass sensitivity so the enhancer operates
+     * on the full perceptual target. */
+    {
+        const float *c = cfg->loudness_coeffs;
+        float y = c[0] * eq_out
+                + c[1] * ch->loudness_x1
+                + c[2] * ch->loudness_x2
+                - c[3] * ch->loudness_y1
+                - c[4] * ch->loudness_y2;
+        ch->loudness_x2 = ch->loudness_x1;
+        ch->loudness_x1 = eq_out;
+        ch->loudness_y2 = ch->loudness_y1;
+        ch->loudness_y1 = y;
+        eq_out = y;
+    }
+
     /* Bypass enhancer when cutoff ≤ 0 */
     if (cfg->cutoff_hz <= 0.0f) {
 #ifdef EQGEN_PROFILE
@@ -583,20 +602,6 @@ static float dsp_pipe_process_channel(DspPipeChan *ch,
     bass_sum *= ch->bass_gain_red;
     float out = dry_hp + bass_sum;
 
-    /* ── Loudness shelf (2nd-order biquad low shelf) ───────────── */
-    {
-        const float *c = cfg->loudness_coeffs;
-        float y = c[0] * out
-                + c[1] * ch->loudness_x1
-                + c[2] * ch->loudness_x2
-                - c[3] * ch->loudness_y1
-                - c[4] * ch->loudness_y2;
-        ch->loudness_x2 = ch->loudness_x1;
-        ch->loudness_x1 = out;
-        ch->loudness_y2 = ch->loudness_y1;
-        ch->loudness_y1 = y;
-        out = y;
-    }
 
     /* ── Full-band peak limiter ─────────────────────────────────
      * Instant attack / 3-second release.  Only engages when the

@@ -70,11 +70,11 @@ static inline void smart_volume_compute(uint8_t vol,
     float shelf_linear = powf(10.0f, out->shelf_db / 20.0f);
     out->boost     = shelf_linear - 1.0f;
 
-    /* 2. Pre-gain: reduce at quiet to offset shelf boost */
-    float max_shelf_linear = powf(10.0f, (FM_SLOPE * (float)EQGEN_SPEAKER_LEVEL_DB) / 20.0f);
-    float pg_quiet         = pg_loud / max_shelf_linear;
-    out->pre_gain          = pg_quiet + t * (pg_loud - pg_quiet);
-    out->fft_pre_gain      = out->pre_gain;
+    /* 2. Pre-gain: constant.  The loudness shelf is applied
+     *    pre-enhancer (part of the psychoacoustic target), so
+     *    the enhancer always operates at full signal level. */
+    out->pre_gain     = pg_loud;
+    out->fft_pre_gain = pg_loud;
 }
 
 /* ── Rebuild the 128-entry volume LUT ───────────────────────────── */

@@ -32,10 +32,10 @@ static inline void volume_init_lut(float vol_lut[128])
 
 /* ── Handle a volume change (0–127) ───────────────────────────────
  *
- * 1. Compute shelf boost & adjusted pre-gain for this volume
+ * 1. Compute shelf boost & pre-gain for this volume
  * 2. Push boost/pre-gain into the enhancer
- * 3. Rebuild the LUT with shelf_db as compensation (so pre-enhancer
- *    gain already includes the loudness contour)
+ * 3. Rebuild the LUT — no compensation needed since the shelf
+ *    runs pre-enhancer (part of the target), not post-enhancer.
  *
  * Call this every time the volume index changes.  vol_lut[vol] is
  * then the effective pre-enhancer gain factor for the audio loop.
@@ -55,7 +55,7 @@ static inline SmartVolumeParams volume_set(uint8_t vol,
 
     dsp_pipe_update_params(enh, svp.pre_gain, svp.boost);
 
-    smart_volume_rebuild_lut(vol_lut, svp.shelf_db,
+    smart_volume_rebuild_lut(vol_lut, 0.0f,
                              EQGEN_SPEAKER_LEVEL_DB,
                              EQGEN_OVERBOOST_DB);
     return svp;

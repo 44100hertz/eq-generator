@@ -2,16 +2,18 @@
  * enhancer.h — Harmonic bass enhancer (float)
  *
  * Pipeline per channel:
- *   1. DC blocker (5 Hz HP)
- *   2. Pre-gain
- *   3. EQ preprocessing (cascaded biquads)
- *   4. Lookahead: LR4 LP/HP split → ring buffer → upcoming peak
- *   5. Delay line (5 ms) → LR4 LP → envelope → normalize
+ *   1. Pre-gain
+ *   2. EQ preprocessing (cascaded biquads)
+ *   3. Loudness shelf (FM equal-loudness compensation — part of target)
+ *   4. Lookahead: LR4 HP on current sample → ring buffer → upcoming peak
+ *   5. Delay line (5 ms) → LR4 crossover:
+ *      LP(fc) → envelope → adaptive smooth → normalize → Chebyshev T₂/T₃
+ *      HP(fc) → dry path
  *   6. Crossfade: target = env, room = push_gain·(1−upcoming)
  *      w = (target−room)/(target·(1−h)), blend fundamental ↔ harmonics
- *   7. Mix: LR4 HP + (1−w)·lp_fund + harm
- *   8. Loudness shelf (optional)
- *   9. Full-band peak limiter (instant attack, slow release)
+ *   7. Mix: dry HP + (1−w)·lp_fund + harm (HP-filtered)
+ *   8. Bass-sum limiter (instant attack, 49 ms release)
+ *   9. Full-band peak limiter (instant attack, 3 s release)
  *
  * Volume scaling MUST run before this enhancer so the headroom
  * budget is relative to the already-attenuated signal.

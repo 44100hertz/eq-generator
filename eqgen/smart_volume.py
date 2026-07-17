@@ -3,7 +3,7 @@ Smart volume simulation: model the correction curve at different volume levels.
 
 Matches the C firmware (smart_volume.h / filter.c) exactly:
   - Shelf boost: linear with dB drop from peak (0.8 dB per 10 dB, FM contours)
-  - Pre-gain: linear interpolation pg_quiet → pg_loud
+  - Pre-gain: constant pg_loud (shelf is pre-enhancer, no offset needed)
   - Volume LUT: attenuation mapped through speaker_level
 
 Volume attenuation happens BEFORE the enhancer — this creates
@@ -58,7 +58,6 @@ def compute_smart_volume_curves(
 
     # Peak shelf at vol=0 = FM_SLOPE × lut_range (linear with total range)
     max_shelf_db = FM_SLOPE * lut_range
-    max_shelf_linear = 10.0 ** (max_shelf_db / 20.0)
 
     # Precompute per-step data (0, 32, 64, 96, 127)
     steps = [0, 32, 64, 96, 127]
@@ -76,9 +75,9 @@ def compute_smart_volume_curves(
         drop_db = lut_range * (1.0 - t)  # dB below peak
         shelf_db_val = FM_SLOPE * drop_db
 
-        # Pre-gain (matches smart_volume_compute)
-        pg_quiet = pg_loud_linear / max_shelf_linear
-        pre_gain_linear = pg_quiet + t * (pg_loud_linear - pg_quiet)
+        # Pre-gain: constant pg_loud.  The shelf is applied pre-enhancer
+        # (part of the psychoacoustic target), so no offset is needed.
+        pre_gain_linear = pg_loud_linear
         pre_gain_db = 20.0 * np.log10(max(pre_gain_linear, 1e-12))
 
         # Shelf response: 2nd-order low shelf fitted to ISO 226 contours

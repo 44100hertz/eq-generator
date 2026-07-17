@@ -70,37 +70,37 @@ flowchart TD
 flowchart TD
     A[Input] --> B[Pre-gain]
     B --> C[EQ Biquads]
-    C --> D["Lookahead HP + Delay Line"]
-    D --> E[LR4 Crossover]
+    C --> D["Loudness Shelf (FM compensation)"]
+    D --> E["Lookahead HP + Delay Line"]
+    E --> F[LR4 Crossover]
 
-    E --> F["LP(fc): Envelope → Smooth → Normalize"]
-    E --> G["HP(fc): Dry Path"]
+    F --> G["LP(fc): Envelope → Smooth → Normalize"]
+    F --> H["HP(fc): Dry Path"]
 
-    F --> H["Chebyshev T<sub>2</sub> + T<sub>3</sub>"]
-    H --> I[HP Filter]
+    G --> I["Chebyshev T<sub>2</sub> + T<sub>3</sub>"]
+    I --> J[HP Filter]
 
-    I --> J[Crossfade + Mix]
-    G --> J
+    J --> K[Crossfade + Mix]
+    H --> K
 
-    J --> K["Bass-sum Limiter (49 ms)"]
-    K --> L[Loudness Shelf]
+    K --> L["Bass-sum Limiter (49 ms)"]
     L --> M["Full-band Limiter (3 s)"]
     M --> N[Output]
 ```
-
 1. **Pre-gain** — applies configured pre-gain (compensates for EQ boost headroom)
 2. **EQ biquads** — cascaded peaking filters correct the speaker response
-3. **Lookahead HP + delay line** — LR4 high-pass on current sample; ring buffer tracks
+3. **Loudness shelf** — 2nd-order low-shelf biquad; Fletcher-Munson equal-loudness
+   compensation, volume-dependent (0 dB at max volume)
+4. **Lookahead HP + delay line** — LR4 high-pass on current sample; ring buffer tracks
    upcoming peak for headroom budgeting
-4. **LR4 crossover** splits the delayed signal:
+5. **LR4 crossover** splits the delayed signal:
    - **LP(fc)** → envelope follower → adaptive smoothing → normalize →
      Chebyshev T₂/T₃ harmonics → HP filter (removes DC/fundamental bleed)
    - **HP(fc)** → dry path (unprocessed high frequencies)
-5. **Crossfade** — slews between dry LP fundamental and harmonics based on
+6. **Crossfade** — slews between dry LP fundamental and harmonics based on
    headroom budget; preserves perceived loudness while limiting excursion
-6. **Bass-sum limiter** — instant attack / 49 ms release; attenuates only bass
+7. **Bass-sum limiter** — instant attack / 49 ms release; attenuates only bass
    when dry HP + bass sum would clip
-7. **Loudness shelf** — 2nd-order low-shelf biquad for volume-dependent contour
 8. **Full-band peak limiter** — instant attack / 3 s release safety net for
    aggressive overboost configurations
 
