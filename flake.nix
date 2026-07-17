@@ -22,8 +22,10 @@
               matplotlib
               fastapi
               uvicorn
+              evdev
             ]))
             pkgs.gdb
+            pkgs.libnotify
             esp-idf-esp32
           ];
           shellHook = ''

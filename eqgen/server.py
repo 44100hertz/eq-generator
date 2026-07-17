@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 PID_FILE = ROOT / "output" / "server.pid"
-
+KNOB_STATE_FILE = Path.home() / ".config" / "eqgen" / "knob_state.json"
+_knob_device = None  # set by CLI --knob-device
 # ── Bottle (lightweight, no extra deps beyond stdlib) ────────────────
 # We use Python's built-in http.server + a tiny routing layer so there
 # are zero new dependencies.  If FastAPI is installed, prefer it.
@@ -284,8 +285,7 @@ def _apply_preset_to_system(preset_name: str, task_id: str):
         # 5. Wire — kill stale processes, then setup_wiring
         subprocess.run(["pkill", "-9", "-f", "pw-cat.*--target"], capture_output=True)
         subprocess.run(["pkill", "-9", "-f", "eqgen_filter"], capture_output=True)
-        time.sleep(0.3)
-        setup_wiring(cfg, coeffs_flat)
+        setup_wiring(cfg, coeffs_flat, knob_device=_knob_device)
         logger.info("PipeWire chain restarted")
 
         result = {
@@ -494,17 +494,72 @@ def api_scan_measurements():
     """Scan measurement directories."""
     return pm.scan_measurement_dirs()
 
-
 def api_set_smart_volume(vol: int):
-    """Write a volume value (0-127) to the smart-volume control FIFO."""
+    """Write a volume value (0-127) to the smart-volume control FIFO and state file."""
+    vol = max(0, min(127, vol))
     ctrl_path = "/tmp/eqgen_sv_fifo"
+    result = {"volume": vol, "status": "ok"}
     try:
         fd = os.open(ctrl_path, os.O_WRONLY)
-        os.write(fd, bytes([max(0, min(127, vol))]))
+        os.write(fd, bytes([vol]))
         os.close(fd)
-        return {"volume": vol, "status": "ok"}
     except (FileNotFoundError, OSError) as e:
-        return {"volume": vol, "status": "no_filter", "error": str(e)}
+        result = {"volume": vol, "status": "no_filter", "error": str(e)}
+    # Always update state file so web UI and knob stay in sync
+    KNOB_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    current = {"vol": vol, "knob_enabled": True}
+    try:
+        with open(KNOB_STATE_FILE) as f:
+            current = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    current["vol"] = vol
+    with open(KNOB_STATE_FILE, "w") as f:
+        json.dump(current, f)
+    return result
+
+
+def api_get_smart_volume_state():
+    """Return current volume and knob toggle state from the shared state file."""
+    try:
+        with open(KNOB_STATE_FILE) as f:
+            s = json.load(f)
+            return {"volume": s.get("vol", 63), "knob_enabled": s.get("knob_enabled", True)}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"volume": 63, "knob_enabled": True}
+
+
+def api_toggle_knob(data: dict):
+    """Enable or disable the physical volume knob."""
+    enabled = bool(data.get("enabled", True))
+    try:
+        # Preserve current vol, just flip the toggle
+        current = api_get_smart_volume_state()
+        vol = current["volume"]
+    except Exception:
+        vol = 63
+    KNOB_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(KNOB_STATE_FILE, "w") as f:
+        json.dump({"vol": vol, "knob_enabled": enabled}, f)
+    return {"knob_enabled": enabled}
+
+
+def api_teardown_system():
+    """Run wire teardown to remove EQGen from the audio path."""
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "eqgen.cli.wire", "teardown"],
+            capture_output=True, text=True, timeout=15,
+            cwd=str(ROOT),
+        )
+        if r.returncode == 0:
+            return {"status": "ok", "output": r.stdout.strip()}
+        else:
+            return {"status": "error", "output": r.stderr.strip() or r.stdout.strip()}
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "output": "Teardown timed out"}
+    except Exception as e:
+        return {"status": "error", "output": str(e)}
 
 
 def api_run_pipeline(data: dict):
@@ -635,12 +690,24 @@ if HAS_FASTAPI:
     async def pipeline_status(task_id: str):
         return api_pipeline_status(task_id)
 
+    @app.get("/api/smart-volume")
+    async def get_smart_volume_state_ep():
+        return api_get_smart_volume_state()
+
     @app.post("/api/smart-volume")
     async def set_smart_volume_ep(request: Request):
         data = await request.json()
         vol = int(data.get("volume", 127))
         return api_set_smart_volume(vol)
 
+    @app.post("/api/knob-toggle")
+    async def toggle_knob_ep(request: Request):
+        data = await request.json()
+        return api_toggle_knob(data)
+
+    @app.post("/api/teardown")
+    async def teardown_system_ep():
+        return api_teardown_system()
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Bottle / stdlib fallback
@@ -723,12 +790,16 @@ if not HAS_FASTAPI:
                 elif p == "/api/flash" and method == "POST":
                     data = self._read_json()
                     self._send_json(api_flash_esp32(data))
+                elif p == "/api/smart-volume" and method == "GET":
+                    self._send_json(api_get_smart_volume_state())
                 elif p == "/api/smart-volume" and method == "POST":
                     data = self._read_json()
                     self._send_json(api_set_smart_volume(int(data.get("volume", 127))))
-                elif p.startswith("/api/status/") and method == "GET":
-                    task_id = p.split("/api/status/", 1)[1]
-                    self._send_json(api_pipeline_status(task_id))
+                elif p == "/api/knob-toggle" and method == "POST":
+                    data = self._read_json()
+                    self._send_json(api_toggle_knob(data))
+                elif p == "/api/teardown" and method == "POST":
+                    self._send_json(api_teardown_system())
                 else:
                     self._send_json({"error": "not found"}, 404)
             except FileNotFoundError as e:
@@ -773,8 +844,11 @@ def main():
     ap.add_argument("--no-open", action="store_true", help="Don't open browser")
     ap.add_argument("--reload", action="store_true", help="Auto-reload on code changes (FastAPI only)")
     ap.add_argument("--pid-file", default=str(PID_FILE), help=f"PID file path [{PID_FILE}]")
-
+    ap.add_argument("--knob-device", help="Input device for volume knob (e.g. /dev/input/event8)")
     args = ap.parse_args()
+    # Store for use by apply path
+    global _knob_device
+    _knob_device = args.knob_device
     pid_path = Path(args.pid_file)
     pid_path.parent.mkdir(parents=True, exist_ok=True)
 

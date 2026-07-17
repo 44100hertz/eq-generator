@@ -373,7 +373,7 @@ def _pw_node_serial(node_name):
     return None
 
 
-def setup_wiring(cfg, coeffs_flat):
+def setup_wiring(cfg, coeffs_flat, knob_device=None):
     """Create a null sink + DSP filter chain, set as default."""
 
     # Tear down any previous instance first
@@ -493,7 +493,26 @@ def setup_wiring(cfg, coeffs_flat):
         teardown_wiring()
         sys.exit(1)
 
-    print(f"  Run 'python -m eqgen.cli.wire teardown' to restore.")
+    # 6. Launch smart-volume knob bridge
+    knob_script = ROOT / "tools" / "sv_knob.py"
+    state_file = STATE_DIR / "knob_state.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text('{"vol": 63, "knob_enabled": true}')
+    print(f"\n── Launching volume knob bridge...")
+    knob_args = [sys.executable, str(knob_script),
+                 "--step", "2",
+                 "--state-file", str(state_file)]
+    knob_proc = subprocess.Popen(
+        knob_args,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    state["knob_pid"] = knob_proc.pid
+    print(f"  Knob bridge PID {knob_proc.pid}")
+
+    # 7. Persist state
+    with open(str(STATE_FILE), "w") as f:
+        json.dump(state, f, indent=2)
 
 
 def teardown_wiring():
@@ -527,12 +546,22 @@ def teardown_wiring():
                 pass
         except OSError:
             pass
+    # 2b. Kill knob bridge
+    knob_pid = state.get("knob_pid")
+    if knob_pid:
+        try:
+            os.kill(int(knob_pid), 0)
+            print(f"Stopping knob bridge (PID {knob_pid})...")
+            os.kill(int(knob_pid), signal.SIGTERM)
+            time.sleep(0.2)
+            try:
+                os.kill(int(knob_pid), signal.SIGKILL)
+            except OSError:
+                pass
+        except OSError:
+            pass
 
     # 3. Unload null sink
-    null_sink_id = state.get("null_sink_id")
-    if null_sink_id:
-        print(f"Unloading null sink #{null_sink_id}...")
-        _pactl("unload-module", str(null_sink_id))
 
     # 4. Fallback: scan for any orphaned eqgen sinks/modules
     r = _pactl("list", "modules", "short")
@@ -563,6 +592,7 @@ def main():
     # setup
     p_setup = sub.add_parser("setup", help="Measure, build, wire")
     p_setup.add_argument("preset", help="Preset name (from presets/ directory)")
+    p_setup.add_argument("--knob-device", help="Input device for volume knob (auto-detect if omitted)")
     p_setup.add_argument("--no-wire", action="store_true",
                          help="Build plugin only, don't wire to output")
 
@@ -610,7 +640,7 @@ def main():
         build_and_install()
 
         if not args.no_wire:
-            setup_wiring(cfg, coeffs_flat)
+            setup_wiring(cfg, coeffs_flat, knob_device=getattr(args, 'knob_device', None))
 
     elif args.command == "build":
         from eqgen.presets import PresetManager

@@ -101,11 +101,13 @@
   </div>
   <div id="liveBar" style="padding:8px 20px;border-bottom:1px solid var(--border);background:var(--bg);display:flex;align-items:center;gap:12px;font-size:12px">
     <span style="color:var(--muted);font-weight:600">&#x1F50A; Smart Volume</span>
-    <input type="range" id="liveSlider" min="0" max="127" value="127"
+    <input type="range" id="liveSlider" min="0" max="127" value="63"
       style="flex:1;max-width:200px;accent-color:var(--accent)"
       oninput="onLiveSlider(this.value)">
-    <span id="liveLabel" style="color:var(--accent);min-width:24px;text-align:right">127</span>
+    <span id="liveLabel" style="color:var(--accent);min-width:24px;text-align:right">63</span>
     <span id="liveStatus" style="color:var(--muted);font-size:11px"></span>
+    <button id="btnStopLive" onclick="stopSystem()" style="display:none;font-size:11px;padding:4px 10px"
+            class="danger" title="Remove EQGen from audio path">&#x23F9; Stop</button>
   </div>
   <div class="content" id="content">
     <div id="editor"></div>
@@ -375,6 +377,8 @@ async function pollApplyStatus() {
     if (result.status === 'complete') {
       btn.disabled = false;
       btn.textContent = '\u26A1 Apply to System';
+      const stopBtn = document.getElementById('btnStopLive');
+      if (stopBtn) stopBtn.style.display = '';
       const m = result.output || {};
       setStatus(`\u2705 Applied — ${m.n_bands||'?'} bands, ${result.message||''}`);
       state.applyTaskId = null;
@@ -396,14 +400,32 @@ async function pollApplyStatus() {
   }
 }
 
+async function stopSystem() {
+  const btn = document.getElementById('btnStopLive');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = '\u23F9 Stopping...';
+  setStatus('Tearing down...', 'running');
+  try {
+    const r = await api('/api/teardown', {method: 'POST'});
+    if (r.status === 'ok') {
+      setStatus('\u2705 EQGen removed from audio path');
+      btn.style.display = 'none';
+    } else {
+      setStatus('Teardown: ' + (r.output || 'unknown error'), 'error');
+    }
+  } catch(e) {
+    setStatus('Teardown failed: ' + e.message, 'error');
+  }
+  btn.disabled = false;
+  btn.textContent = '\u23F9 Stop';
+}
+
 function setStatus(msg, cls = '') {
   const bar = document.getElementById('status-bar');
   bar.textContent = typeof msg === 'string' ? msg : JSON.stringify(msg);
   bar.className = cls;
 }
-
-// ── Live smart-volume slider (sends to eqgen_filter via FIFO) ────
-
 let _svDebounce = null;
 function onLiveSlider(vol) {
   const label = document.getElementById('liveLabel');
@@ -427,6 +449,23 @@ function onLiveSlider(vol) {
       if (status) { status.textContent = '✗ ' + e.message; status.style.color = 'var(--red)'; }
     }
   }, 80);
+}
+
+// ── Poll state file for slider sync with physical knob ─────────────
+
+let _pollTimer = null;
+
+async function pollVolumeState() {
+  try {
+    const r = await api('/api/smart-volume');
+    const slider = document.getElementById('liveSlider');
+    const label = document.getElementById('liveLabel');
+    if (r.volume != null && slider && document.activeElement !== slider) {
+      slider.value = r.volume;
+      if (label) label.textContent = r.volume;
+    }
+  } catch(e) { /* ignore */ }
+  _pollTimer = setTimeout(pollVolumeState, 1000);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -815,12 +854,10 @@ window.onerror = function(msg, url, line, col, err) {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// Init
-// ═══════════════════════════════════════════════════════════════════════
-renderEditor();
 loadPresets().catch(e => setStatus('Failed to load presets: ' + e.message, 'error'));
 scanMeasurements().catch(e => setStatus('Failed to scan measurements: ' + e.message, 'error'));
 loadHouseCurves().catch(e => setStatus('Failed to load house curves: ' + e.message, 'error'));
+pollVolumeState();
 </script>
 <div class="tooltip" id="tooltip"></div>
 </body>
