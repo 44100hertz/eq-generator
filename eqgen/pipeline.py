@@ -44,7 +44,7 @@ def run_pipeline(
     noise_path: Optional[str] = None,
     bass_enhancer_cutoff: Optional[float] = None,
     sample_rate_override: Optional[float] = None,
-    smooth_exponent: float = 1.0,
+    smooth_exponent: float = 1.0,   # deprecated — no longer used (kept for caller compat)
     detailed: bool = False,
     n_eval: int = 512,
     house_curve: Optional[list] = None,
@@ -125,6 +125,17 @@ def run_pipeline(
             effective_noise = P_noise * (1.0 + cv_n)
             noise_ratio = min(0.99, effective_noise / P_meas)
             pooled[i]["cv"] = pooled[i]["cv"] / np.sqrt(max(0.01, 1.0 - noise_ratio))
+    else:
+        # No noise file \u2014 estimate noise floor from measurement itself.
+        # Bins whose power approaches the estimated noise floor get their CV
+        # inflated so the smoother downweights them.  This prevents near-zero
+        # values from demanding impossible +70 dB correction after normalisation.
+        mean_sq_vals = np.array([p["mean_sq"] for p in pooled])
+        noise_floor_est = float(np.percentile(mean_sq_vals, 5))
+        for i in range(len(pooled)):
+            P_meas = max(pooled[i]["mean_sq"], 1e-20)
+            noise_ratio = min(0.99, noise_floor_est / P_meas)
+            pooled[i]["cv"] = pooled[i]["cv"] / np.sqrt(max(0.01, 1.0 - noise_ratio))
 
     # 5. CV-weighted kernel smoothing on measurement only.
     meas_freqs = np.array([s["freq"] for s in pooled])
@@ -150,17 +161,9 @@ def run_pipeline(
         noise_cv = np.array([s["cv"] for s in noise_stats])
 
     # 6. CV-weighted kernel smoothing on uniform log-spaced grid.
-    MIN_CV = 0.52   # Rayleigh CV — the noise floor for stationary signals
-    BASE_BW = 0.08  # octaves at MIN_CV (~3 FFT bins at 400 Hz)
-    CV_PENALTY = 1.0 / 0.75  # bins with CV ≥ 0.75 (σ_dB ≈ 6.5) get zero weight
+    BASE_BW = 0.25  # octaves — wide enough to cover several FFT bins at all frequencies
 
     eval_freqs = np.logspace(np.log10(BOTTOM_F), np.log10(TOP_F), n_eval)
-
-    # Estimate local CV at each eval point to scale bandwidth
-    # (no penalty here — we need true local CV for bandwidth decisions)
-    cv_at_eval = _smooth_kernel(meas_freqs, meas_cv, meas_cv, eval_freqs,
-                                bandwidth_oct=0.3)
-    bw_meas = np.maximum(BASE_BW * (cv_at_eval / MIN_CV) ** smooth_exponent, 0.01)
 
     # Spectral subtraction (power domain — correct for uncorrelated noise)
     # Applied at raw FFT bin resolution, before smoothing.
@@ -172,13 +175,21 @@ def run_pipeline(
             noise_at_meas = 10.0 ** (np.interp(np.log10(meas_freqs),
                                                np.log10(noise_freqs),
                                                np.log10(np.maximum(noise_raw, 1e-20))) / 20.0)
-        meas_sub_raw = np.sqrt(np.maximum(meas_raw**2 - noise_at_meas**2,
-                                          meas_raw**2 * 0.0001))
+        # Spectral subtraction (power domain).  Only subtract where signal
+        # clearly exceeds noise; otherwise keep the raw value.  Subtracting
+        # when signal ≈ noise drives values toward zero, creating -120 dB
+        # cliffs that demand impossible +70 dB correction.
+        SNR_THRESHOLD = 2.0  # signal must be >2× noise (6 dB SNR) to subtract
+        safe_mask = meas_raw > noise_at_meas * SNR_THRESHOLD
+        meas_sub_raw = meas_raw.copy()
+        meas_sub_raw[safe_mask] = np.sqrt(np.maximum(
+            meas_raw[safe_mask]**2 - noise_at_meas[safe_mask]**2,
+            meas_raw[safe_mask]**2 * 0.0001))
     else:
         meas_sub_raw = meas_raw
 
     meas_vals = _smooth_kernel(meas_freqs, meas_sub_raw, meas_cv, eval_freqs,
-                               bandwidth_oct=bw_meas, cv_penalty=CV_PENALTY)
+                               bandwidth_oct=BASE_BW)
 
     # 6. Target from WAV (linear fit in dB vs log-freq) or flat 0 dB line.
     #    House curve is an additive adjustment applied on top.

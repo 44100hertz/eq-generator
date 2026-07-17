@@ -418,23 +418,55 @@ def _smooth_kernel(bin_freqs: np.ndarray, bin_values: np.ndarray,
     log_eval = np.log2(eval_freqs)
     conf = np.maximum(0.0, 1.0 / np.clip(bin_cv, 0.01, None) - cv_penalty)
 
+    min_logf = log_freqs[0]
+    max_logf = log_freqs[-1]
+
     result = np.empty(n_out)
     any_zeroed = cv_penalty > 0.0
     # Process one point at a time since bandwidth may vary per point
     for i in range(n_out):
-        d = np.abs(log_eval[i] - log_freqs)
+        le = log_eval[i]
+        d = np.abs(le - log_freqs)
         bw = float(bandwidth_oct) if scalar_bw else float(bandwidth_oct[i])
         if bw <= 0.0:
             # Zero bandwidth — nearest-bin interpolation
             j = np.argmin(d)
             result[i] = bin_values[j]
             continue
+
         d_norm = d / bw
         w_dist = np.where(d_norm < 1.0, (1.0 - d_norm ** 3) ** 3, 0.0)
+
+        # Index-clamp at boundaries: out-of-range bins get the boundary
+        # bin's value (constant extension).  Compute the missing kernel
+        # mass on each side and attribute it to the boundary bin so the
+        # weighted average sees a symmetric kernel.
+        missing_left = 0.0
+        if le - bw < min_logf:
+            d_boundary = le - min_logf  # distance from eval point to first bin
+            if d_boundary > 0:
+                # Integrate tricube over [0, d_boundary] with midpoint rule
+                n_pts = max(1, int(d_boundary / bw * 20))
+                pts = np.linspace(0, d_boundary, n_pts + 1)[:-1]
+                pts += (pts[1] - pts[0]) / 2.0 if n_pts > 1 else d_boundary / 2.0
+                missing_left = np.sum((1.0 - (pts / bw) ** 3) ** 3) * (d_boundary / n_pts)
+
+        missing_right = 0.0
+        if le + bw > max_logf:
+            d_boundary = max_logf - le
+            if d_boundary > 0:
+                n_pts = max(1, int(d_boundary / bw * 20))
+                pts = np.linspace(0, d_boundary, n_pts + 1)[:-1]
+                pts += (pts[1] - pts[0]) / 2.0 if n_pts > 1 else d_boundary / 2.0
+                missing_right = np.sum((1.0 - (pts / bw) ** 3) ** 3) * (d_boundary / n_pts)
+
         w = w_dist * conf
-        w_sum = w.sum()
+        w_sum = w.sum() + missing_left * conf[0] + missing_right * conf[-1]
         if w_sum > 0:
-            result[i] = np.average(bin_values, weights=w)
+            num = np.sum(bin_values * w)
+            num += missing_left * conf[0] * bin_values[0]
+            num += missing_right * conf[-1] * bin_values[-1]
+            result[i] = num / w_sum
         elif any_zeroed:
             # All bins within reach have zero confidence — bridge via interpolation
             result[i] = np.nan
