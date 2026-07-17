@@ -67,27 +67,25 @@ flowchart TD
 ### DSP core (runs identically on desktop and ESP32)
 
 ```mermaid
-flowchart LR
+flowchart TD
     A[Input] --> B[Pre-gain]
     B --> C[EQ Biquads]
     C --> D["Lookahead HP + Delay Line"]
     D --> E[LR4 Crossover]
 
-    E --> F["LP(fc): Envelope Follower"]
-    E --> G["HP(fc): Dry Path (bypass)"]
+    E --> F["LP(fc): Envelope → Smooth → Normalize"]
+    E --> G["HP(fc): Dry Path"]
 
-    F --> H[Adaptive Smooth]
-    H --> I[Normalize]
-    I --> J["Chebyshev T<sub>2</sub> + T<sub>3</sub>"]
-    J --> K[HP Filter]
+    F --> H["Chebyshev T<sub>2</sub> + T<sub>3</sub>"]
+    H --> I[HP Filter]
 
-    K --> L[Crossfade + Mix]
-    G --> L
+    I --> J[Crossfade + Mix]
+    G --> J
 
-    L --> M["Bass-sum Limiter (49 ms release)"]
-    M --> N[Loudness Shelf]
-    N --> O["Full-band Limiter (3 s release)"]
-    O --> P[Output]
+    J --> K["Bass-sum Limiter (49 ms)"]
+    K --> L[Loudness Shelf]
+    L --> M["Full-band Limiter (3 s)"]
+    M --> N[Output]
 ```
 
 1. **Pre-gain** — applies configured pre-gain (compensates for EQ boost headroom)
