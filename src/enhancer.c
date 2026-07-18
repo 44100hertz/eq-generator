@@ -188,10 +188,14 @@ void dsp_pipe_cfg_set_loudness(DspPipeCfg *cfg,
 
 void dsp_pipe_update_params(DspPipe *enh,
                                 float pre_gain,
-                                float loudness_boost)
+                                float loudness_boost,
+                                float push_gain)
 {
     if (!isnan(pre_gain)) {
         enh->cfg.pre_gain = pre_gain;
+    }
+    if (!isnan(push_gain)) {
+        enh->cfg.push_gain = push_gain;
     }
     if (!isnan(loudness_boost)) {
         /* Convert (G-1) back to dB and recompute biquad coefficients */

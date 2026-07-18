@@ -203,7 +203,8 @@ def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
                        target_path=None, fc=60.0,
                        max_bands=MAX_IIR_BANDS, smooth_exponent=1.0,
                        target_fs=None, bluetooth_id=None,
-                       house_curve=None, overboost_db=0.0):
+                       house_curve=None, overboost_db=0.0,
+                       power_save=0.0):
     """Run pipeline + IIR fit at both 44100 and 48000, return biquads and config."""
     if speaker_name:
         meas_dir = MEAS_DIR / speaker_name
@@ -281,13 +282,15 @@ def run_full_pipeline(speaker_name=None, meas_paths=None, noise_path=None,
         bands_44 = []
         bands_48 = []
         pre_gain = 1.0
+    # push_gain floor from power_save: 0 → 1.0 (off), 1 → 0.1 (-20dB, max save)
+    push_gain_floor = 10.0 ** ((power_save * -20.0) / 20.0)
 
     cfg = {
         "cutoff_hz": fc,
         "h2_amp": efficacy["h2_amp"],
         "h3_amp": efficacy["h3_amp"],
         "release_secs": 0.2,
-        "push_gain": 1.0,
+        "push_gain": push_gain_floor,
         "overboost_db": overboost_db,
         "pre_gain": pre_gain,
         "fs": float(fs),
@@ -624,7 +627,7 @@ def main():
             max_bands=preset.max_bands,
             bluetooth_id=preset.bluetooth_id or None,
             house_curve=get_house_curve(preset.house_curve) if preset.house_curve else None,
-        )
+            power_save=preset.power_save)
 
         eq_freqs, biquads_44, biquads_48, bands_44, bands_48, cfg, coeffs_flat = result
         cfg["release_secs"] = preset.release
@@ -657,7 +660,7 @@ def main():
             max_bands=preset.max_bands,
             bluetooth_id=preset.bluetooth_id or None,
             house_curve=get_house_curve(preset.house_curve) if preset.house_curve else None,
-        )
+            power_save=preset.power_save)
         eq_freqs, biquads_44, biquads_48, bands_44, bands_48, cfg, coeffs_flat = result
         cfg["release_secs"] = preset.release
         generate_eq_header(biquads_44, biquads_48, bands_44, bands_48, cfg,

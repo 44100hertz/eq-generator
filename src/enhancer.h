@@ -149,11 +149,11 @@ void dsp_pipe_cfg_set_loudness(DspPipeCfg *cfg,
                                   float boost_db);
 
 /** Update runtime parameters without resetting filter state.
- *  h2_amp, h3_amp are set once via cfg and
- *  never changed at runtime.  Pass NaN to leave unchanged. */
+ *  Pass NaN to leave unchanged. */
 void dsp_pipe_update_params(DspPipe *enh,
                                 float pre_gain,
-                                float loudness_boost);
+                                float loudness_boost,
+                                float push_gain);
 
 /** Initialize DspPipeCfg from user-friendly parameters.
  *  Designs all LP/HP filters and pre-computes coefficients. */

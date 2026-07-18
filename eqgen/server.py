@@ -262,7 +262,7 @@ def _apply_preset_to_system(preset_name: str, task_id: str):
             bluetooth_id=preset.bluetooth_id or None,
             house_curve=curve_data,
             overboost_db=preset.overboost_db,
-        )
+            power_save=preset.power_save)
         cfg["release_secs"] = preset.release
 
         # 3. Generate eq_coeffs.h + sfx_data.h
@@ -366,7 +366,7 @@ def _flash_esp32(preset_name: str, task_id: str):
             bluetooth_id=preset.bluetooth_id or None,
             house_curve=curve_data,
             overboost_db=preset.overboost_db,
-        )
+            power_save=preset.power_save)
         cfg["release_secs"] = preset.release
 
         # Guard: verify pipeline didn't produce more bands than the ESP can handle.

@@ -5,7 +5,7 @@
     "measurements/technics/standing/measurement2.wav"
   ],
   "target": "measurements/technics/standing/target.wav",
-  "house_curve": "midsize-bright",
+  "house_curve": "technics",
   "noise": "measurements/technics/standing/noise2.wav",
   "fc": 70,
   "max_bands": 32,

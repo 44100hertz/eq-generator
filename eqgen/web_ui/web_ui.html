@@ -508,6 +508,7 @@ function readForm() {
     bluetooth_id: document.getElementById('fBtId')?.value || '',
     speaker_level: intVal('fSpkLevel', 60),
     overboost_db: numVal('fOverboost', 0.0),
+    power_save: numVal('fPowerSave', 0.0),
     high_rolloffs: [],
     low_rolloffs: [],
   };
@@ -574,8 +575,8 @@ function renderEditor() {
       <div class="form-group"><label>Smooth Exponent</label><input id="fSmooth" type="number" step="0.1" min="0" max="4" value="${p.smooth_exponent ?? 1.0}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Release (s)</label><input id="fRelease" type="number" step="0.01" min="0.01" max="2" value="${p.release ?? 0.2}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Bluetooth ID</label><input id="fBtId" value="${esc(p.bluetooth_id || '')}" placeholder="e.g. Living Room Speaker" oninput="scheduleAnalyze()"></div>
-      <div class="form-group"><label>Speaker Level (dB)</label><input id="fSpkLevel" type="number" step="1" min="20" max="100" value="${p.speaker_level ?? 60}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Overboost (dB)</label><input id="fOverboost" type="number" step="0.5" min="0" max="12" value="${p.overboost_db ?? 0}" oninput="scheduleAnalyze()"></div>
+      <div class="form-group"><label>Power Save</label><input id="fPowerSave" type="range" step="0.05" min="0" max="1" value="${p.power_save ?? 0}" oninput="document.getElementById('fPowerSavePct').textContent = Math.round(this.value * 100) + '%'; scheduleAnalyze()"><span id="fPowerSavePct" style="font-size:11px;color:var(--muted)">${Math.round((p.power_save ?? 0) * 100)}%</span></div>
     </div>
   `;
 }
@@ -626,7 +627,7 @@ function onHouseCurveChange() {
 }
 
 function newPreset() {
-  state.activePreset = { name: 'new-preset', measurements: [], target: '', house_curve: 'flat', fc: 60, max_bands: __MAX_IIR_BANDS__, smooth_exponent: 1.0, release: 0.2, bluetooth_id: '', speaker_level: 60, overboost_db: 0 };
+  state.activePreset = { name: 'new-preset', measurements: [], target: '', house_curve: 'flat', fc: 60, max_bands: __MAX_IIR_BANDS__, smooth_exponent: 1.0, release: 0.2, bluetooth_id: '', speaker_level: 60, overboost_db: 0, power_save: 0 };
   state.pipelineResult = null;
   document.getElementById('results').innerHTML = '';
   document.getElementById('presetList').querySelectorAll('.active').forEach(el => el.classList.remove('active'));

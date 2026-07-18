@@ -48,6 +48,7 @@ class Preset:
     overboost_db: float = 0.0            # extra gain at vol=127 to drive harmonics
     high_rolloffs: List[List[float]] = field(default_factory=list)
     low_rolloffs: List[List[float]] = field(default_factory=list)
+    power_save: float = 0.0              # 0=off (home audio), 1=max battery save
     pre_gain: Optional[float] = None     # computed pre-gain override
 
     def to_dict(self) -> dict:

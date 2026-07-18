@@ -53,7 +53,13 @@ static inline SmartVolumeParams volume_set(uint8_t vol,
     SmartVolumeParams svp;
     smart_volume_compute(vol, pg_loud, &svp);
 
-    dsp_pipe_update_params(enh, svp.pre_gain, svp.boost);
+    /* push_gain ramps from floor (compile-time) to 1.0 at max volume.
+     * At vol=0: push_gain = floor (max power saving).
+     * At vol=127: push_gain = 1.0 (full fundamental, show off the speaker). */
+    float t = (float)vol / 127.0f;
+    float push_gain_v = EQGEN_PUSH_GAIN + (1.0f - EQGEN_PUSH_GAIN) * t;
+
+    dsp_pipe_update_params(enh, svp.pre_gain, svp.boost, push_gain_v);
 
     smart_volume_rebuild_lut(vol_lut, 0.0f,
                              EQGEN_SPEAKER_LEVEL_DB,
