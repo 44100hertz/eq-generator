@@ -260,6 +260,7 @@ def compute_clip_threshold(
     pre_gain: float,
     fs: float = 44100.0,
     nominal_amp: float = 1.0,
+    spectral_weight: Optional[callable] = None,
 ) -> Tuple[float, float]:
     """Find overboost dB where dry_hp exceeds 1.0 (hard clip).
 
@@ -269,14 +270,49 @@ def compute_clip_threshold(
     The bass-sum limiter cannot protect this path — only bass gets
     ducked.  When dry_hp alone exceeds 1.0, the output hard-clips.
 
-    Sweeps fc to fs/2 and returns (clip_threshold_db, worst_freq_hz).
-    A return of inf means the treble path never clips even at extreme
+    By default, sweeps fc to fs/2 with a 0 dBFS sine at each frequency
+    (worst-case: all energy concentrated in one bin) and returns
+    (clip_threshold_db, worst_freq_hz).
+
+    If spectral_weight(f) is provided, models a broadband music signal
+    whose amplitude spectrum follows spectral_weight.  The crest factor
+    cancels out (input and output share the same peak/RMS ratio through
+    a linear path), so the threshold is derived from the RMS gain:
+
+        H_rms = sqrt( Σ(W(f)·H(f))² / Σ(W(f))² )
+
+    where H(f) = pre_gain · |EQ(f)| · |HP(f)|.  This is the expected
+    peak gain for music whose spectral envelope matches W(f).
+
+    A return of inf means the path never clips even at extreme
     overboost.
     """
-    if not coeffs:
-        # No EQ — just pre_gain through HP crossover (→ 1.0 at high f)
+    if fc <= 0:
+        # No HP crossover — hp_gain = 1.0 at all frequencies.
+        if not coeffs:
+            max_gain = pre_gain
+            worst_freq = fs / 2.0
+        else:
+            from eqgen.eq_fit import BiquadCoeffs, cascade_response
+            biquads = []
+            for i in range(0, len(coeffs), 5):
+                biquads.append(BiquadCoeffs(
+                    b0=float(coeffs[i]), b1=float(coeffs[i + 1]),
+                    b2=float(coeffs[i + 2]),
+                    a1=float(coeffs[i + 3]), a2=float(coeffs[i + 4]),
+                ))
+            freqs = np.logspace(np.log10(20.0), np.log10(fs / 2.0), 300)
+            eq_mags = cascade_response(biquads, freqs, fs)
+            H = pre_gain * eq_mags
+            max_gain = float(np.max(H))
+            worst_freq = float(freqs[np.argmax(H)])
+        H = np.array([max_gain])
+        freqs = np.array([worst_freq])
+    elif not coeffs:
         max_gain = pre_gain
         worst_freq = fc * 4.0
+        H = np.array([pre_gain * lr4_hp_mag(worst_freq, fc)])
+        freqs = np.array([worst_freq])
     else:
         from eqgen.eq_fit import BiquadCoeffs, cascade_response
         biquads = []
@@ -289,15 +325,17 @@ def compute_clip_threshold(
 
         freqs = np.logspace(np.log10(fc), np.log10(fs / 2.0), 300)
         eq_mags = cascade_response(biquads, freqs, fs)
+        H = pre_gain * eq_mags * np.array([lr4_hp_mag(f, fc) for f in freqs])
 
-        max_gain = 0.0
-        worst_freq = fc
-        for i, f in enumerate(freqs):
-            hp_gain = lr4_hp_mag(f, fc)
-            total = pre_gain * float(eq_mags[i]) * hp_gain
-            if total > max_gain:
-                max_gain = total
-                worst_freq = f
+        max_gain = float(np.max(H))
+        worst_freq = float(freqs[np.argmax(H)])
+
+    if spectral_weight is not None:
+        W = np.array([spectral_weight(f) for f in freqs])
+        sum_w2 = np.sum(W ** 2)
+        if sum_w2 > 0:
+            rms_gain = np.sqrt(np.sum((W * H) ** 2) / sum_w2)
+            max_gain = rms_gain
 
     max_vol_gain = 1.0 / (nominal_amp * max_gain)
     if max_vol_gain < 1.0:
