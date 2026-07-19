@@ -5,15 +5,16 @@
     "measurements/cardboard/response.wav"
   ],
   "target": "measurements/cardboard/target.wav",
-  "house_curve": "harman",
+  "house_curve": "cardboard",
   "noise": "measurements/cardboard/noise.wav",
   "fc": 45,
-  "max_bands": 24,
+  "max_bands": 16,
   "smooth_exponent": 1,
   "release": 0.2,
-  "limiter_release": 0.049,
   "bluetooth_id": "KEN\u00b7RAD LongBoom",
-  "speaker_level": 40,
+  "speaker_level": 60,
+  "overboost_db": 0,
   "high_rolloffs": [],
-  "low_rolloffs": []
+  "low_rolloffs": [],
+  "power_save": 0
 }

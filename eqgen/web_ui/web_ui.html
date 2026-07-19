@@ -36,8 +36,10 @@
   #main .toolbar { padding: 12px 20px; border-bottom: 1px solid var(--border);
                    display: flex; align-items: center; gap: 12px; background: var(--surface); }
   #main .toolbar h2 { font-size: 16px; flex: 1; }
-  #main .content { flex: 1; overflow-y: auto; padding: 20px; }
-  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-width: 800px; }
+  #main .content { flex: 1; overflow-y: auto; padding: 20px; display: flex; gap: 20px; }
+  #editor-col { flex: 0 0 400px; min-width: 300px; overflow-y: auto; }
+  #results-col { flex: 1; min-width: 0; overflow-y: auto; }
+  .form-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
   .form-group { display: flex; flex-direction: column; gap: 4px; }
   .form-group.full { grid-column: 1 / -1; }
   .form-group label { font-size: 11px; color: var(--muted); text-transform: uppercase;
@@ -110,8 +112,8 @@
             class="danger" title="Remove EQGen from audio path">&#x23F9; Stop</button>
   </div>
   <div class="content" id="content">
-    <div id="editor"></div>
-    <div id="results"></div>
+    <div id="editor-col"><div id="editor"></div></div>
+    <div id="results-col"><div id="results"></div></div>
   </div>
   <div id="status-bar">Ready</div>
 </div>
@@ -575,6 +577,7 @@ function renderEditor() {
       <div class="form-group"><label>Smooth Exponent</label><input id="fSmooth" type="number" step="0.1" min="0" max="4" value="${p.smooth_exponent ?? 1.0}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Release (s)</label><input id="fRelease" type="number" step="0.01" min="0.01" max="2" value="${p.release ?? 0.2}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Bluetooth ID</label><input id="fBtId" value="${esc(p.bluetooth_id || '')}" placeholder="e.g. Living Room Speaker" oninput="scheduleAnalyze()"></div>
+      <div class="form-group"><label>Speaker Level (dB FS)</label><input id="fSpkLevel" type="number" step="1" min="20" max="120" value="${p.speaker_level ?? 60}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Overboost (dB)</label><input id="fOverboost" type="number" step="0.5" min="0" max="12" value="${p.overboost_db ?? 0}" oninput="scheduleAnalyze()"></div>
       <div class="form-group"><label>Power Save</label><input id="fPowerSave" type="range" step="0.05" min="0" max="1" value="${p.power_save ?? 0}" oninput="document.getElementById('fPowerSavePct').textContent = Math.round(this.value * 100) + '%'; scheduleAnalyze()"><span id="fPowerSavePct" style="font-size:11px;color:var(--muted)">${Math.round((p.power_save ?? 0) * 100)}%</span></div>
     </div>
