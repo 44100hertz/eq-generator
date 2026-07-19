@@ -5,7 +5,7 @@
     "measurements/technics/standing/measurement2.wav"
   ],
   "target": "measurements/technics/standing/target.wav",
-  "house_curve": "technics",
+  "house_curve": "flat",
   "noise": "measurements/technics/standing/noise2.wav",
   "fc": 70,
   "max_bands": 32,
@@ -15,5 +15,6 @@
   "speaker_level": 60,
   "overboost_db": 12,
   "high_rolloffs": [],
-  "low_rolloffs": []
+  "low_rolloffs": [],
+  "power_save": 0
 }

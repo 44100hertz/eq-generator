@@ -34,7 +34,6 @@
 #include "bt_a2dp.h"
 #include "i2s_out.h"
 #include "sfx_data.h"
-#include "rom/ets_sys.h"
 
 static const char *TAG = "eqgen";
 
@@ -108,66 +107,17 @@ static void dsp_init(int rate)
              (double)EQGEN_H2_AMP, (double)EQGEN_H3_AMP);
 }
 
-/* ── SFX playback helper ────────────────────────────────────────── */
-
-#define SFX_BATCH 256  /* stereo frames per DMA write */
-#define SFX_FADE   200  /* samples to fade in/out */
 
 /* ── I2S batch write: accumulate into buffer, flush in chunks.
  *   Reduces i2s_channel_write calls from ~44k/sec to ~344/sec. ── */
 #define BATCH_SIZE  256  /* stereo frames per I2S flush */
+#define SFX_FADE    200  /* samples to fade in/out */
 
-static void play_sfx(const int16_t *mono, uint32_t n_samples, int rate)
-{
-    int16_t stereo[SFX_BATCH * 2];
-
-    uint8_t vol = bt_a2dp_get_volume();
-    float vol_f = volume_gain(vol_lut, vol);   /* dB-linear LUT — same as audio path */
-
-    /* Cap SFX to prevent blasting on high-gain speakers.
-     * SFX never plays louder than -(speaker_level - 20) dB FS. */
-    float sfx_cap_linear = powf(10.0f, -(EQGEN_SPEAKER_LEVEL_DB - 20.0f) / 20.0f);
-    vol_f = fminf(vol_f, sfx_cap_linear);
-
-    for (uint32_t off = 0; off < n_samples; off += SFX_BATCH) {
-        uint32_t chunk = SFX_BATCH;
-        if (off + chunk > n_samples) chunk = n_samples - off;
-
-        for (uint32_t i = 0; i < chunk; i++) {
-            float s = (float)mono[off + i] / 32768.0f;  /* int16 → float */
-
-            /* Apply enhancer pre-gain so SFX level tracks audio level.
-             * Audio goes through pre_gain → EQ → mix → LUT.
-             * SFX bypasses the enhancer, so we apply both here. */
-#ifdef EQGEN_PRE_GAIN
-            s *= EQGEN_PRE_GAIN;
-#else
-            s *= 0.5f;   /* −6 dB headroom fallback */
-#endif
-
-            /* Fade in/out */
-            uint32_t pos = off + i;
-            if (pos < SFX_FADE) {
-                s *= (float)pos / (float)SFX_FADE;
-            } else if (pos >= n_samples - SFX_FADE) {
-                s *= (float)(n_samples - 1 - pos) / (float)SFX_FADE;
-            }
-
-            /* Apply BT system volume */
-            s *= vol_f;
-
-            /* Clamp and convert to int16 */
-            int32_t si = (int32_t)(s * 32768.0f);
-            if (si >  32767) si =  32767;
-            if (si < -32768) si = -32768;
-
-            stereo[i * 2]     = (int16_t)si;
-            stereo[i * 2 + 1] = (int16_t)si;
-        }
-        i2s_out_write(stereo, chunk, NULL);
-    }
-    (void)rate;
-}
+/* ── SFX playback state (non-blocking; mixed into DSP output) ── */
+static const int16_t *sfx_data = NULL;
+static uint32_t        sfx_pos = 0;
+static uint32_t        sfx_len = 0;
+static float           sfx_gain = 1.0f;
 
 /* ────────────────────────────────────────────────────────────────
  *  Audio data callback — called from the dsp_i2s task
@@ -185,37 +135,52 @@ static void bt_event_handler(bt_event_t event)
 
 static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
 {
-    /* ── Play pending SFX before anything else ── */
+    /* ── Error feedback state for float→int16 noise shaping ── */
+    static float  l_err = 0.0f, r_err = 0.0f;
+
+    /* ── Init I2S and DSP early — needed before SFX or audio ── */
+    if (rate != i2s_rate) {
+        i2s_out_init(rate);
+        i2s_rate = rate;
+    }
+    if (rate != dsp_rate) {
+        dsp_init(rate);
+    }
+
+    /* ── Start pending SFX (non-blocking state setup) ── */
     if (sfx_pending) {
         int64_t age_ms = ((int64_t)esp_timer_get_time() / 1000) - (int64_t)sfx_event_ms;
         if (age_ms >= 200) {
             int pending = sfx_pending;
             sfx_pending = 0;
 
-            int play_rate = (i2s_rate > 0) ? i2s_rate : rate;
-            if (play_rate != i2s_rate) {
-                i2s_out_init(play_rate);
-                i2s_rate = play_rate;
-            }
+            /* Cap SFX volume at 50% (64/127) to avoid blasting
+             * the user at high gain before they can adjust. */
+            uint8_t vol = bt_a2dp_get_volume();
+            if (vol > 64) vol = 64;
+            sfx_gain = volume_gain(vol_lut, vol);
 
 #ifdef SFX_CONNECTED_SAMPLES
             if (pending & 1) {
-                play_sfx(sfx_connected, SFX_CONNECTED_SAMPLES, play_rate);
+                sfx_data = sfx_connected;
+                sfx_pos  = 0;
+                sfx_len  = SFX_CONNECTED_SAMPLES;
             }
 #endif
 #ifdef SFX_DISCONNECTED_SAMPLES
             if (pending & 2) {
-                play_sfx(sfx_disconnected, SFX_DISCONNECTED_SAMPLES, play_rate);
+                sfx_data = sfx_disconnected;
+                sfx_pos  = 0;
+                sfx_len  = SFX_DISCONNECTED_SAMPLES;
             }
 #endif
         }
     }
 
-    /* ── Error feedback state for float→int16 noise shaping ── */
-    static float  l_err = 0.0f, r_err = 0.0f;
+    /* ── Determine frames to process ── */
+    bool sfx_active = (sfx_data != NULL && sfx_pos < sfx_len);
 
-    /* No audio data — 50ms poll tick for events */
-    if (len == 0) {
+    if (len == 0 && !sfx_active) {
         audio_streaming = false;
         return;
     }
@@ -230,13 +195,19 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
         ESP_LOGI(TAG, "Stream start — enhancer state reset");
     }
 
-    /* Re-init I2S and DSP if sample rate changed */
-    if (rate != i2s_rate) {
-        i2s_out_init(rate);
-        i2s_rate = rate;
-    }
-    if (rate != dsp_rate) {
-        dsp_init(rate);
+    /* When len==0 but SFX is active, process silence through DSP
+     * at full rate so the I2S DMA stays fed and DSP stays warm.
+     * This blocks the task for the SFX duration, but only when
+     * no audio is streaming — the stream buffer is empty, so
+     * no data loss occurs. */
+    uint32_t frames;
+    const int16_t *in;
+    if (len > 0) {
+        frames = len / 4;
+        in = (const int16_t *)data;
+    } else {
+        frames = sfx_len - sfx_pos;  /* play remaining SFX at full rate */
+        in = NULL;                    /* NULL → use zeros */
     }
 
     /* ── DSP processing ── */
@@ -244,9 +215,6 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
     uint32_t cy_cb_start = esp_cpu_get_cycle_count();
     uint32_t cy_convert = 0, cy_enhancer = 0, cy_output = 0;
 #endif
-
-    const int16_t *in = (const int16_t *)data;
-    uint32_t frames = len / 4;   /* 2 channels × 2 bytes */
 
     uint8_t vol = bt_a2dp_get_volume();
     if (vol != last_vol) {
@@ -263,9 +231,15 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
 #ifdef EQGEN_PROFILE
         uint32_t cy_p0 = esp_cpu_get_cycle_count();
 #endif
-        /* int16 → float [-1, 1] */
-        float l = (float)in[i * 2]     / 32768.0f;
-        float r = (float)in[i * 2 + 1] / 32768.0f;
+        /* int16 → float [-1, 1] (or silence if no audio) */
+        float l, r;
+        if (in) {
+            l = (float)in[i * 2]     / 32768.0f;
+            r = (float)in[i * 2 + 1] / 32768.0f;
+        } else {
+            l = 0.0f;
+            r = 0.0f;
+        }
 
         /* Apply BT system volume before enhancer so the limiter
          * only engages at high volumes. */
@@ -276,6 +250,28 @@ static void audio_data_handler(const uint8_t *data, uint32_t len, int rate)
         uint32_t cy_p1 = esp_cpu_get_cycle_count();
 #endif
         dsp_pipe_process_stereo(&enhancer, &l, &r);
+
+        /* ── Mix SFX into DSP output ── */
+        if (sfx_active) {
+            float s = (float)sfx_data[sfx_pos] / 32768.0f;
+
+            /* Fade in/out to prevent clicks */
+            if (sfx_pos < SFX_FADE) {
+                s *= (float)sfx_pos / (float)SFX_FADE;
+            } else if (sfx_pos >= sfx_len - SFX_FADE) {
+                s *= (float)(sfx_len - 1 - sfx_pos) / (float)SFX_FADE;
+            }
+
+            s *= sfx_gain;
+            l += s;
+            r += s;
+
+            sfx_pos++;
+            if (sfx_pos >= sfx_len) {
+                sfx_data = NULL;
+                sfx_active = false;
+            }
+        }
 
 #ifdef EQGEN_PROFILE
         uint32_t cy_p2 = esp_cpu_get_cycle_count();

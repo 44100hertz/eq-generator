@@ -66,6 +66,7 @@ void bt_a2dp_sink_init(const char *device_name, bt_a2dp_data_cb_t data_cb);
  *  Call before bt_a2dp_sink_init().  The callback runs in
  *  the Bluedroid task context — do not block.
  */
+
 void bt_a2dp_set_event_callback(bt_event_cb_t cb);
 
 #ifdef __cplusplus
